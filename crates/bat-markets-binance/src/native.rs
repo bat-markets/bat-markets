@@ -202,8 +202,8 @@ pub struct AccountPosition {
     pub symbol: String,
     #[serde(rename = "pa")]
     pub position_amount: String,
-    #[serde(rename = "ep")]
-    pub entry_price: String,
+    #[serde(default, rename = "ep")]
+    pub entry_price: Option<String>,
     #[serde(rename = "up")]
     pub unrealized_pnl: String,
     #[serde(rename = "mt")]
@@ -238,13 +238,20 @@ pub struct AccountPositionSnapshot {
     pub symbol: String,
     #[serde(rename = "positionAmt")]
     pub position_amount: String,
-    #[serde(rename = "entryPrice")]
-    pub entry_price: String,
-    #[serde(rename = "unrealizedProfit")]
-    pub unrealized_profit: String,
-    pub leverage: String,
-    #[serde(rename = "marginType")]
-    pub margin_type: String,
+    #[serde(default, rename = "entryPrice")]
+    pub entry_price: Option<String>,
+    #[serde(default, rename = "unrealizedProfit")]
+    pub unrealized_profit: Option<String>,
+    #[serde(default)]
+    pub leverage: Option<String>,
+    #[serde(default, rename = "marginType")]
+    pub margin_type: Option<String>,
+    #[serde(default)]
+    pub isolated: Option<bool>,
+    #[serde(default, rename = "isolatedMargin")]
+    pub isolated_margin: Option<String>,
+    #[serde(default, rename = "isolatedWallet")]
+    pub isolated_wallet: Option<String>,
     #[serde(rename = "positionSide")]
     pub position_side: String,
 }

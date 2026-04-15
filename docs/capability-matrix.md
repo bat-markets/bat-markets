@@ -38,8 +38,9 @@ This matrix documents the current `0.1.x` futures-first surface after live trans
 ## Honest Limits
 
 - Command writes do not pretend transport errors are harmless: they return `UnknownExecution` receipts and trigger reconcile attempts.
-- Reconcile now repairs balances, positions, open orders, and recent execution evidence, and recent-history repair batches pending `UnknownExecution` checks per instrument instead of repeating identical REST calls.
+- Reconcile now repairs balances, positions, open orders, and recent execution evidence; it first resolves pending `UnknownExecution` outcomes from local state, then recent-history repair batches the remaining checks per instrument instead of repeating identical REST calls.
 - Periodic private reconcile now stays snapshot-only for simple freshness maintenance and escalates to recent-history repair only when uncertainty or divergence signals are present.
+- Heavy reconcile prefetches recent execution history only for local active/recent instruments when the trigger or health state points to a private gap or divergence.
 - Recent-history repair now uses bounded time windows derived from local private-state timestamps and pending uncertainty instead of unbounded symbol-level history pulls.
 - Reconcile still does not rebuild a full historical ledger.
 - Live sandbox tests are env-gated and write flows require an explicit manual gate.

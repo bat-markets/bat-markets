@@ -80,6 +80,12 @@ enum PrivateReconcileMode {
     RecentHistoryRepair,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ExecutionRepairScope {
+    PendingUnknownOnly,
+    LocalEvidence,
+}
+
 const HISTORY_REPAIR_REWIND_MS: i64 = 60_000;
 const HISTORY_REPAIR_MAX_LOOKBACK_MS: i64 = 7 * 24 * 60 * 60 * 1_000;
 
@@ -982,7 +988,12 @@ pub(crate) async fn reconcile_private(
         match mode {
             PrivateReconcileMode::SnapshotOnly => Ok::<usize, MarketError>(0),
             PrivateReconcileMode::RecentHistoryRepair => {
-                let _ = refresh_executions(context, None).await?;
+                if matches!(
+                    execution_repair_scope(trigger, &context.shared.health_snapshot()),
+                    ExecutionRepairScope::LocalEvidence
+                ) {
+                    refresh_execution_repair_evidence(context).await?;
+                }
                 let unresolved = resolve_pending_unknown_commands(context).await?;
                 Ok::<usize, MarketError>(unresolved)
             }
@@ -1077,6 +1088,34 @@ fn needs_recent_history_repair(health: &HealthReport, pending_unknown_count: usi
                 | DegradedReason::StateDivergence
         )
     )
+}
+
+fn execution_repair_scope(
+    trigger: ReconcileTrigger,
+    health: &HealthReport,
+) -> ExecutionRepairScope {
+    match trigger {
+        ReconcileTrigger::Manual | ReconcileTrigger::Reconnect | ReconcileTrigger::SequenceGap => {
+            ExecutionRepairScope::LocalEvidence
+        }
+        ReconcileTrigger::UnknownExecution => ExecutionRepairScope::PendingUnknownOnly,
+        ReconcileTrigger::Periodic => {
+            if health.state_divergence
+                || matches!(
+                    health.degraded_reason,
+                    Some(
+                        DegradedReason::PrivateStreamGap
+                            | DegradedReason::ReconcileRequired
+                            | DegradedReason::StateDivergence
+                    )
+                )
+            {
+                ExecutionRepairScope::LocalEvidence
+            } else {
+                ExecutionRepairScope::PendingUnknownOnly
+            }
+        }
+    }
 }
 
 pub(crate) async fn spawn_public_stream(
@@ -2033,7 +2072,11 @@ async fn execution_specs(
 }
 
 async fn resolve_pending_unknown_commands(context: &LiveContext) -> Result<usize> {
-    let pending = context.runtime_state.pending_unknown_commands().await;
+    let pending = resolve_pending_from_local_state(
+        context,
+        context.runtime_state.pending_unknown_commands().await,
+    )
+    .await;
     if pending.is_empty() {
         return Ok(0);
     }
@@ -2061,7 +2104,23 @@ async fn resolve_pending_unknown_commands(context: &LiveContext) -> Result<usize
         }
     }
 
+    unresolved = resolve_pending_from_local_state(context, unresolved).await;
+    if unresolved.is_empty() {
+        context
+            .runtime_state
+            .replace_pending_unknown_commands(Vec::new())
+            .await;
+        return Ok(0);
+    }
+
     unresolved = resolve_pending_from_recent_order_history(context, unresolved).await?;
+    if unresolved.is_empty() {
+        context
+            .runtime_state
+            .replace_pending_unknown_commands(Vec::new())
+            .await;
+        return Ok(0);
+    }
     unresolved = resolve_pending_from_recent_execution_history(context, unresolved).await?;
 
     let unresolved_len = unresolved.len();
@@ -2070,6 +2129,69 @@ async fn resolve_pending_unknown_commands(context: &LiveContext) -> Result<usize
         .replace_pending_unknown_commands(unresolved)
         .await;
     Ok(unresolved_len)
+}
+
+async fn refresh_execution_repair_evidence(context: &LiveContext) -> Result<()> {
+    let mut evidence = context.shared.read(|state| {
+        let mut instrument_ids = BTreeMap::<InstrumentId, Vec<PendingUnknownCommand>>::new();
+        for position in state.positions() {
+            instrument_ids
+                .entry(position.instrument_id.clone())
+                .or_default();
+        }
+        for order in state.open_orders() {
+            instrument_ids
+                .entry(order.instrument_id.clone())
+                .or_default();
+        }
+        for execution in state.executions() {
+            instrument_ids
+                .entry(execution.instrument_id.clone())
+                .or_default();
+        }
+        instrument_ids
+    });
+
+    for (instrument_id, commands) in
+        pending_by_instrument(context.runtime_state.pending_unknown_commands().await)
+    {
+        evidence.entry(instrument_id).or_default().extend(commands);
+    }
+
+    for (instrument_id, pending) in evidence {
+        if context
+            .adapter
+            .as_adapter()
+            .resolve_instrument(&instrument_id)
+            .is_none()
+        {
+            continue;
+        }
+        let executions =
+            refresh_recent_execution_history(context, &instrument_id, &pending).await?;
+        context.shared.write(|state| {
+            if !executions.is_empty() {
+                state.merge_executions(executions.clone());
+            }
+            state.mark_rest_success(None);
+        });
+    }
+
+    Ok(())
+}
+
+async fn resolve_pending_from_local_state(
+    context: &LiveContext,
+    pending: Vec<PendingUnknownCommand>,
+) -> Vec<PendingUnknownCommand> {
+    if pending.is_empty() {
+        return pending;
+    }
+
+    let (orders, executions) = context
+        .shared
+        .read(|state| (state.orders(), state.executions()));
+    unresolved_pending_after_state(pending, &orders, &executions)
 }
 
 async fn resolve_pending_from_recent_order_history(
@@ -2158,6 +2280,15 @@ fn unresolved_pending_after_executions(
                 .any(|execution| execution_matches_pending(execution, command))
         })
         .collect()
+}
+
+fn unresolved_pending_after_state(
+    pending: Vec<PendingUnknownCommand>,
+    orders: &[Order],
+    executions: &[Execution],
+) -> Vec<PendingUnknownCommand> {
+    let unresolved = unresolved_pending_after_orders(pending, orders);
+    unresolved_pending_after_executions(unresolved, executions)
 }
 
 async fn refresh_recent_order_history(
@@ -2847,15 +2978,16 @@ fn parse_decimal(raw: &str, venue: Venue) -> Result<Decimal> {
 #[cfg(test)]
 mod tests {
     use super::{
-        PendingUnknownCommand, SequenceTracker, bybit_private_sequence_observations,
-        bybit_public_sequence_observations, needs_recent_history_repair, pending_by_instrument,
+        ExecutionRepairScope, PendingUnknownCommand, SequenceTracker,
+        bybit_private_sequence_observations, bybit_public_sequence_observations,
+        execution_repair_scope, needs_recent_history_repair, pending_by_instrument,
         repair_window_start_ms, unresolved_pending_after_executions,
-        unresolved_pending_after_orders,
+        unresolved_pending_after_orders, unresolved_pending_after_state,
     };
     use crate::client::BatMarketsBuilder;
     use bat_markets_core::{
         ClientOrderId, CommandOperation, DegradedReason, Execution, HealthReport, InstrumentId,
-        Order, OrderId, Price, Product, Quantity, Side, TimestampMs, Venue,
+        Order, OrderId, Price, Product, Quantity, ReconcileTrigger, Side, TimestampMs, Venue,
     };
     use bat_markets_core::{OrderStatus, OrderType};
     use rust_decimal::Decimal;
@@ -2964,6 +3096,22 @@ mod tests {
     }
 
     #[test]
+    fn local_state_resolution_prefers_existing_orders_and_executions() {
+        let instrument_id = InstrumentId::from("BTC/USDT:USDT");
+        let first = pending_unknown(&instrument_id, 101, "first");
+        let second = pending_unknown(&instrument_id, 102, "second");
+        let third = pending_unknown(&instrument_id, 103, "third");
+
+        let unresolved = unresolved_pending_after_state(
+            vec![first, second, third.clone()],
+            &[sample_order(101, "first", &instrument_id)],
+            &[sample_execution(102, &instrument_id)],
+        );
+
+        assert_eq!(unresolved, vec![third]);
+    }
+
+    #[test]
     fn periodic_reconcile_stays_snapshot_only_for_stale_snapshot_without_uncertainty() {
         let mut health = HealthReport::default();
         health.mark_snapshot_age(6_000, 5_000);
@@ -2989,6 +3137,32 @@ mod tests {
 
         let clean = HealthReport::default();
         assert!(needs_recent_history_repair(&clean, 1));
+    }
+
+    #[test]
+    fn execution_repair_scope_prefers_local_evidence_only_when_gap_signals_exist() {
+        let clean = HealthReport::default();
+        assert_eq!(
+            execution_repair_scope(ReconcileTrigger::UnknownExecution, &clean),
+            ExecutionRepairScope::PendingUnknownOnly
+        );
+        assert_eq!(
+            execution_repair_scope(ReconcileTrigger::Periodic, &clean),
+            ExecutionRepairScope::PendingUnknownOnly
+        );
+        assert_eq!(
+            execution_repair_scope(ReconcileTrigger::SequenceGap, &clean),
+            ExecutionRepairScope::LocalEvidence
+        );
+
+        let gap = HealthReport {
+            degraded_reason: Some(DegradedReason::PrivateStreamGap),
+            ..HealthReport::default()
+        };
+        assert_eq!(
+            execution_repair_scope(ReconcileTrigger::Periodic, &gap),
+            ExecutionRepairScope::LocalEvidence
+        );
     }
 
     #[test]

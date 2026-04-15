@@ -255,8 +255,11 @@ impl BinanceLinearFuturesAdapter {
         let positions = response
             .positions
             .into_iter()
-            .filter(|position| position.position_amount != "0")
-            .map(|position| self.position_from_account_snapshot(position, observed_at))
+            .filter_map(|position| match parse_decimal(&position.position_amount) {
+                Ok(size) if size.is_zero() => None,
+                Ok(size) => Some(self.position_from_account_snapshot(position, observed_at, size)),
+                Err(error) => Some(Err(error)),
+            })
             .collect::<Result<Vec<_>>>()?;
 
         let account = AccountSnapshot {
@@ -334,9 +337,9 @@ impl BinanceLinearFuturesAdapter {
         &self,
         position: native::AccountPositionSnapshot,
         observed_at: TimestampMs,
+        size: Decimal,
     ) -> Result<Position> {
         let spec = self.require_native_symbol(&position.symbol)?;
-        let size = parse_decimal(&position.position_amount)?;
         Ok(Position {
             position_id: PositionId::from(format!(
                 "binance:{}:{}",
@@ -345,11 +348,20 @@ impl BinanceLinearFuturesAdapter {
             instrument_id: spec.instrument_id.clone(),
             direction: decimal_direction(size),
             size: Quantity::new(size.abs()),
-            entry_price: Some(Price::new(parse_decimal(&position.entry_price)?)),
+            entry_price: parse_optional_decimal(position.entry_price.as_deref())?.map(Price::new),
             mark_price: None,
-            unrealized_pnl: Some(balance_amount(&position.unrealized_profit)?),
-            leverage: Some(Leverage::new(parse_decimal(&position.leverage)?)),
-            margin_mode: parse_margin_mode(&position.margin_type)?,
+            unrealized_pnl: position
+                .unrealized_profit
+                .as_deref()
+                .map(balance_amount)
+                .transpose()?,
+            leverage: parse_optional_decimal(position.leverage.as_deref())?.map(Leverage::new),
+            margin_mode: parse_margin_mode_snapshot(
+                position.margin_type.as_deref(),
+                position.isolated,
+                position.isolated_margin.as_deref(),
+                position.isolated_wallet.as_deref(),
+            )?,
             position_mode: parse_position_mode(&position.position_side),
             updated_at: observed_at,
         })
@@ -574,7 +586,8 @@ impl VenueAdapter for BinanceLinearFuturesAdapter {
                         instrument_id: spec.instrument_id.clone(),
                         direction: decimal_direction(size),
                         size: Quantity::new(size.abs()),
-                        entry_price: Some(Price::new(parse_decimal(&position.entry_price)?)),
+                        entry_price: parse_optional_decimal(position.entry_price.as_deref())?
+                            .map(Price::new),
                         mark_price: None,
                         unrealized_pnl: Some(balance_amount(&position.unrealized_pnl)?),
                         leverage: None,
@@ -894,6 +907,44 @@ fn parse_margin_mode(raw: &str) -> Result<MarginMode> {
     }
 }
 
+fn parse_margin_mode_snapshot(
+    raw: Option<&str>,
+    isolated: Option<bool>,
+    isolated_margin: Option<&str>,
+    isolated_wallet: Option<&str>,
+) -> Result<MarginMode> {
+    if let Some(raw) = raw {
+        return parse_margin_mode(raw);
+    }
+
+    if let Some(isolated) = isolated {
+        return Ok(if isolated {
+            MarginMode::Isolated
+        } else {
+            MarginMode::Cross
+        });
+    }
+
+    let isolated_margin = parse_optional_decimal(isolated_margin)?;
+    let isolated_wallet = parse_optional_decimal(isolated_wallet)?;
+    if isolated_margin.is_some() || isolated_wallet.is_some() {
+        return Ok(
+            if isolated_margin.unwrap_or_default().is_zero()
+                && isolated_wallet.unwrap_or_default().is_zero()
+            {
+                MarginMode::Cross
+            } else {
+                MarginMode::Isolated
+            },
+        );
+    }
+
+    Err(MarketError::new(
+        ErrorKind::DecodeError,
+        "missing binance margin mode in account snapshot",
+    ))
+}
+
 fn parse_position_mode(raw: &str) -> PositionMode {
     match raw {
         "LONG" | "SHORT" => PositionMode::Hedge,
@@ -1047,5 +1098,51 @@ mod tests {
         };
         assert_eq!(order.created_at, TimestampMs::new(1710000001234));
         assert_eq!(order.updated_at, TimestampMs::new(1710000001234));
+    }
+
+    #[test]
+    fn parse_binance_account_snapshot_tolerates_missing_optional_position_fields() {
+        let adapter = BinanceLinearFuturesAdapter::new();
+        let (account, positions) = adapter
+            .parse_account_snapshot(
+                r#"{
+                    "totalWalletBalance":"5000.0",
+                    "availableBalance":"5000.0",
+                    "totalUnrealizedProfit":"0.0",
+                    "assets":[
+                        {
+                            "asset":"USDT",
+                            "walletBalance":"5000.0",
+                            "availableBalance":"5000.0"
+                        }
+                    ],
+                    "positions":[
+                        {
+                            "symbol":"BTCUSDT",
+                            "positionAmt":"0.0",
+                            "positionSide":"BOTH"
+                        },
+                        {
+                            "symbol":"BTCUSDT",
+                            "positionAmt":"0.001",
+                            "unrealizedProfit":"0.0",
+                            "isolatedMargin":"0",
+                            "isolatedWallet":"0",
+                            "positionSide":"BOTH"
+                        }
+                    ]
+                }"#,
+                TimestampMs::new(42),
+            )
+            .expect("account snapshot with sparse position fields should still parse");
+
+        assert_eq!(account.balances.len(), 1);
+        assert_eq!(positions.len(), 1);
+        assert!(positions[0].entry_price.is_none());
+        assert!(positions[0].leverage.is_none());
+        assert_eq!(
+            positions[0].margin_mode,
+            bat_markets_core::MarginMode::Cross
+        );
     }
 }
