@@ -180,6 +180,8 @@ async fn binance_demo_create_cancel_stress_is_stable() -> Result<()> {
     public.shutdown().await?;
     private.shutdown().await?;
 
+    let diagnostics = client.diagnostics().snapshot();
+
     println!(
         "summary instrument={} iterations={} final_open_orders={} create_p95_ms={} cancel_p95_ms={} reconcile_p95_ms={}",
         spec.instrument_id,
@@ -188,6 +190,16 @@ async fn binance_demo_create_cancel_stress_is_stable() -> Result<()> {
         p95_millis(&create_latencies),
         p95_millis(&cancel_latencies),
         p95_millis(&reconcile_latencies),
+    );
+    println!(
+        "diagnostics state_read_avg_wait_ns={} state_read_avg_hold_ns={} state_write_avg_wait_ns={} state_write_avg_hold_ns={} refresh_exec_avg_ns={} reconcile_avg_ns={} reconcile_max_ns={}",
+        diagnostics.state_reads.average_wait_ns(),
+        diagnostics.state_reads.average_hold_ns(),
+        diagnostics.state_writes.average_wait_ns(),
+        diagnostics.state_writes.average_hold_ns(),
+        diagnostics.refresh_executions.average_ns(),
+        diagnostics.reconcile_private.average_ns(),
+        diagnostics.reconcile_private.max_ns,
     );
 
     assert!(

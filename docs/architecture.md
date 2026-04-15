@@ -160,6 +160,14 @@ Health remains cheap to query as a snapshot, but live mode also exposes subscrip
 Snapshot reads are synchronous; notifications are async and best-effort.
 Live stream runners also perform periodic maintenance ticks for idle detection, metadata refresh, and stale private-state reconcile.
 
+### Diagnostics Access
+
+Live mode also exposes a cheap diagnostics snapshot for:
+
+- shared-state read/write lock wait and hold costs,
+- key runtime REST and reconcile latencies,
+- operator-facing live stress sanity checks without an external metrics backend.
+
 ## Testing Strategy
 
 The current foundation relies on:

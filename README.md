@@ -16,6 +16,7 @@ This repository currently implements the initial production-grade foundation:
 - three execution lanes encoded in code and docs,
 - fixture-backed Binance and Bybit adapters for linear futures payloads,
 - a state engine that applies private events and tracks command uncertainty,
+- a live diagnostics snapshot for lock contention and key runtime latencies,
 - quality gates for formatting, linting, tests, docs, and benchmarks.
 
 ## Release Model

@@ -34,6 +34,7 @@ use bat_markets_bybit::native as bybit_native;
 
 use crate::{
     client::{AdapterHandle, LiveContext},
+    diagnostics::{RuntimeDiagnosticsState, RuntimeOperation},
     stream::{LiveStreamHandle, PublicSubscription},
 };
 
@@ -92,6 +93,7 @@ const HISTORY_REPAIR_MAX_LOOKBACK_MS: i64 = 7 * 24 * 60 * 60 * 1_000;
 #[derive(Debug)]
 pub(crate) struct LiveRuntimeState {
     pending_unknown_commands: Mutex<Vec<PendingUnknownCommand>>,
+    pub(crate) diagnostics: RuntimeDiagnosticsState,
     #[cfg(feature = "bybit")]
     bybit_account_context: Mutex<Option<bat_markets_bybit::BybitAccountContext>>,
 }
@@ -100,6 +102,7 @@ impl Default for LiveRuntimeState {
     fn default() -> Self {
         Self {
             pending_unknown_commands: Mutex::new(Vec::new()),
+            diagnostics: RuntimeDiagnosticsState::default(),
             #[cfg(feature = "bybit")]
             bybit_account_context: Mutex::new(None),
         }
@@ -219,6 +222,13 @@ impl SequenceTracker {
     }
 }
 
+fn record_runtime_latency(context: &LiveContext, operation: RuntimeOperation, started_at: Instant) {
+    context
+        .runtime_state
+        .diagnostics
+        .observe(operation, started_at.elapsed());
+}
+
 pub(crate) async fn bootstrap_live(context: &LiveContext) -> Result<()> {
     sync_server_time(context).await?;
     refresh_metadata(context).await?;
@@ -233,308 +243,358 @@ pub(crate) async fn bootstrap_live(context: &LiveContext) -> Result<()> {
 }
 
 pub(crate) async fn refresh_metadata(context: &LiveContext) -> Result<Vec<InstrumentSpec>> {
-    let specs = match &context.adapter {
-        #[cfg(feature = "binance")]
-        AdapterHandle::Binance(adapter) => {
-            let payload =
-                public_get_with_retry(context, "/fapi/v1/exchangeInfo", &[], "binance.metadata")
-                    .await?;
-            adapter.parse_metadata_snapshot(&payload)?
-        }
-        #[cfg(feature = "bybit")]
-        AdapterHandle::Bybit(adapter) => {
-            let payload = public_get_with_retry(
-                context,
-                "/v5/market/instruments-info",
-                &[("category", "linear")],
-                "bybit.metadata",
-            )
-            .await?;
-            adapter.parse_metadata_snapshot(&payload)?
-        }
-    };
+    let started_at = Instant::now();
+    let result = async {
+        let specs = match &context.adapter {
+            #[cfg(feature = "binance")]
+            AdapterHandle::Binance(adapter) => {
+                let payload = public_get_with_retry(
+                    context,
+                    "/fapi/v1/exchangeInfo",
+                    &[],
+                    "binance.metadata",
+                )
+                .await?;
+                adapter.parse_metadata_snapshot(&payload)?
+            }
+            #[cfg(feature = "bybit")]
+            AdapterHandle::Bybit(adapter) => {
+                let payload = public_get_with_retry(
+                    context,
+                    "/v5/market/instruments-info",
+                    &[("category", "linear")],
+                    "bybit.metadata",
+                )
+                .await?;
+                adapter.parse_metadata_snapshot(&payload)?
+            }
+        };
 
-    context.adapter.replace_instruments(specs.clone());
-    let specs_for_state = specs.clone();
-    context.shared.write(|state| {
-        state.replace_instruments(specs_for_state);
-        state.mark_rest_success(None);
-    });
-    Ok(specs)
+        context.adapter.replace_instruments(specs.clone());
+        let specs_for_state = specs.clone();
+        context.shared.write(|state| {
+            state.replace_instruments(specs_for_state);
+            state.mark_rest_success(None);
+        });
+        Ok(specs)
+    }
+    .await;
+    record_runtime_latency(context, RuntimeOperation::RefreshMetadata, started_at);
+    result
 }
 
 pub(crate) async fn refresh_account(
     context: &LiveContext,
 ) -> Result<Option<bat_markets_core::AccountSummary>> {
-    let snapshot = match &context.adapter {
-        #[cfg(feature = "binance")]
-        AdapterHandle::Binance(adapter) => {
-            let payload = binance_signed_request_text(
-                context,
-                Method::GET,
-                "/fapi/v3/account",
-                &[],
-                "binance.account",
-            )
-            .await?;
-            let observed_at = timestamp_now_ms();
-            let (account, positions) = adapter.parse_account_snapshot(&payload, observed_at)?;
-            context.shared.write(|state| {
-                state.replace_account_snapshot(account.clone());
-                state.replace_positions(positions);
-                state.mark_rest_success(None);
-            });
-            account
-        }
-        #[cfg(feature = "bybit")]
-        AdapterHandle::Bybit(adapter) => {
-            let account_context =
-                refresh_bybit_account_context_with_adapter(context, adapter).await?;
-            let payload = bybit_signed_get_text(
-                context,
-                "/v5/account/wallet-balance",
-                &[("accountType", account_context.wallet_account_type.as_ref())],
-                "bybit.account.wallet_balance",
-            )
-            .await?;
-            let observed_at = timestamp_now_ms();
-            let account = adapter.parse_account_snapshot(&payload, observed_at)?;
-            context.shared.write(|state| {
-                state.replace_account_snapshot(account.clone());
-                state.mark_rest_success(None);
-            });
-            account
-        }
-    };
+    let started_at = Instant::now();
+    let result = async {
+        let snapshot = match &context.adapter {
+            #[cfg(feature = "binance")]
+            AdapterHandle::Binance(adapter) => {
+                let payload = binance_signed_request_text(
+                    context,
+                    Method::GET,
+                    "/fapi/v3/account",
+                    &[],
+                    "binance.account",
+                )
+                .await?;
+                let observed_at = timestamp_now_ms();
+                let (account, positions) = adapter.parse_account_snapshot(&payload, observed_at)?;
+                context.shared.write(|state| {
+                    state.replace_account_snapshot(account.clone());
+                    state.replace_positions(positions);
+                    state.mark_rest_success(None);
+                });
+                account
+            }
+            #[cfg(feature = "bybit")]
+            AdapterHandle::Bybit(adapter) => {
+                let account_context =
+                    refresh_bybit_account_context_with_adapter(context, adapter).await?;
+                let payload = bybit_signed_get_text(
+                    context,
+                    "/v5/account/wallet-balance",
+                    &[("accountType", account_context.wallet_account_type.as_ref())],
+                    "bybit.account.wallet_balance",
+                )
+                .await?;
+                let observed_at = timestamp_now_ms();
+                let account = adapter.parse_account_snapshot(&payload, observed_at)?;
+                context.shared.write(|state| {
+                    state.replace_account_snapshot(account.clone());
+                    state.mark_rest_success(None);
+                });
+                account
+            }
+        };
 
-    Ok(snapshot.summary)
+        Ok(snapshot.summary)
+    }
+    .await;
+    record_runtime_latency(context, RuntimeOperation::RefreshAccount, started_at);
+    result
 }
 
 pub(crate) async fn refresh_positions(
     context: &LiveContext,
 ) -> Result<Vec<bat_markets_core::Position>> {
-    let positions = match &context.adapter {
-        #[cfg(feature = "binance")]
-        AdapterHandle::Binance(adapter) => {
-            let payload = binance_signed_request_text(
-                context,
-                Method::GET,
-                "/fapi/v3/account",
-                &[],
-                "binance.positions",
-            )
-            .await?;
-            let observed_at = timestamp_now_ms();
-            let (account, positions) = adapter.parse_account_snapshot(&payload, observed_at)?;
-            let positions_for_state = positions.clone();
-            context.shared.write(|state| {
-                state.replace_account_snapshot(account);
-                state.replace_positions(positions_for_state);
-                state.mark_rest_success(None);
-            });
-            positions
-        }
-        #[cfg(feature = "bybit")]
-        AdapterHandle::Bybit(adapter) => {
-            let payload = bybit_signed_get_text(
-                context,
-                "/v5/position/list",
-                &[("category", "linear"), ("settleCoin", "USDT")],
-                "bybit.positions",
-            )
-            .await?;
-            let positions = adapter.parse_positions_snapshot(&payload, timestamp_now_ms())?;
-            let positions_for_state = positions.clone();
-            context.shared.write(|state| {
-                state.replace_positions(positions_for_state);
-                state.mark_rest_success(None);
-            });
-            positions
-        }
-    };
+    let started_at = Instant::now();
+    let result = async {
+        let positions = match &context.adapter {
+            #[cfg(feature = "binance")]
+            AdapterHandle::Binance(adapter) => {
+                let payload = binance_signed_request_text(
+                    context,
+                    Method::GET,
+                    "/fapi/v3/account",
+                    &[],
+                    "binance.positions",
+                )
+                .await?;
+                let observed_at = timestamp_now_ms();
+                let (account, positions) = adapter.parse_account_snapshot(&payload, observed_at)?;
+                let positions_for_state = positions.clone();
+                context.shared.write(|state| {
+                    state.replace_account_snapshot(account);
+                    state.replace_positions(positions_for_state);
+                    state.mark_rest_success(None);
+                });
+                positions
+            }
+            #[cfg(feature = "bybit")]
+            AdapterHandle::Bybit(adapter) => {
+                let payload = bybit_signed_get_text(
+                    context,
+                    "/v5/position/list",
+                    &[("category", "linear"), ("settleCoin", "USDT")],
+                    "bybit.positions",
+                )
+                .await?;
+                let positions = adapter.parse_positions_snapshot(&payload, timestamp_now_ms())?;
+                let positions_for_state = positions.clone();
+                context.shared.write(|state| {
+                    state.replace_positions(positions_for_state);
+                    state.mark_rest_success(None);
+                });
+                positions
+            }
+        };
 
-    Ok(positions)
+        Ok(positions)
+    }
+    .await;
+    record_runtime_latency(context, RuntimeOperation::RefreshPositions, started_at);
+    result
 }
 
 pub(crate) async fn refresh_open_orders(
     context: &LiveContext,
     request: Option<&ListOpenOrdersRequest>,
 ) -> Result<Vec<Order>> {
-    let orders = match &context.adapter {
-        #[cfg(feature = "binance")]
-        AdapterHandle::Binance(adapter) => {
-            let mut query = Vec::new();
-            if let Some(request) = request.and_then(|request| request.instrument_id.as_ref()) {
-                let spec = require_spec(context, request)?;
-                query.push(("symbol".to_owned(), spec.native_symbol.to_string()));
+    let started_at = Instant::now();
+    let result = async {
+        let orders = match &context.adapter {
+            #[cfg(feature = "binance")]
+            AdapterHandle::Binance(adapter) => {
+                let mut query = Vec::new();
+                if let Some(request) = request.and_then(|request| request.instrument_id.as_ref()) {
+                    let spec = require_spec(context, request)?;
+                    query.push(("symbol".to_owned(), spec.native_symbol.to_string()));
+                }
+                let pairs = query
+                    .iter()
+                    .map(|(key, value)| (key.as_str(), value.as_str()))
+                    .collect::<Vec<_>>();
+                let payload = binance_signed_request_text(
+                    context,
+                    Method::GET,
+                    "/fapi/v1/openOrders",
+                    &pairs,
+                    "binance.open_orders",
+                )
+                .await?;
+                adapter.parse_open_orders_snapshot(&payload, timestamp_now_ms())?
             }
-            let pairs = query
-                .iter()
-                .map(|(key, value)| (key.as_str(), value.as_str()))
-                .collect::<Vec<_>>();
-            let payload = binance_signed_request_text(
-                context,
-                Method::GET,
-                "/fapi/v1/openOrders",
-                &pairs,
-                "binance.open_orders",
-            )
-            .await?;
-            adapter.parse_open_orders_snapshot(&payload, timestamp_now_ms())?
-        }
-        #[cfg(feature = "bybit")]
-        AdapterHandle::Bybit(adapter) => {
-            let mut owned = vec![("category".to_owned(), "linear".to_owned())];
-            if let Some(request) = request.and_then(|request| request.instrument_id.as_ref()) {
-                let spec = require_spec(context, request)?;
-                owned.push(("symbol".to_owned(), spec.native_symbol.to_string()));
-            } else {
-                owned.push(("settleCoin".to_owned(), "USDT".to_owned()));
+            #[cfg(feature = "bybit")]
+            AdapterHandle::Bybit(adapter) => {
+                let mut owned = vec![("category".to_owned(), "linear".to_owned())];
+                if let Some(request) = request.and_then(|request| request.instrument_id.as_ref()) {
+                    let spec = require_spec(context, request)?;
+                    owned.push(("symbol".to_owned(), spec.native_symbol.to_string()));
+                } else {
+                    owned.push(("settleCoin".to_owned(), "USDT".to_owned()));
+                }
+                let pairs = owned
+                    .iter()
+                    .map(|(key, value)| (key.as_str(), value.as_str()))
+                    .collect::<Vec<_>>();
+                let payload = bybit_signed_get_text(
+                    context,
+                    "/v5/order/realtime",
+                    &pairs,
+                    "bybit.open_orders",
+                )
+                .await?;
+                adapter.parse_open_orders_snapshot(&payload, timestamp_now_ms())?
             }
-            let pairs = owned
-                .iter()
-                .map(|(key, value)| (key.as_str(), value.as_str()))
-                .collect::<Vec<_>>();
-            let payload =
-                bybit_signed_get_text(context, "/v5/order/realtime", &pairs, "bybit.open_orders")
-                    .await?;
-            adapter.parse_open_orders_snapshot(&payload, timestamp_now_ms())?
-        }
-    };
+        };
 
-    let orders_for_state = orders.clone();
-    context.shared.write(|state| {
-        state.replace_open_orders(orders_for_state);
-        state.mark_rest_success(None);
-    });
-    Ok(orders)
+        let orders_for_state = orders.clone();
+        context.shared.write(|state| {
+            state.replace_open_orders(orders_for_state);
+            state.mark_rest_success(None);
+        });
+        Ok(orders)
+    }
+    .await;
+    record_runtime_latency(context, RuntimeOperation::RefreshOpenOrders, started_at);
+    result
 }
 
 pub(crate) async fn refresh_executions(
     context: &LiveContext,
     request: Option<&ListExecutionsRequest>,
 ) -> Result<Vec<Execution>> {
-    let executions = match &context.adapter {
-        #[cfg(feature = "binance")]
-        AdapterHandle::Binance(adapter) => {
-            let mut all = Vec::new();
-            for spec in execution_specs(context, request).await? {
-                let limit = request
-                    .and_then(|request| request.limit)
-                    .unwrap_or(100)
-                    .to_string();
-                let payload = binance_signed_request_text(
-                    context,
-                    Method::GET,
-                    "/fapi/v1/userTrades",
-                    &[
-                        ("symbol", spec.native_symbol.as_ref()),
-                        ("limit", limit.as_str()),
-                    ],
-                    "binance.executions",
-                )
-                .await?;
-                all.extend(adapter.parse_executions_snapshot(&payload)?);
+    let started_at = Instant::now();
+    let result = async {
+        let executions = match &context.adapter {
+            #[cfg(feature = "binance")]
+            AdapterHandle::Binance(adapter) => {
+                let mut all = Vec::new();
+                for spec in execution_specs(context, request).await? {
+                    let limit = request
+                        .and_then(|request| request.limit)
+                        .unwrap_or(100)
+                        .to_string();
+                    let payload = binance_signed_request_text(
+                        context,
+                        Method::GET,
+                        "/fapi/v1/userTrades",
+                        &[
+                            ("symbol", spec.native_symbol.as_ref()),
+                            ("limit", limit.as_str()),
+                        ],
+                        "binance.executions",
+                    )
+                    .await?;
+                    all.extend(adapter.parse_executions_snapshot(&payload)?);
+                }
+                all
             }
-            all
-        }
-        #[cfg(feature = "bybit")]
-        AdapterHandle::Bybit(adapter) => {
-            let mut query = vec![("category".to_owned(), "linear".to_owned())];
-            if let Some(request) = request {
-                if let Some(instrument_id) = &request.instrument_id {
-                    let spec = require_spec(context, instrument_id)?;
-                    query.push(("symbol".to_owned(), spec.native_symbol.to_string()));
+            #[cfg(feature = "bybit")]
+            AdapterHandle::Bybit(adapter) => {
+                let mut query = vec![("category".to_owned(), "linear".to_owned())];
+                if let Some(request) = request {
+                    if let Some(instrument_id) = &request.instrument_id {
+                        let spec = require_spec(context, instrument_id)?;
+                        query.push(("symbol".to_owned(), spec.native_symbol.to_string()));
+                    } else {
+                        query.push(("settleCoin".to_owned(), "USDT".to_owned()));
+                    }
+                    if let Some(limit) = request.limit {
+                        query.push(("limit".to_owned(), limit.to_string()));
+                    }
                 } else {
                     query.push(("settleCoin".to_owned(), "USDT".to_owned()));
+                    query.push(("limit".to_owned(), "100".to_owned()));
                 }
-                if let Some(limit) = request.limit {
-                    query.push(("limit".to_owned(), limit.to_string()));
-                }
-            } else {
-                query.push(("settleCoin".to_owned(), "USDT".to_owned()));
-                query.push(("limit".to_owned(), "100".to_owned()));
+                let pairs = query
+                    .iter()
+                    .map(|(key, value)| (key.as_str(), value.as_str()))
+                    .collect::<Vec<_>>();
+                let payload = bybit_signed_get_text(
+                    context,
+                    "/v5/execution/list",
+                    &pairs,
+                    "bybit.executions",
+                )
+                .await?;
+                adapter.parse_executions_snapshot(&payload)?
             }
-            let pairs = query
-                .iter()
-                .map(|(key, value)| (key.as_str(), value.as_str()))
-                .collect::<Vec<_>>();
-            let payload =
-                bybit_signed_get_text(context, "/v5/execution/list", &pairs, "bybit.executions")
-                    .await?;
-            adapter.parse_executions_snapshot(&payload)?
-        }
-    };
+        };
 
-    let executions_for_state = executions.clone();
-    context.shared.write(|state| {
-        state.merge_executions(executions_for_state);
-        state.mark_rest_success(None);
-    });
-    Ok(executions)
+        let executions_for_state = executions.clone();
+        context.shared.write(|state| {
+            state.merge_executions(executions_for_state);
+            state.mark_rest_success(None);
+        });
+        Ok(executions)
+    }
+    .await;
+    record_runtime_latency(context, RuntimeOperation::RefreshExecutions, started_at);
+    result
 }
 
 pub(crate) async fn get_order(context: &LiveContext, request: &GetOrderRequest) -> Result<Order> {
-    let spec = require_spec(context, &request.instrument_id)?;
-    let order = match &context.adapter {
-        #[cfg(feature = "binance")]
-        AdapterHandle::Binance(adapter) => {
-            let query = order_identity_query(
-                &spec.native_symbol,
-                request.order_id.as_ref(),
-                request.client_order_id.as_ref(),
-            )?;
-            let pairs = query
-                .iter()
-                .map(|(key, value)| (key.as_str(), value.as_str()))
-                .collect::<Vec<_>>();
-            let payload = binance_signed_request_text(
-                context,
-                Method::GET,
-                "/fapi/v1/order",
-                &pairs,
-                "binance.get_order",
-            )
-            .await?;
-            adapter.parse_order_snapshot(&payload, timestamp_now_ms())?
-        }
-        #[cfg(feature = "bybit")]
-        AdapterHandle::Bybit(adapter) => {
-            let mut query = vec![
-                ("category".to_owned(), "linear".to_owned()),
-                ("symbol".to_owned(), spec.native_symbol.to_string()),
-            ];
-            append_order_identity(
-                &mut query,
-                request.order_id.as_ref(),
-                request.client_order_id.as_ref(),
-            )?;
-            let pairs = query
-                .iter()
-                .map(|(key, value)| (key.as_str(), value.as_str()))
-                .collect::<Vec<_>>();
-            let payload =
-                bybit_signed_get_text(context, "/v5/order/realtime", &pairs, "bybit.get_order")
-                    .await?;
-            adapter.parse_order_snapshot(&payload, timestamp_now_ms())?
-        }
-    };
+    let started_at = Instant::now();
+    let result = async {
+        let spec = require_spec(context, &request.instrument_id)?;
+        let order = match &context.adapter {
+            #[cfg(feature = "binance")]
+            AdapterHandle::Binance(adapter) => {
+                let query = order_identity_query(
+                    &spec.native_symbol,
+                    request.order_id.as_ref(),
+                    request.client_order_id.as_ref(),
+                )?;
+                let pairs = query
+                    .iter()
+                    .map(|(key, value)| (key.as_str(), value.as_str()))
+                    .collect::<Vec<_>>();
+                let payload = binance_signed_request_text(
+                    context,
+                    Method::GET,
+                    "/fapi/v1/order",
+                    &pairs,
+                    "binance.get_order",
+                )
+                .await?;
+                adapter.parse_order_snapshot(&payload, timestamp_now_ms())?
+            }
+            #[cfg(feature = "bybit")]
+            AdapterHandle::Bybit(adapter) => {
+                let mut query = vec![
+                    ("category".to_owned(), "linear".to_owned()),
+                    ("symbol".to_owned(), spec.native_symbol.to_string()),
+                ];
+                append_order_identity(
+                    &mut query,
+                    request.order_id.as_ref(),
+                    request.client_order_id.as_ref(),
+                )?;
+                let pairs = query
+                    .iter()
+                    .map(|(key, value)| (key.as_str(), value.as_str()))
+                    .collect::<Vec<_>>();
+                let payload =
+                    bybit_signed_get_text(context, "/v5/order/realtime", &pairs, "bybit.get_order")
+                        .await?;
+                adapter.parse_order_snapshot(&payload, timestamp_now_ms())?
+            }
+        };
 
-    let order_for_state = order.clone();
-    context.shared.write(|state| {
-        state.apply_private_event(PrivateLaneEvent::Order(order_for_state));
-        state.mark_rest_success(None);
-    });
-    Ok(order)
+        let order_for_state = order.clone();
+        context.shared.write(|state| {
+            state.apply_private_event(PrivateLaneEvent::Order(order_for_state));
+            state.mark_rest_success(None);
+        });
+        Ok(order)
+    }
+    .await;
+    record_runtime_latency(context, RuntimeOperation::GetOrder, started_at);
+    result
 }
 
 pub(crate) async fn create_order(
     context: &LiveContext,
     request: &CreateOrderRequest,
 ) -> Result<CommandReceipt> {
-    validate_create_order(context, request)?;
-    context.command_limiter.acquire().await;
-    let receipt = match &context.adapter {
+    let started_at = Instant::now();
+    let result = async {
+        validate_create_order(context, request)?;
+        context.command_limiter.acquire().await;
+        let receipt = match &context.adapter {
         #[cfg(feature = "binance")]
         AdapterHandle::Binance(adapter) => {
             let spec = require_spec(context, &request.instrument_id)?;
@@ -640,99 +700,114 @@ pub(crate) async fn create_order(
             .await;
     }
     apply_command_receipt(context, receipt.clone()).await;
-    Ok(receipt)
+        Ok(receipt)
+    }
+    .await;
+    record_runtime_latency(context, RuntimeOperation::CreateOrder, started_at);
+    result
 }
 
 pub(crate) async fn cancel_order(
     context: &LiveContext,
     request: &CancelOrderRequest,
 ) -> Result<CommandReceipt> {
-    let spec = require_spec(context, &request.instrument_id)?;
-    context.command_limiter.acquire().await;
-    let receipt = match &context.adapter {
-        #[cfg(feature = "binance")]
-        AdapterHandle::Binance(adapter) => {
-            let query = order_identity_query(
-                &spec.native_symbol,
-                request.order_id.as_ref(),
-                request.client_order_id.as_ref(),
-            )?;
-            let pairs = query
-                .iter()
-                .map(|(key, value)| (key.as_str(), value.as_str()))
-                .collect::<Vec<_>>();
-            match binance_signed_request_text(
-                context,
-                Method::DELETE,
-                "/fapi/v1/order",
-                &pairs,
-                "binance.cancel_order",
-            )
-            .await
-            {
-                Ok(payload) => adapter.classify_command(
-                    CommandOperation::CancelOrder,
-                    Some(&payload),
-                    request.request_id.clone(),
-                )?,
-                Err(error) if is_uncertain_command_error(&error) => adapter.classify_command(
-                    CommandOperation::CancelOrder,
-                    None,
-                    request.request_id.clone(),
-                )?,
-                Err(error) => return Err(error),
-            }
-        }
-        #[cfg(feature = "bybit")]
-        AdapterHandle::Bybit(adapter) => {
-            let mut body = vec![
-                ("category".to_owned(), "linear".to_owned()),
-                ("symbol".to_owned(), spec.native_symbol.to_string()),
-            ];
-            append_order_identity(
-                &mut body,
-                request.order_id.as_ref(),
-                request.client_order_id.as_ref(),
-            )?;
-            let body = serde_json::to_string(&body_to_object(body)).map_err(|error| {
-                MarketError::new(
-                    ErrorKind::ConfigError,
-                    format!("failed to serialize bybit cancel order body: {error}"),
+    let started_at = Instant::now();
+    let result = async {
+        let spec = require_spec(context, &request.instrument_id)?;
+        context.command_limiter.acquire().await;
+        let receipt = match &context.adapter {
+            #[cfg(feature = "binance")]
+            AdapterHandle::Binance(adapter) => {
+                let query = order_identity_query(
+                    &spec.native_symbol,
+                    request.order_id.as_ref(),
+                    request.client_order_id.as_ref(),
+                )?;
+                let pairs = query
+                    .iter()
+                    .map(|(key, value)| (key.as_str(), value.as_str()))
+                    .collect::<Vec<_>>();
+                match binance_signed_request_text(
+                    context,
+                    Method::DELETE,
+                    "/fapi/v1/order",
+                    &pairs,
+                    "binance.cancel_order",
                 )
-            })?;
-            match bybit_signed_post_text(context, "/v5/order/cancel", &body, "bybit.cancel_order")
                 .await
-            {
-                Ok(payload) => adapter.classify_command(
-                    CommandOperation::CancelOrder,
-                    Some(&payload),
-                    request.request_id.clone(),
-                )?,
-                Err(error) if is_uncertain_command_error(&error) => adapter.classify_command(
-                    CommandOperation::CancelOrder,
-                    None,
-                    request.request_id.clone(),
-                )?,
-                Err(error) => return Err(error),
+                {
+                    Ok(payload) => adapter.classify_command(
+                        CommandOperation::CancelOrder,
+                        Some(&payload),
+                        request.request_id.clone(),
+                    )?,
+                    Err(error) if is_uncertain_command_error(&error) => adapter.classify_command(
+                        CommandOperation::CancelOrder,
+                        None,
+                        request.request_id.clone(),
+                    )?,
+                    Err(error) => return Err(error),
+                }
             }
-        }
-    };
+            #[cfg(feature = "bybit")]
+            AdapterHandle::Bybit(adapter) => {
+                let mut body = vec![
+                    ("category".to_owned(), "linear".to_owned()),
+                    ("symbol".to_owned(), spec.native_symbol.to_string()),
+                ];
+                append_order_identity(
+                    &mut body,
+                    request.order_id.as_ref(),
+                    request.client_order_id.as_ref(),
+                )?;
+                let body = serde_json::to_string(&body_to_object(body)).map_err(|error| {
+                    MarketError::new(
+                        ErrorKind::ConfigError,
+                        format!("failed to serialize bybit cancel order body: {error}"),
+                    )
+                })?;
+                match bybit_signed_post_text(
+                    context,
+                    "/v5/order/cancel",
+                    &body,
+                    "bybit.cancel_order",
+                )
+                .await
+                {
+                    Ok(payload) => adapter.classify_command(
+                        CommandOperation::CancelOrder,
+                        Some(&payload),
+                        request.request_id.clone(),
+                    )?,
+                    Err(error) if is_uncertain_command_error(&error) => adapter.classify_command(
+                        CommandOperation::CancelOrder,
+                        None,
+                        request.request_id.clone(),
+                    )?,
+                    Err(error) => return Err(error),
+                }
+            }
+        };
 
-    let receipt = hydrate_cancel_receipt(receipt, request);
-    if receipt.status == CommandStatus::UnknownExecution {
-        context
-            .runtime_state
-            .cache_pending_unknown(PendingUnknownCommand {
-                operation: CommandOperation::CancelOrder,
-                instrument_id: request.instrument_id.clone(),
-                order_id: request.order_id.clone(),
-                client_order_id: request.client_order_id.clone(),
-                recorded_at: timestamp_now_ms(),
-            })
-            .await;
+        let receipt = hydrate_cancel_receipt(receipt, request);
+        if receipt.status == CommandStatus::UnknownExecution {
+            context
+                .runtime_state
+                .cache_pending_unknown(PendingUnknownCommand {
+                    operation: CommandOperation::CancelOrder,
+                    instrument_id: request.instrument_id.clone(),
+                    order_id: request.order_id.clone(),
+                    client_order_id: request.client_order_id.clone(),
+                    recorded_at: timestamp_now_ms(),
+                })
+                .await;
+        }
+        apply_command_receipt(context, receipt.clone()).await;
+        Ok(receipt)
     }
-    apply_command_receipt(context, receipt.clone()).await;
-    Ok(receipt)
+    .await;
+    record_runtime_latency(context, RuntimeOperation::CancelOrder, started_at);
+    result
 }
 
 pub(crate) async fn set_leverage(
@@ -903,82 +978,92 @@ pub(crate) async fn refresh_open_interest(
     context: &LiveContext,
     instrument_id: &InstrumentId,
 ) -> Result<OpenInterest> {
-    let spec = require_spec(context, instrument_id)?;
-    let open_interest = match &context.adapter {
-        #[cfg(feature = "binance")]
-        AdapterHandle::Binance(_) => {
-            let payload = public_get_with_retry(
-                context,
-                "/fapi/v1/openInterest",
-                &[("symbol", spec.native_symbol.as_ref())],
-                "binance.open_interest",
-            )
-            .await?;
-            let events = context.adapter.as_adapter().parse_public(&payload)?;
-            let event = events.into_iter().find_map(|event| match event {
-                bat_markets_core::PublicLaneEvent::OpenInterest(open_interest) => {
-                    Some(open_interest)
-                }
-                _ => None,
-            });
-            event.ok_or_else(|| {
-                MarketError::new(
-                    ErrorKind::DecodeError,
-                    "missing binance open-interest event in snapshot response",
+    let started_at = Instant::now();
+    let result = async {
+        let spec = require_spec(context, instrument_id)?;
+        let open_interest = match &context.adapter {
+            #[cfg(feature = "binance")]
+            AdapterHandle::Binance(_) => {
+                let payload = public_get_with_retry(
+                    context,
+                    "/fapi/v1/openInterest",
+                    &[("symbol", spec.native_symbol.as_ref())],
+                    "binance.open_interest",
                 )
-            })?
-        }
-        #[cfg(feature = "bybit")]
-        AdapterHandle::Bybit(_) => {
-            let payload = public_get_with_retry(
-                context,
-                "/v5/market/tickers",
-                &[
-                    ("category", "linear"),
-                    ("symbol", spec.native_symbol.as_ref()),
-                ],
-                "bybit.open_interest",
-            )
-            .await?;
-            let response = serde_json::from_str::<bybit_native::MarketTickersResponse>(&payload)
+                .await?;
+                let events = context.adapter.as_adapter().parse_public(&payload)?;
+                let event = events.into_iter().find_map(|event| match event {
+                    bat_markets_core::PublicLaneEvent::OpenInterest(open_interest) => {
+                        Some(open_interest)
+                    }
+                    _ => None,
+                });
+                event.ok_or_else(|| {
+                    MarketError::new(
+                        ErrorKind::DecodeError,
+                        "missing binance open-interest event in snapshot response",
+                    )
+                })?
+            }
+            #[cfg(feature = "bybit")]
+            AdapterHandle::Bybit(_) => {
+                let payload = public_get_with_retry(
+                    context,
+                    "/v5/market/tickers",
+                    &[
+                        ("category", "linear"),
+                        ("symbol", spec.native_symbol.as_ref()),
+                    ],
+                    "bybit.open_interest",
+                )
+                .await?;
+                let response = serde_json::from_str::<bybit_native::MarketTickersResponse>(
+                    &payload,
+                )
                 .map_err(|error| {
                     MarketError::new(
                         ErrorKind::DecodeError,
                         format!("failed to parse bybit tickers response: {error}"),
                     )
                 })?;
-            if response.ret_code != 0 {
-                return Err(MarketError::new(
-                    ErrorKind::ExchangeReject,
-                    response.ret_msg,
-                ));
+                if response.ret_code != 0 {
+                    return Err(MarketError::new(
+                        ErrorKind::ExchangeReject,
+                        response.ret_msg,
+                    ));
+                }
+                let ticker = response.result.list.into_iter().next().ok_or_else(|| {
+                    MarketError::new(
+                        ErrorKind::DecodeError,
+                        "missing bybit ticker entry in market/tickers response",
+                    )
+                })?;
+                OpenInterest {
+                    instrument_id: spec.instrument_id.clone(),
+                    value: Quantity::new(parse_decimal(&ticker.open_interest, Venue::Bybit)?),
+                    event_time: timestamp_now_ms(),
+                }
             }
-            let ticker = response.result.list.into_iter().next().ok_or_else(|| {
-                MarketError::new(
-                    ErrorKind::DecodeError,
-                    "missing bybit ticker entry in market/tickers response",
-                )
-            })?;
-            OpenInterest {
-                instrument_id: spec.instrument_id.clone(),
-                value: Quantity::new(parse_decimal(&ticker.open_interest, Venue::Bybit)?),
-                event_time: timestamp_now_ms(),
-            }
-        }
-    };
+        };
 
-    let event = open_interest.clone();
-    context.shared.write(|state| {
-        let _ = state.apply_public_event(bat_markets_core::PublicLaneEvent::OpenInterest(event));
-        state.mark_rest_success(None);
-    });
-    Ok(open_interest)
+        let event = open_interest.clone();
+        context.shared.write(|state| {
+            let _ =
+                state.apply_public_event(bat_markets_core::PublicLaneEvent::OpenInterest(event));
+            state.mark_rest_success(None);
+        });
+        Ok(open_interest)
+    }
+    .await;
+    record_runtime_latency(context, RuntimeOperation::RefreshOpenInterest, started_at);
+    result
 }
 
 pub(crate) async fn reconcile_private(
     context: &LiveContext,
     trigger: ReconcileTrigger,
 ) -> Result<ReconcileReport> {
+    let started_at = Instant::now();
     let repaired_at = timestamp_now_ms();
     let mode = reconcile_mode(context, trigger).await;
     let result = async {
@@ -1000,6 +1085,7 @@ pub(crate) async fn reconcile_private(
         }
     }
     .await;
+    record_runtime_latency(context, RuntimeOperation::ReconcilePrivate, started_at);
 
     match result {
         Ok(0) => {

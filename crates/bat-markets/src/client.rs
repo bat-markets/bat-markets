@@ -1,4 +1,8 @@
-use std::{env, sync::Arc, time::Duration};
+use std::{
+    env,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use parking_lot::RwLock;
 use tokio::sync::{broadcast, watch};
@@ -15,8 +19,15 @@ use bat_markets_binance::BinanceLinearFuturesAdapter;
 use bat_markets_bybit::BybitLinearFuturesAdapter;
 
 use crate::{
-    account::AccountClient, health::HealthClient, market::MarketClient, native::NativeClient,
-    position::PositionClient, runtime, stream::StreamClient, trade::TradeClient,
+    account::AccountClient,
+    diagnostics::{DiagnosticsClient, SharedStateDiagnostics},
+    health::HealthClient,
+    market::MarketClient,
+    native::NativeClient,
+    position::PositionClient,
+    runtime,
+    stream::StreamClient,
+    trade::TradeClient,
 };
 
 #[derive(Clone)]
@@ -62,6 +73,7 @@ impl AdapterHandle {
 #[derive(Debug)]
 pub(crate) struct SharedState {
     state: RwLock<EngineState>,
+    diagnostics: SharedStateDiagnostics,
     health_watch: watch::Sender<HealthReport>,
     health_notifications: broadcast::Sender<HealthNotification>,
 }
@@ -74,24 +86,37 @@ impl SharedState {
 
         Self {
             state: RwLock::new(state),
+            diagnostics: SharedStateDiagnostics::default(),
             health_watch,
             health_notifications,
         }
     }
 
     pub(crate) fn read<T>(&self, f: impl FnOnce(&EngineState) -> T) -> T {
+        let wait_started = Instant::now();
         let state = self.state.read();
-        f(&state)
+        let wait = wait_started.elapsed();
+        let hold_started = Instant::now();
+        let result = f(&state);
+        let hold = hold_started.elapsed();
+        drop(state);
+        self.diagnostics.observe_read(wait, hold);
+        result
     }
 
     pub(crate) fn write<T>(&self, f: impl FnOnce(&mut EngineState) -> T) -> T {
-        let (before, after, result) = {
+        let wait_started = Instant::now();
+        let (before, after, wait, hold, result) = {
             let mut state = self.state.write();
+            let wait = wait_started.elapsed();
+            let hold_started = Instant::now();
             let before = state.health().clone();
             let result = f(&mut state);
             let after = state.health().clone();
-            (before, after, result)
+            let hold = hold_started.elapsed();
+            (before, after, wait, hold, result)
         };
+        self.diagnostics.observe_write(wait, hold);
 
         if should_publish_health_change(&before, &after) {
             let _ = self.health_watch.send_replace(after.clone());
@@ -106,6 +131,14 @@ impl SharedState {
 
     pub(crate) fn health_snapshot(&self) -> HealthReport {
         self.read(|state| state.health().clone())
+    }
+
+    pub(crate) fn read_diagnostics(&self) -> crate::diagnostics::LockDiagnosticsSnapshot {
+        self.diagnostics.read_snapshot()
+    }
+
+    pub(crate) fn write_diagnostics(&self) -> crate::diagnostics::LockDiagnosticsSnapshot {
+        self.diagnostics.write_snapshot()
     }
 
     pub(crate) fn subscribe_health(&self) -> watch::Receiver<HealthReport> {
@@ -216,6 +249,11 @@ impl BatMarkets {
     #[must_use]
     pub fn health(&self) -> HealthClient<'_> {
         HealthClient::new(self)
+    }
+
+    #[must_use]
+    pub fn diagnostics(&self) -> DiagnosticsClient<'_> {
+        DiagnosticsClient::new(self)
     }
 
     #[must_use]

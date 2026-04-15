@@ -4,6 +4,7 @@ pub mod account;
 pub mod capabilities;
 pub mod client;
 pub mod config;
+pub mod diagnostics;
 pub mod errors;
 pub mod health;
 pub mod market;
@@ -16,6 +17,7 @@ pub mod types;
 
 pub use account::AccountClient;
 pub use client::{BatMarkets, BatMarketsBuilder};
+pub use diagnostics::{DiagnosticsClient, LockDiagnosticsSnapshot, RuntimeDiagnosticsSnapshot};
 pub use health::HealthClient;
 pub use market::MarketClient;
 pub use native::NativeClient;
