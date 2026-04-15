@@ -80,6 +80,9 @@ enum PrivateReconcileMode {
     RecentHistoryRepair,
 }
 
+const HISTORY_REPAIR_REWIND_MS: i64 = 60_000;
+const HISTORY_REPAIR_MAX_LOOKBACK_MS: i64 = 7 * 24 * 60 * 60 * 1_000;
+
 #[derive(Debug)]
 pub(crate) struct LiveRuntimeState {
     pending_unknown_commands: Mutex<Vec<PendingUnknownCommand>>,
@@ -2079,7 +2082,7 @@ async fn resolve_pending_from_recent_order_history(
 
     let mut unresolved = Vec::new();
     for (instrument_id, commands) in pending_by_instrument(pending) {
-        let orders = refresh_recent_order_history(context, &instrument_id).await?;
+        let orders = refresh_recent_order_history(context, &instrument_id, &commands).await?;
         context.shared.write(|state| {
             if !orders.is_empty() {
                 state.merge_order_history(orders.clone());
@@ -2102,7 +2105,8 @@ async fn resolve_pending_from_recent_execution_history(
 
     let mut unresolved = Vec::new();
     for (instrument_id, commands) in pending_by_instrument(pending) {
-        let executions = refresh_recent_execution_history(context, &instrument_id).await?;
+        let executions =
+            refresh_recent_execution_history(context, &instrument_id, &commands).await?;
         context.shared.write(|state| {
             if !executions.is_empty() {
                 state.merge_executions(executions.clone());
@@ -2159,15 +2163,21 @@ fn unresolved_pending_after_executions(
 async fn refresh_recent_order_history(
     context: &LiveContext,
     instrument_id: &InstrumentId,
+    pending: &[PendingUnknownCommand],
 ) -> Result<Vec<Order>> {
     let spec = require_spec(context, instrument_id)?;
+    let history_window = repair_time_window(context, instrument_id, pending);
     match &context.adapter {
         #[cfg(feature = "binance")]
         AdapterHandle::Binance(adapter) => {
-            let query = [
+            let mut query = vec![
                 ("symbol".to_owned(), spec.native_symbol.to_string()),
                 ("limit".to_owned(), "50".to_owned()),
             ];
+            if let Some((start_time, end_time)) = history_window {
+                query.push(("startTime".to_owned(), start_time.to_string()));
+                query.push(("endTime".to_owned(), end_time.to_string()));
+            }
             let pairs = query
                 .iter()
                 .map(|(key, value)| (key.as_str(), value.as_str()))
@@ -2184,11 +2194,15 @@ async fn refresh_recent_order_history(
         }
         #[cfg(feature = "bybit")]
         AdapterHandle::Bybit(adapter) => {
-            let query = [
+            let mut query = vec![
                 ("category".to_owned(), "linear".to_owned()),
                 ("symbol".to_owned(), spec.native_symbol.to_string()),
                 ("limit".to_owned(), "50".to_owned()),
             ];
+            if let Some((start_time, end_time)) = history_window {
+                query.push(("startTime".to_owned(), start_time.to_string()));
+                query.push(("endTime".to_owned(), end_time.to_string()));
+            }
             let pairs = query
                 .iter()
                 .map(|(key, value)| (key.as_str(), value.as_str()))
@@ -2204,15 +2218,21 @@ async fn refresh_recent_order_history(
 async fn refresh_recent_execution_history(
     context: &LiveContext,
     instrument_id: &InstrumentId,
+    pending: &[PendingUnknownCommand],
 ) -> Result<Vec<Execution>> {
+    let history_window = repair_time_window(context, instrument_id, pending);
     match &context.adapter {
         #[cfg(feature = "binance")]
         AdapterHandle::Binance(adapter) => {
             let spec = require_spec(context, instrument_id)?;
-            let query = [
+            let mut query = vec![
                 ("symbol".to_owned(), spec.native_symbol.to_string()),
                 ("limit".to_owned(), "100".to_owned()),
             ];
+            if let Some((start_time, end_time)) = history_window {
+                query.push(("startTime".to_owned(), start_time.to_string()));
+                query.push(("endTime".to_owned(), end_time.to_string()));
+            }
             let pairs = query
                 .iter()
                 .map(|(key, value)| (key.as_str(), value.as_str()))
@@ -2230,11 +2250,15 @@ async fn refresh_recent_execution_history(
         #[cfg(feature = "bybit")]
         AdapterHandle::Bybit(adapter) => {
             let spec = require_spec(context, instrument_id)?;
-            let query = [
+            let mut query = vec![
                 ("category".to_owned(), "linear".to_owned()),
                 ("symbol".to_owned(), spec.native_symbol.to_string()),
                 ("limit".to_owned(), "100".to_owned()),
             ];
+            if let Some((start_time, end_time)) = history_window {
+                query.push(("startTime".to_owned(), start_time.to_string()));
+                query.push(("endTime".to_owned(), end_time.to_string()));
+            }
             let pairs = query
                 .iter()
                 .map(|(key, value)| (key.as_str(), value.as_str()))
@@ -2249,6 +2273,62 @@ async fn refresh_recent_execution_history(
             adapter.parse_executions_snapshot(&payload)
         }
     }
+}
+
+fn repair_time_window(
+    context: &LiveContext,
+    instrument_id: &InstrumentId,
+    pending: &[PendingUnknownCommand],
+) -> Option<(i64, i64)> {
+    let now_ms = timestamp_now_ms().value();
+    let (latest_order_ms, latest_execution_ms) = context.shared.read(|state| {
+        (
+            state
+                .latest_order_update_at(instrument_id)
+                .map(|timestamp| timestamp.value()),
+            state
+                .latest_execution_at(instrument_id)
+                .map(|timestamp| timestamp.value()),
+        )
+    });
+    let fallback_last_private_ms = context
+        .shared
+        .health_snapshot()
+        .last_private_msg_at
+        .map(|timestamp| timestamp.value());
+    let oldest_pending_ms = pending
+        .iter()
+        .map(|command| command.recorded_at.value())
+        .min();
+    repair_window_start_ms(
+        now_ms,
+        latest_order_ms,
+        latest_execution_ms,
+        fallback_last_private_ms,
+        oldest_pending_ms,
+    )
+    .map(|start_ms| (start_ms, now_ms))
+}
+
+fn repair_window_start_ms(
+    now_ms: i64,
+    latest_order_ms: Option<i64>,
+    latest_execution_ms: Option<i64>,
+    fallback_last_private_ms: Option<i64>,
+    oldest_pending_ms: Option<i64>,
+) -> Option<i64> {
+    let anchor = [latest_order_ms, latest_execution_ms, oldest_pending_ms]
+        .into_iter()
+        .flatten()
+        .min()
+        .or(fallback_last_private_ms)?;
+    let lower_bound = now_ms.saturating_sub(HISTORY_REPAIR_MAX_LOOKBACK_MS);
+    Some(
+        anchor
+            .saturating_sub(HISTORY_REPAIR_REWIND_MS)
+            .max(lower_bound)
+            .min(now_ms),
+    )
 }
 
 fn order_matches_pending(order: &Order, pending: &PendingUnknownCommand) -> bool {
@@ -2769,7 +2849,8 @@ mod tests {
     use super::{
         PendingUnknownCommand, SequenceTracker, bybit_private_sequence_observations,
         bybit_public_sequence_observations, needs_recent_history_repair, pending_by_instrument,
-        unresolved_pending_after_executions, unresolved_pending_after_orders,
+        repair_window_start_ms, unresolved_pending_after_executions,
+        unresolved_pending_after_orders,
     };
     use crate::client::BatMarketsBuilder;
     use bat_markets_core::{
@@ -2908,6 +2989,30 @@ mod tests {
 
         let clean = HealthReport::default();
         assert!(needs_recent_history_repair(&clean, 1));
+    }
+
+    #[test]
+    fn repair_window_prefers_earliest_recent_anchor_and_applies_rewind() {
+        let now_ms = 10_000_000;
+        let start_ms = repair_window_start_ms(
+            now_ms,
+            Some(9_900_000),
+            Some(9_950_000),
+            Some(9_980_000),
+            Some(9_970_000),
+        )
+        .expect("recent anchors should produce a bounded start window");
+
+        assert_eq!(start_ms, 9_840_000);
+    }
+
+    #[test]
+    fn repair_window_falls_back_to_last_private_message_and_caps_lookback() {
+        let now_ms = 10 * 24 * 60 * 60 * 1_000;
+        let start_ms = repair_window_start_ms(now_ms, None, None, Some(1_000), None)
+            .expect("last private message should still anchor the window");
+
+        assert_eq!(start_ms, now_ms - super::HISTORY_REPAIR_MAX_LOOKBACK_MS);
     }
 
     fn pending_unknown(

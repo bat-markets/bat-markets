@@ -363,6 +363,30 @@ impl EngineState {
     }
 
     #[must_use]
+    pub fn latest_order_update_at(
+        &self,
+        instrument_id: &InstrumentId,
+    ) -> Option<crate::primitives::TimestampMs> {
+        self.orders
+            .values()
+            .filter(|order| &order.instrument_id == instrument_id)
+            .map(|order| order.updated_at)
+            .max()
+    }
+
+    #[must_use]
+    pub fn latest_execution_at(
+        &self,
+        instrument_id: &InstrumentId,
+    ) -> Option<crate::primitives::TimestampMs> {
+        self.executions
+            .iter()
+            .filter(|execution| &execution.instrument_id == instrument_id)
+            .map(|execution| execution.executed_at)
+            .max()
+    }
+
+    #[must_use]
     pub const fn health(&self) -> &HealthReport {
         &self.health
     }
