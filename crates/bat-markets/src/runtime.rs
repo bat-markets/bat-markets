@@ -2002,16 +2002,12 @@ async fn resolve_pending_unknown_commands(context: &LiveContext) -> Result<usize
         }
 
         if !resolved {
-            resolved = refresh_order_history_for_pending(context, &command).await?;
-        }
-        if !resolved {
-            resolved = refresh_execution_history_for_pending(context, &command).await?;
-        }
-
-        if !resolved {
             unresolved.push(command);
         }
     }
+
+    unresolved = resolve_pending_from_recent_order_history(context, unresolved).await?;
+    unresolved = resolve_pending_from_recent_execution_history(context, unresolved).await?;
 
     let unresolved_len = unresolved.len();
     context
@@ -2021,21 +2017,105 @@ async fn resolve_pending_unknown_commands(context: &LiveContext) -> Result<usize
     Ok(unresolved_len)
 }
 
-async fn refresh_order_history_for_pending(
+async fn resolve_pending_from_recent_order_history(
     context: &LiveContext,
-    pending: &PendingUnknownCommand,
-) -> Result<bool> {
-    let spec = require_spec(context, &pending.instrument_id)?;
-    let orders = match &context.adapter {
+    pending: Vec<PendingUnknownCommand>,
+) -> Result<Vec<PendingUnknownCommand>> {
+    if pending.is_empty() {
+        return Ok(pending);
+    }
+
+    let mut unresolved = Vec::new();
+    for (instrument_id, commands) in pending_by_instrument(pending) {
+        let orders = refresh_recent_order_history(context, &instrument_id).await?;
+        context.shared.write(|state| {
+            if !orders.is_empty() {
+                state.merge_order_history(orders.clone());
+            }
+            state.mark_rest_success(None);
+        });
+        unresolved.extend(unresolved_pending_after_orders(commands, &orders));
+    }
+
+    Ok(unresolved)
+}
+
+async fn resolve_pending_from_recent_execution_history(
+    context: &LiveContext,
+    pending: Vec<PendingUnknownCommand>,
+) -> Result<Vec<PendingUnknownCommand>> {
+    if pending.is_empty() {
+        return Ok(pending);
+    }
+
+    let mut unresolved = Vec::new();
+    for (instrument_id, commands) in pending_by_instrument(pending) {
+        let executions = refresh_recent_execution_history(context, &instrument_id).await?;
+        context.shared.write(|state| {
+            if !executions.is_empty() {
+                state.merge_executions(executions.clone());
+            }
+            state.mark_rest_success(None);
+        });
+        unresolved.extend(unresolved_pending_after_executions(commands, &executions));
+    }
+
+    Ok(unresolved)
+}
+
+fn pending_by_instrument(
+    pending: Vec<PendingUnknownCommand>,
+) -> BTreeMap<InstrumentId, Vec<PendingUnknownCommand>> {
+    let mut grouped = BTreeMap::<InstrumentId, Vec<PendingUnknownCommand>>::new();
+    for command in pending {
+        grouped
+            .entry(command.instrument_id.clone())
+            .or_default()
+            .push(command);
+    }
+    grouped
+}
+
+fn unresolved_pending_after_orders(
+    pending: Vec<PendingUnknownCommand>,
+    orders: &[Order],
+) -> Vec<PendingUnknownCommand> {
+    pending
+        .into_iter()
+        .filter(|command| {
+            !orders
+                .iter()
+                .any(|order| order_matches_pending(order, command))
+        })
+        .collect()
+}
+
+fn unresolved_pending_after_executions(
+    pending: Vec<PendingUnknownCommand>,
+    executions: &[Execution],
+) -> Vec<PendingUnknownCommand> {
+    pending
+        .into_iter()
+        .filter(|command| {
+            !executions
+                .iter()
+                .any(|execution| execution_matches_pending(execution, command))
+        })
+        .collect()
+}
+
+async fn refresh_recent_order_history(
+    context: &LiveContext,
+    instrument_id: &InstrumentId,
+) -> Result<Vec<Order>> {
+    let spec = require_spec(context, instrument_id)?;
+    match &context.adapter {
         #[cfg(feature = "binance")]
         AdapterHandle::Binance(adapter) => {
-            let mut query = vec![("symbol".to_owned(), spec.native_symbol.to_string())];
-            if let Some(order_id) = &pending.order_id {
-                query.push(("orderId".to_owned(), order_id.to_string()));
-            } else {
-                return Ok(false);
-            }
-            query.push(("limit".to_owned(), "10".to_owned()));
+            let query = [
+                ("symbol".to_owned(), spec.native_symbol.to_string()),
+                ("limit".to_owned(), "50".to_owned()),
+            ];
             let pairs = query
                 .iter()
                 .map(|(key, value)| (key.as_str(), value.as_str()))
@@ -2048,21 +2128,15 @@ async fn refresh_order_history_for_pending(
                 "binance.order_history",
             )
             .await?;
-            adapter.parse_order_history_snapshot(&payload, timestamp_now_ms())?
+            adapter.parse_order_history_snapshot(&payload, timestamp_now_ms())
         }
         #[cfg(feature = "bybit")]
         AdapterHandle::Bybit(adapter) => {
-            let mut query = vec![
+            let query = [
                 ("category".to_owned(), "linear".to_owned()),
                 ("symbol".to_owned(), spec.native_symbol.to_string()),
-                ("limit".to_owned(), "20".to_owned()),
+                ("limit".to_owned(), "50".to_owned()),
             ];
-            if let Some(order_id) = &pending.order_id {
-                query.push(("orderId".to_owned(), order_id.to_string()));
-            }
-            if let Some(client_order_id) = &pending.client_order_id {
-                query.push(("orderLinkId".to_owned(), client_order_id.to_string()));
-            }
             let pairs = query
                 .iter()
                 .map(|(key, value)| (key.as_str(), value.as_str()))
@@ -2070,39 +2144,23 @@ async fn refresh_order_history_for_pending(
             let payload =
                 bybit_signed_get_text(context, "/v5/order/history", &pairs, "bybit.order_history")
                     .await?;
-            adapter.parse_order_history_snapshot(&payload, timestamp_now_ms())?
+            adapter.parse_order_history_snapshot(&payload, timestamp_now_ms())
         }
-    };
-
-    let found = orders
-        .iter()
-        .any(|order| order_matches_pending(order, pending));
-    if found {
-        context.shared.write(|state| {
-            state.merge_order_history(orders);
-            state.mark_rest_success(None);
-        });
     }
-    Ok(found)
 }
 
-async fn refresh_execution_history_for_pending(
+async fn refresh_recent_execution_history(
     context: &LiveContext,
-    pending: &PendingUnknownCommand,
-) -> Result<bool> {
-    let executions = match &context.adapter {
+    instrument_id: &InstrumentId,
+) -> Result<Vec<Execution>> {
+    match &context.adapter {
         #[cfg(feature = "binance")]
         AdapterHandle::Binance(adapter) => {
-            let spec = require_spec(context, &pending.instrument_id)?;
-            let mut query = vec![
+            let spec = require_spec(context, instrument_id)?;
+            let query = [
                 ("symbol".to_owned(), spec.native_symbol.to_string()),
-                ("limit".to_owned(), "50".to_owned()),
+                ("limit".to_owned(), "100".to_owned()),
             ];
-            if let Some(order_id) = &pending.order_id {
-                query.push(("orderId".to_owned(), order_id.to_string()));
-            } else {
-                return Ok(false);
-            }
             let pairs = query
                 .iter()
                 .map(|(key, value)| (key.as_str(), value.as_str()))
@@ -2115,20 +2173,16 @@ async fn refresh_execution_history_for_pending(
                 "binance.execution_history",
             )
             .await?;
-            adapter.parse_executions_snapshot(&payload)?
+            adapter.parse_executions_snapshot(&payload)
         }
         #[cfg(feature = "bybit")]
         AdapterHandle::Bybit(adapter) => {
-            let mut query = vec![("category".to_owned(), "linear".to_owned())];
-            if let Some(order_id) = &pending.order_id {
-                query.push(("orderId".to_owned(), order_id.to_string()));
-            }
-            if let Some(client_order_id) = &pending.client_order_id {
-                query.push(("orderLinkId".to_owned(), client_order_id.to_string()));
-            }
-            if pending.order_id.is_none() && pending.client_order_id.is_none() {
-                return Ok(false);
-            }
+            let spec = require_spec(context, instrument_id)?;
+            let query = [
+                ("category".to_owned(), "linear".to_owned()),
+                ("symbol".to_owned(), spec.native_symbol.to_string()),
+                ("limit".to_owned(), "100".to_owned()),
+            ];
             let pairs = query
                 .iter()
                 .map(|(key, value)| (key.as_str(), value.as_str()))
@@ -2140,20 +2194,9 @@ async fn refresh_execution_history_for_pending(
                 "bybit.execution_history",
             )
             .await?;
-            adapter.parse_executions_snapshot(&payload)?
+            adapter.parse_executions_snapshot(&payload)
         }
-    };
-
-    let found = executions
-        .iter()
-        .any(|execution| execution_matches_pending(execution, pending));
-    if found {
-        context.shared.write(|state| {
-            state.merge_executions(executions);
-            state.mark_rest_success(None);
-        });
     }
-    Ok(found)
 }
 
 fn order_matches_pending(order: &Order, pending: &PendingUnknownCommand) -> bool {
@@ -2672,10 +2715,17 @@ fn parse_decimal(raw: &str, venue: Venue) -> Result<Decimal> {
 #[cfg(test)]
 mod tests {
     use super::{
-        SequenceTracker, bybit_private_sequence_observations, bybit_public_sequence_observations,
+        PendingUnknownCommand, SequenceTracker, bybit_private_sequence_observations,
+        bybit_public_sequence_observations, pending_by_instrument,
+        unresolved_pending_after_executions, unresolved_pending_after_orders,
     };
     use crate::client::BatMarketsBuilder;
-    use bat_markets_core::{Product, Venue};
+    use bat_markets_core::{
+        ClientOrderId, CommandOperation, Execution, InstrumentId, Order, OrderId, Price, Product,
+        Quantity, Side, TimestampMs, Venue,
+    };
+    use bat_markets_core::{OrderStatus, OrderType};
+    use rust_decimal::Decimal;
 
     const BYBIT_PUBLIC_ORDERBOOK: &str = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -2744,5 +2794,90 @@ mod tests {
         assert_eq!(position[0].value, 300);
         assert_eq!(execution.len(), 1);
         assert_eq!(execution[0].value, 301);
+    }
+
+    #[test]
+    fn pending_unknown_commands_group_by_instrument() {
+        let btc = InstrumentId::from("BTC/USDT:USDT");
+        let eth = InstrumentId::from("ETH/USDT:USDT");
+        let grouped = pending_by_instrument(vec![
+            pending_unknown(&btc, 1, "btc-1"),
+            pending_unknown(&btc, 2, "btc-2"),
+            pending_unknown(&eth, 3, "eth-1"),
+        ]);
+
+        assert_eq!(grouped.len(), 2);
+        assert_eq!(grouped[&btc].len(), 2);
+        assert_eq!(grouped[&eth].len(), 1);
+    }
+
+    #[test]
+    fn recent_history_batch_can_resolve_multiple_pending_commands() {
+        let instrument_id = InstrumentId::from("BTC/USDT:USDT");
+        let first = pending_unknown(&instrument_id, 101, "first");
+        let second = pending_unknown(&instrument_id, 102, "second");
+
+        let after_orders = unresolved_pending_after_orders(
+            vec![first.clone(), second.clone()],
+            &[sample_order(101, "first", &instrument_id)],
+        );
+        assert_eq!(after_orders, vec![second.clone()]);
+
+        let after_executions = unresolved_pending_after_executions(
+            after_orders,
+            &[sample_execution(102, &instrument_id)],
+        );
+        assert!(after_executions.is_empty());
+    }
+
+    fn pending_unknown(
+        instrument_id: &InstrumentId,
+        order_id: i64,
+        client_order_id: &str,
+    ) -> PendingUnknownCommand {
+        PendingUnknownCommand {
+            operation: CommandOperation::CreateOrder,
+            instrument_id: instrument_id.clone(),
+            order_id: Some(OrderId::from(order_id.to_string())),
+            client_order_id: Some(ClientOrderId::from(client_order_id)),
+            recorded_at: TimestampMs::new(1),
+        }
+    }
+
+    fn sample_order(order_id: i64, client_order_id: &str, instrument_id: &InstrumentId) -> Order {
+        Order {
+            order_id: OrderId::from(order_id.to_string()),
+            client_order_id: Some(ClientOrderId::from(client_order_id)),
+            instrument_id: instrument_id.clone(),
+            side: Side::Buy,
+            order_type: OrderType::Limit,
+            time_in_force: None,
+            status: OrderStatus::Canceled,
+            price: Some(Price::new(Decimal::new(60000, 0))),
+            quantity: Quantity::new(Decimal::new(2, 3)),
+            filled_quantity: Quantity::new(Decimal::ZERO),
+            average_fill_price: None,
+            reduce_only: false,
+            post_only: true,
+            created_at: TimestampMs::new(1),
+            updated_at: TimestampMs::new(2),
+            venue_status: None,
+        }
+    }
+
+    fn sample_execution(order_id: i64, instrument_id: &InstrumentId) -> Execution {
+        Execution {
+            execution_id: bat_markets_core::TradeId::from(format!("fill-{order_id}")),
+            order_id: OrderId::from(order_id.to_string()),
+            client_order_id: None,
+            instrument_id: instrument_id.clone(),
+            side: Side::Buy,
+            quantity: Quantity::new(Decimal::new(2, 3)),
+            price: Price::new(Decimal::new(60000, 0)),
+            fee: None,
+            fee_asset: None,
+            liquidity: None,
+            executed_at: TimestampMs::new(3),
+        }
     }
 }

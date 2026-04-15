@@ -38,6 +38,7 @@ This matrix documents the current `0.1.x` futures-first surface after live trans
 ## Honest Limits
 
 - Command writes do not pretend transport errors are harmless: they return `UnknownExecution` receipts and trigger reconcile attempts.
-- Reconcile now repairs balances, positions, open orders, and recent execution evidence, but it still does not rebuild a full historical ledger.
+- Reconcile now repairs balances, positions, open orders, and recent execution evidence, and recent-history repair batches pending `UnknownExecution` checks per instrument instead of repeating identical REST calls.
+- Reconcile still does not rebuild a full historical ledger.
 - Live sandbox tests are env-gated and write flows require an explicit manual gate.
 - Mainnet production-key coverage is intentionally read-only in the repo test harness; private write tests remain sandbox-only by design.

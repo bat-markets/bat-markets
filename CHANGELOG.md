@@ -7,4 +7,4 @@
 - add execution lane and state engine foundation
 - add Binance and Bybit linear futures adapters with fixture-backed parsing
 - add facade API, tests, examples, and quality gates
-
+- batch recent-history `UnknownExecution` repair per instrument to cut repeated REST history calls
