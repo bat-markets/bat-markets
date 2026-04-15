@@ -1,0 +1,25 @@
+[package]
+name = "bat-markets-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+description = "Internal contracts and state engine for bat-markets"
+
+[dependencies]
+hex.workspace = true
+hmac.workspace = true
+parking_lot.workspace = true
+rust_decimal.workspace = true
+serde.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+
+[lints]
+workspace = true

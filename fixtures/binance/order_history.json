@@ -1,0 +1,1 @@
+[{"symbol":"BTCUSDT","orderId":123456789,"clientOrderId":"cli-binance-1","side":"BUY","type":"LIMIT","timeInForce":"GTC","status":"FILLED","price":"70080.0","origQty":"0.010","executedQty":"0.010","avgPrice":"70079.5","reduceOnly":false,"updateTime":1710000000950,"time":1710000000500}]

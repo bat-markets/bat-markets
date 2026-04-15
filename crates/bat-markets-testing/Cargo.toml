@@ -1,0 +1,29 @@
+[package]
+name = "bat-markets-testing"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+description = "Fixtures, smoke helpers, and benches for bat-markets"
+
+[dependencies]
+bat-markets = { path = "../bat-markets", version = "0.1.0" }
+bat-markets-binance = { path = "../bat-markets-binance", version = "0.1.0" }
+bat-markets-bybit = { path = "../bat-markets-bybit", version = "0.1.0" }
+bat-markets-core = { path = "../bat-markets-core", version = "0.1.0" }
+rust_decimal.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+criterion = "0.7"
+
+[[bench]]
+name = "engine"
+harness = false
+
+[lints]
+workspace = true

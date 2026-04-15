@@ -1,0 +1,2 @@
+{"e":"ORDER_TRADE_UPDATE","o":{"s":"BTCUSDT","c":"cli-binance-1","S":"BUY","o":"LIMIT","f":"GTC","q":"0.010","p":"70000.0","ap":"69995.0","x":"TRADE","X":"PARTIALLY_FILLED","i":123456,"l":"0.005","z":"0.005","L":"69995.0","n":"0.05","N":"USDT","T":1710000000700,"t":987654,"R":false,"O":1710000000650}}
+

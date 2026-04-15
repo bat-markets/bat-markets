@@ -1,0 +1,1 @@
+{"topic":"order","creationTime":1710000100800,"data":[{"symbol":"BTCUSDT","orderId":"bybit-order-1","orderLinkId":"cli-bybit-1","side":"Buy","orderType":"Limit","price":"70080.0","qty":"0.015","orderStatus":"Cancelled","cumExecQty":"0.005","avgPrice":"70078.0","timeInForce":"GTC","reduceOnly":false,"createdTime":"1710000100550","updatedTime":"1710000100800"}]}
