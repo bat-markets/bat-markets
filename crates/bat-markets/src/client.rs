@@ -9,8 +9,8 @@ use tokio::sync::{broadcast, watch};
 
 use bat_markets_core::{
     AuthConfig, BatMarketsConfig, CapabilitySet, EngineState, ErrorKind, HealthNotification,
-    HealthReport, InstrumentSpec, LaneSet, MarketError, Product, Result, Signer, Venue,
-    VenueAdapter,
+    HealthReport, InstrumentSpec, LaneSet, MarketError, Product, PublicLaneEvent, Result, Signer,
+    Venue, VenueAdapter,
 };
 
 #[cfg(feature = "binance")]
@@ -76,6 +76,7 @@ pub(crate) struct SharedState {
     diagnostics: SharedStateDiagnostics,
     health_watch: watch::Sender<HealthReport>,
     health_notifications: broadcast::Sender<HealthNotification>,
+    public_events: broadcast::Sender<PublicLaneEvent>,
 }
 
 impl SharedState {
@@ -83,12 +84,14 @@ impl SharedState {
         let snapshot = state.health().clone();
         let (health_watch, _) = watch::channel(snapshot);
         let (health_notifications, _) = broadcast::channel(64);
+        let (public_events, _) = broadcast::channel(4_096);
 
         Self {
             state: RwLock::new(state),
             diagnostics: SharedStateDiagnostics::default(),
             health_watch,
             health_notifications,
+            public_events,
         }
     }
 
@@ -147,6 +150,33 @@ impl SharedState {
 
     pub(crate) fn subscribe_health_notifications(&self) -> broadcast::Receiver<HealthNotification> {
         self.health_notifications.subscribe()
+    }
+
+    pub(crate) fn apply_public_events(&self, events: &[PublicLaneEvent]) {
+        if events.is_empty() {
+            return;
+        }
+
+        self.write(|state| {
+            for event in events.iter().cloned() {
+                let _ = state.apply_public_event(event);
+            }
+        });
+
+        for event in events.iter().cloned() {
+            let _ = self.public_events.send(event);
+        }
+    }
+
+    pub(crate) fn apply_public_event(&self, event: PublicLaneEvent) {
+        self.write(|state| {
+            let _ = state.apply_public_event(event.clone());
+        });
+        let _ = self.public_events.send(event);
+    }
+
+    pub(crate) fn subscribe_public_events(&self) -> broadcast::Receiver<PublicLaneEvent> {
+        self.public_events.subscribe()
     }
 }
 

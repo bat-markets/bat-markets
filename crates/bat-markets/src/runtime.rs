@@ -1046,10 +1046,12 @@ pub(crate) async fn refresh_open_interest(
             }
         };
 
-        let event = open_interest.clone();
+        context
+            .shared
+            .apply_public_event(bat_markets_core::PublicLaneEvent::OpenInterest(
+                open_interest.clone(),
+            ));
         context.shared.write(|state| {
-            let _ =
-                state.apply_public_event(bat_markets_core::PublicLaneEvent::OpenInterest(event));
             state.mark_rest_success(None);
         });
         Ok(open_interest)
@@ -1408,11 +1410,9 @@ async fn run_binance_public_stream(
             }
             _ = maintenance.tick() => {
                 if last_frame_at.elapsed() >= Duration::from_millis(context.config.timeouts.ws_idle_ms.max(1)) {
-                    context.shared.write(|state| {
-                        let _ = state.apply_public_event(PublicLaneEvent::Divergence(
-                            bat_markets_core::DivergenceEvent::SequenceGap { at: None },
-                        ));
-                    });
+                    context.shared.apply_public_event(PublicLaneEvent::Divergence(
+                        bat_markets_core::DivergenceEvent::SequenceGap { at: None },
+                    ));
                     return Err(sequence_gap_error(
                         context.config.venue,
                         "binance.public_ws.idle",
@@ -1439,22 +1439,16 @@ async fn run_binance_public_stream(
                     }
                     for observation in binance_public_sequence_observations(context, &payload)? {
                         if let Err(at) = sequence.observe(observation) {
-                            context.shared.write(|state| {
-                                let _ = state.apply_public_event(PublicLaneEvent::Divergence(
-                                    bat_markets_core::DivergenceEvent::SequenceGap {
-                                        at: Some(SequenceNumber::new(at.max(0) as u64)),
-                                    },
-                                ));
-                            });
+                            context.shared.apply_public_event(PublicLaneEvent::Divergence(
+                                bat_markets_core::DivergenceEvent::SequenceGap {
+                                    at: Some(SequenceNumber::new(at.max(0) as u64)),
+                                },
+                            ));
                             return Err(sequence_gap_error(context.config.venue, "binance.public_ws.sequence", Some(at)));
                         }
                     }
                     let events = context.adapter.as_adapter().parse_public(&payload)?;
-                    context.shared.write(|state| {
-                        for event in events {
-                            let _ = state.apply_public_event(event);
-                        }
-                    });
+                    context.shared.apply_public_events(&events);
                     last_frame_at = Instant::now();
                 }
             }
@@ -1626,11 +1620,9 @@ async fn run_bybit_public_stream(
             }
             _ = maintenance.tick() => {
                 if last_frame_at.elapsed() >= Duration::from_millis(context.config.timeouts.ws_idle_ms.max(1)) {
-                    context.shared.write(|state| {
-                        let _ = state.apply_public_event(PublicLaneEvent::Divergence(
-                            bat_markets_core::DivergenceEvent::SequenceGap { at: None },
-                        ));
-                    });
+                    context.shared.apply_public_event(PublicLaneEvent::Divergence(
+                        bat_markets_core::DivergenceEvent::SequenceGap { at: None },
+                    ));
                     return Err(sequence_gap_error(
                         context.config.venue,
                         "bybit.public_ws.idle",
@@ -1657,22 +1649,16 @@ async fn run_bybit_public_stream(
                     }
                     for observation in bybit_public_sequence_observations(context, &payload)? {
                         if let Err(at) = sequence.observe(observation) {
-                            context.shared.write(|state| {
-                                let _ = state.apply_public_event(PublicLaneEvent::Divergence(
-                                    bat_markets_core::DivergenceEvent::SequenceGap {
-                                        at: Some(SequenceNumber::new(at.max(0) as u64)),
-                                    },
-                                ));
-                            });
+                            context.shared.apply_public_event(PublicLaneEvent::Divergence(
+                                bat_markets_core::DivergenceEvent::SequenceGap {
+                                    at: Some(SequenceNumber::new(at.max(0) as u64)),
+                                },
+                            ));
                             return Err(sequence_gap_error(context.config.venue, "bybit.public_ws.sequence", Some(at)));
                         }
                     }
                     let events = context.adapter.as_adapter().parse_public(&payload)?;
-                    context.shared.write(|state| {
-                        for event in events {
-                            let _ = state.apply_public_event(event);
-                        }
-                    });
+                    context.shared.apply_public_events(&events);
                     last_frame_at = Instant::now();
                 }
             }

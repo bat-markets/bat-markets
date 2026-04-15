@@ -1,4 +1,7 @@
-use tokio::{sync::oneshot, task::JoinHandle};
+use tokio::{
+    sync::{broadcast, oneshot},
+    task::JoinHandle,
+};
 
 use bat_markets_core::{
     CommandOperation, CommandReceipt, InstrumentId, PrivateLaneEvent, PublicLaneEvent,
@@ -101,12 +104,14 @@ pub struct PublicLaneClient<'a> {
 impl<'a> PublicLaneClient<'a> {
     pub fn ingest_json(&self, payload: &str) -> Result<Vec<PublicLaneEvent>> {
         let events = self.inner.adapter.as_adapter().parse_public(payload)?;
-        self.inner.write_state(|state| {
-            for event in events.iter().cloned() {
-                let _ = state.apply_public_event(event);
-            }
-        });
+        self.inner.shared.apply_public_events(&events);
         Ok(events)
+    }
+
+    /// Subscribe to fast public-lane events emitted by fixture ingest or live runtime.
+    #[must_use]
+    pub fn subscribe(&self) -> broadcast::Receiver<PublicLaneEvent> {
+        self.inner.shared.subscribe_public_events()
     }
 
     /// Spawn a reconnecting live public-stream runner.
@@ -179,5 +184,43 @@ impl<'a> CommandLaneClient<'a> {
         self.inner
             .write_state(|state| state.apply_command_receipt(&receipt));
         Ok(receipt)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tokio::time::{Duration, timeout};
+
+    use bat_markets_core::{Product, PublicLaneEvent, Venue};
+
+    use crate::BatMarketsBuilder;
+
+    const BINANCE_PUBLIC_TRADE: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../fixtures/binance/public_trade.json"
+    ));
+
+    #[tokio::test]
+    async fn public_subscribe_receives_fixture_ingest_events() {
+        let client = BatMarketsBuilder::default()
+            .venue(Venue::Binance)
+            .product(Product::LinearUsdt)
+            .build()
+            .expect("fixture client should build");
+        let mut receiver = client.stream().public().subscribe();
+
+        let events = client
+            .stream()
+            .public()
+            .ingest_json(BINANCE_PUBLIC_TRADE)
+            .expect("fixture payload should parse");
+        assert!(!events.is_empty());
+
+        let received = timeout(Duration::from_secs(1), receiver.recv())
+            .await
+            .expect("public event should arrive")
+            .expect("receiver should stay open");
+
+        assert!(matches!(received, PublicLaneEvent::Trade(_)));
     }
 }

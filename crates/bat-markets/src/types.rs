@@ -5,7 +5,7 @@ pub use bat_markets_core::{
     InstrumentStatus, InstrumentSupport, Kline, Leverage, Liquidity, ListExecutionsRequest,
     ListOpenOrdersRequest, MarginMode, MarketType, Notional, OpenInterest, Order, OrderId,
     OrderStatus, OrderType, Position, PositionDirection, PositionId, PositionMode, Price, Product,
-    Quantity, Rate, ReconcileOutcome, ReconcileReport, ReconcileTrigger, RequestId, SequenceNumber,
-    SetLeverageRequest, SetMarginModeRequest, Side, Ticker, TimeInForce, TimestampMs, TradeId,
-    TradeTick, TriggerType, Venue,
+    PublicLaneEvent, Quantity, Rate, ReconcileOutcome, ReconcileReport, ReconcileTrigger,
+    RequestId, SequenceNumber, SetLeverageRequest, SetMarginModeRequest, Side, Ticker, TimeInForce,
+    TimestampMs, TradeId, TradeTick, TriggerType, Venue,
 };
