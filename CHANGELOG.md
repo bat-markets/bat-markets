@@ -8,3 +8,4 @@
 - add Binance and Bybit linear futures adapters with fixture-backed parsing
 - add facade API, tests, examples, and quality gates
 - batch recent-history `UnknownExecution` repair per instrument to cut repeated REST history calls
+- keep periodic private reconcile snapshot-only unless health or pending commands require recent-history repair

@@ -20,11 +20,11 @@ use url::form_urlencoded::Serializer;
 
 use bat_markets_core::{
     CancelOrderRequest, ClientOrderId, CommandOperation, CommandReceipt, CommandStatus,
-    CreateOrderRequest, ErrorKind, Execution, GetOrderRequest, InstrumentId, InstrumentSpec,
-    ListExecutionsRequest, ListOpenOrdersRequest, MarginMode, MarketError, OpenInterest, Order,
-    OrderId, Price, PrivateLaneEvent, Product, PublicLaneEvent, Quantity, ReconcileOutcome,
-    ReconcileReport, ReconcileTrigger, Result, SequenceNumber, SetLeverageRequest,
-    SetMarginModeRequest, TimestampMs, Venue, VenueAdapter,
+    CreateOrderRequest, DegradedReason, ErrorKind, Execution, GetOrderRequest, HealthReport,
+    InstrumentId, InstrumentSpec, ListExecutionsRequest, ListOpenOrdersRequest, MarginMode,
+    MarketError, OpenInterest, Order, OrderId, Price, PrivateLaneEvent, Product, PublicLaneEvent,
+    Quantity, ReconcileOutcome, ReconcileReport, ReconcileTrigger, Result, SequenceNumber,
+    SetLeverageRequest, SetMarginModeRequest, TimestampMs, Venue, VenueAdapter,
 };
 
 #[cfg(feature = "binance")]
@@ -72,6 +72,12 @@ struct SequenceObservation {
     value: i64,
     strict_gap: bool,
     reset: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PrivateReconcileMode {
+    SnapshotOnly,
+    RecentHistoryRepair,
 }
 
 #[derive(Debug)]
@@ -965,13 +971,19 @@ pub(crate) async fn reconcile_private(
     trigger: ReconcileTrigger,
 ) -> Result<ReconcileReport> {
     let repaired_at = timestamp_now_ms();
+    let mode = reconcile_mode(context, trigger).await;
     let result = async {
         let _ = refresh_account(context).await?;
         let _ = refresh_positions(context).await?;
         let _ = refresh_open_orders(context, None).await?;
-        let _ = refresh_executions(context, None).await?;
-        let unresolved = resolve_pending_unknown_commands(context).await?;
-        Ok::<usize, MarketError>(unresolved)
+        match mode {
+            PrivateReconcileMode::SnapshotOnly => Ok::<usize, MarketError>(0),
+            PrivateReconcileMode::RecentHistoryRepair => {
+                let _ = refresh_executions(context, None).await?;
+                let unresolved = resolve_pending_unknown_commands(context).await?;
+                Ok::<usize, MarketError>(unresolved)
+            }
+        }
     }
     .await;
 
@@ -981,7 +993,12 @@ pub(crate) async fn reconcile_private(
                 trigger,
                 outcome: ReconcileOutcome::Synchronized,
                 repaired_at,
-                note: Some("snapshot reconcile completed".into()),
+                note: Some(match mode {
+                    PrivateReconcileMode::SnapshotOnly => "snapshot reconcile completed".into(),
+                    PrivateReconcileMode::RecentHistoryRepair => {
+                        "snapshot reconcile with recent-history repair completed".into()
+                    }
+                }),
             };
             let report_for_state = report.clone();
             context
@@ -1022,6 +1039,41 @@ pub(crate) async fn reconcile_private(
             Err(error)
         }
     }
+}
+
+async fn reconcile_mode(context: &LiveContext, trigger: ReconcileTrigger) -> PrivateReconcileMode {
+    match trigger {
+        ReconcileTrigger::Manual
+        | ReconcileTrigger::Reconnect
+        | ReconcileTrigger::SequenceGap
+        | ReconcileTrigger::UnknownExecution => PrivateReconcileMode::RecentHistoryRepair,
+        ReconcileTrigger::Periodic => {
+            let pending_unknown_count =
+                context.runtime_state.pending_unknown_commands().await.len();
+            let health = context.shared.health_snapshot();
+            if needs_recent_history_repair(&health, pending_unknown_count) {
+                PrivateReconcileMode::RecentHistoryRepair
+            } else {
+                PrivateReconcileMode::SnapshotOnly
+            }
+        }
+    }
+}
+
+fn needs_recent_history_repair(health: &HealthReport, pending_unknown_count: usize) -> bool {
+    if pending_unknown_count > 0 || health.state_divergence {
+        return true;
+    }
+
+    matches!(
+        health.degraded_reason,
+        Some(
+            DegradedReason::PrivateStreamGap
+                | DegradedReason::ReconcileRequired
+                | DegradedReason::CommandUncertain
+                | DegradedReason::StateDivergence
+        )
+    )
 }
 
 pub(crate) async fn spawn_public_stream(
@@ -2716,13 +2768,13 @@ fn parse_decimal(raw: &str, venue: Venue) -> Result<Decimal> {
 mod tests {
     use super::{
         PendingUnknownCommand, SequenceTracker, bybit_private_sequence_observations,
-        bybit_public_sequence_observations, pending_by_instrument,
+        bybit_public_sequence_observations, needs_recent_history_repair, pending_by_instrument,
         unresolved_pending_after_executions, unresolved_pending_after_orders,
     };
     use crate::client::BatMarketsBuilder;
     use bat_markets_core::{
-        ClientOrderId, CommandOperation, Execution, InstrumentId, Order, OrderId, Price, Product,
-        Quantity, Side, TimestampMs, Venue,
+        ClientOrderId, CommandOperation, DegradedReason, Execution, HealthReport, InstrumentId,
+        Order, OrderId, Price, Product, Quantity, Side, TimestampMs, Venue,
     };
     use bat_markets_core::{OrderStatus, OrderType};
     use rust_decimal::Decimal;
@@ -2828,6 +2880,34 @@ mod tests {
             &[sample_execution(102, &instrument_id)],
         );
         assert!(after_executions.is_empty());
+    }
+
+    #[test]
+    fn periodic_reconcile_stays_snapshot_only_for_stale_snapshot_without_uncertainty() {
+        let mut health = HealthReport::default();
+        health.mark_snapshot_age(6_000, 5_000);
+
+        assert!(!needs_recent_history_repair(&health, 0));
+    }
+
+    #[test]
+    fn periodic_reconcile_uses_recent_history_when_command_is_uncertain() {
+        let mut health = HealthReport::default();
+        health.mark_command_uncertain();
+
+        assert!(needs_recent_history_repair(&health, 0));
+    }
+
+    #[test]
+    fn periodic_reconcile_uses_recent_history_when_private_gap_or_pending_unknown_exists() {
+        let health = HealthReport {
+            degraded_reason: Some(DegradedReason::PrivateStreamGap),
+            ..HealthReport::default()
+        };
+        assert!(needs_recent_history_repair(&health, 0));
+
+        let clean = HealthReport::default();
+        assert!(needs_recent_history_repair(&clean, 1));
     }
 
     fn pending_unknown(
