@@ -2,7 +2,7 @@
 
 ## Current Milestone
 
-Integrate live transport, metadata bootstrap, and reconcile foundations on top of the existing engine contracts for the `0.1.x` futures-first scope.
+Stabilize the live futures-first `0.1.x` foundation and ship it honestly as a GitHub/source release before any crates.io packaging work.
 
 ## In Scope
 
@@ -16,6 +16,7 @@ Integrate live transport, metadata bootstrap, and reconcile foundations on top o
 - manual read-only mainnet smoke harness for operator validation
 - capability matrix and public rustdoc examples
 - expanded fixtures for negative and contradictory scenarios
+- GitHub/source release workflow and documentation for tagged `0.1.x` cuts
 
 ## Explicitly Out Of Scope
 
@@ -27,6 +28,7 @@ Integrate live transport, metadata bootstrap, and reconcile foundations on top o
 - options
 - persistence inside core
 - fake cross-venue abstractions for unstable semantics
+- crates.io publication before a dedicated registry strategy exists
 
 ## Ordered Backlog
 
@@ -37,3 +39,4 @@ Integrate live transport, metadata bootstrap, and reconcile foundations on top o
 5. add env-gated sandbox read and minimal write integration tests
 6. add manual read-only mainnet smoke harness
 7. expand fixtures and docs to cover new runtime behavior
+8. formalize GitHub/source release workflow for `0.1.x`

@@ -6,6 +6,7 @@ license.workspace = true
 homepage.workspace = true
 repository.workspace = true
 rust-version.workspace = true
+publish = false
 description = "Futures-first headless Rust exchange engine with honest Binance/Bybit linear futures support"
 readme = "../../README.md"
 keywords = ["exchange", "futures", "binance", "bybit", "trading"]

@@ -3,3 +3,4 @@
 .tmp-venv-ws/
 target/
 criterion/
+dist/

@@ -17,8 +17,15 @@ Use the same checks as CI:
 ./scripts/check.sh
 ```
 
+## Release Discipline
+
+For `0.1.x`, cut releases from GitHub tags and source archives only.
+
+- do not run `cargo publish`
+- keep workspace crates `publish = false` until there is an ADR for registry publication
+- use `./scripts/source-release.sh <tag>` to build the archive and checksum shape used by GitHub releases
+
 ## Scope Discipline
 
 The current focus is the `0.1.x` futures-first foundation.
 Do not add spot, asset write flows, or wide venue abstractions without an ADR and an explicit roadmap update.
-

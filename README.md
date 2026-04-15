@@ -18,6 +18,19 @@ This repository currently implements the initial production-grade foundation:
 - a state engine that applies private events and tracks command uncertainty,
 - quality gates for formatting, linting, tests, docs, and benchmarks.
 
+## Release Model
+
+`0.1.x` is currently a GitHub/source release, not a crates.io package.
+
+Use a tagged git dependency:
+
+```toml
+[dependencies]
+bat-markets = { git = "https://github.com/bat-markets/bat-markets.git", tag = "v0.1.0" }
+```
+
+The repository keeps every workspace crate `publish = false` until there is an explicit crates.io strategy for the facade and internal crate boundaries.
+
 ## Crates
 
 - `bat-markets`: public facade and ergonomic API
@@ -68,4 +81,5 @@ Read the architecture documents:
 - [`docs/architecture.md`](docs/architecture.md)
 - [`docs/roadmap.md`](docs/roadmap.md)
 - [`docs/error-model.md`](docs/error-model.md)
+- [`docs/release.md`](docs/release.md)
 - [`blueprint.md`](blueprint.md)

@@ -13,3 +13,4 @@
 - resolve pending `UnknownExecution` outcomes against local state before issuing remote repair queries
 - prefetch recent execution evidence only for local active/recent instruments when the reconcile trigger indicates stream gap or divergence
 - tolerate sparse Binance live account position fields and numeric zero-shapes instead of failing reconcile
+- formalize `0.1.x` as a GitHub/source release with `publish = false` workspace crates, release docs, and reproducible source archives
