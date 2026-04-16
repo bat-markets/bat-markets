@@ -349,15 +349,14 @@ impl BinanceLinearFuturesAdapter {
             )
             .with_venue(Venue::Binance, Product::LinearUsdt)
         })?;
-        let spec = self
-            .resolve_instrument(&request.instrument_id)
-            .ok_or_else(|| {
-                MarketError::new(
-                    ErrorKind::Unsupported,
-                    format!("unsupported binance instrument '{}'", request.instrument_id),
-                )
-                .with_venue(Venue::Binance, Product::LinearUsdt)
-            })?;
+        let instrument_id = request.single_instrument_id()?;
+        let spec = self.resolve_instrument(instrument_id).ok_or_else(|| {
+            MarketError::new(
+                ErrorKind::Unsupported,
+                format!("unsupported binance instrument '{}'", instrument_id),
+            )
+            .with_venue(Venue::Binance, Product::LinearUsdt)
+        })?;
         let rows =
             serde_json::from_str::<Vec<Vec<serde_json::Value>>>(payload).map_err(|error| {
                 MarketError::new(
@@ -1290,13 +1289,13 @@ mod tests {
                     [1710000000000,"64000.1","64100.0","63950.0","64050.0","12.345","1710000059999","0","0","0","0","0"],
                     [1710000060000,"64050.0","64150.0","64000.0","64100.0","23.456","1710000119999","0","0","0","0","0"]
                 ]"#,
-                &FetchOhlcvRequest {
-                    instrument_id: InstrumentId::from("BTC/USDT:USDT"),
-                    interval: "1m".into(),
-                    start_time: None,
-                    end_time: None,
-                    limit: Some(2),
-                },
+                &FetchOhlcvRequest::for_instrument(
+                    InstrumentId::from("BTC/USDT:USDT"),
+                    "1m",
+                    None,
+                    None,
+                    Some(2),
+                ),
             )
             .expect("binance klines snapshot should parse");
 

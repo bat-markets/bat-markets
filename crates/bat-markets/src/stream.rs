@@ -185,7 +185,22 @@ pub struct OhlcvWatch<'a> {
 
 impl<'a> OhlcvWatch<'a> {
     pub async fn recv(&mut self) -> Result<Kline> {
-        self.updates.recv().await
+        tokio::select! {
+            update = self.updates.recv() => update,
+            result = &mut self.stream.join => {
+                match result {
+                    Ok(Ok(())) => Err(bat_markets_core::MarketError::new(
+                        ErrorKind::TransportError,
+                        "OHLCV live stream finished before the next candle update",
+                    )),
+                    Ok(Err(error)) => Err(error),
+                    Err(error) => Err(bat_markets_core::MarketError::new(
+                        ErrorKind::TransportError,
+                        format!("stream task join failed while waiting for OHLCV update: {error}"),
+                    )),
+                }
+            }
+        }
     }
 
     pub async fn shutdown(self) -> Result<()> {

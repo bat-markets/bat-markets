@@ -1066,9 +1066,33 @@ pub(crate) async fn fetch_ohlcv(
     context: &LiveContext,
     request: &FetchOhlcvRequest,
 ) -> Result<Vec<Kline>> {
+    let instrument_ids = request.instrument_ids()?.to_vec();
+    if instrument_ids.len() == 1 {
+        return fetch_ohlcv_single(context, request).await;
+    }
+
+    let mut klines = Vec::new();
+    for instrument_id in instrument_ids {
+        let single_request = FetchOhlcvRequest::for_instrument(
+            instrument_id,
+            request.interval.clone(),
+            request.start_time,
+            request.end_time,
+            request.limit,
+        );
+        klines.extend(fetch_ohlcv_single(context, &single_request).await?);
+    }
+    Ok(klines)
+}
+
+async fn fetch_ohlcv_single(
+    context: &LiveContext,
+    request: &FetchOhlcvRequest,
+) -> Result<Vec<Kline>> {
     let started_at = Instant::now();
     let result = async {
-        let spec = require_spec(context, &request.instrument_id)?;
+        let instrument_id = request.single_instrument_id()?;
+        let spec = require_spec(context, instrument_id)?;
         let interval = parse_kline_interval(
             request.interval.as_ref(),
             context.config.venue,
@@ -1727,23 +1751,29 @@ async fn run_bybit_public_stream(
                     return Err(MarketError::new(ErrorKind::TransportError, "bybit public stream closed"));
                 };
                 let message = message.map_err(|error| transport_error(context.config.venue, "bybit.public_ws.read", error))?;
-                if let Message::Text(payload) = message {
-                    if is_bybit_control_message(&payload) {
-                        continue;
-                    }
-                    for observation in bybit_public_sequence_observations(context, &payload)? {
-                        if let Err(at) = sequence.observe(observation) {
-                            context.shared.apply_public_event(PublicLaneEvent::Divergence(
-                                bat_markets_core::DivergenceEvent::SequenceGap {
-                                    at: Some(SequenceNumber::new(at.max(0) as u64)),
-                                },
-                            ));
-                            return Err(sequence_gap_error(context.config.venue, "bybit.public_ws.sequence", Some(at)));
+                match message {
+                    Message::Text(payload) => {
+                        last_frame_at = Instant::now();
+                        if is_bybit_control_message(&payload) {
+                            continue;
                         }
+                        for observation in bybit_public_sequence_observations(context, &payload)? {
+                            if let Err(at) = sequence.observe(observation) {
+                                context.shared.apply_public_event(PublicLaneEvent::Divergence(
+                                    bat_markets_core::DivergenceEvent::SequenceGap {
+                                        at: Some(SequenceNumber::new(at.max(0) as u64)),
+                                    },
+                                ));
+                                return Err(sequence_gap_error(context.config.venue, "bybit.public_ws.sequence", Some(at)));
+                            }
+                        }
+                        let events = context.adapter.as_adapter().parse_public(&payload)?;
+                        context.shared.apply_public_events(&events);
                     }
-                    let events = context.adapter.as_adapter().parse_public(&payload)?;
-                    context.shared.apply_public_events(&events);
-                    last_frame_at = Instant::now();
+                    Message::Ping(_) | Message::Pong(_) | Message::Binary(_) => {
+                        last_frame_at = Instant::now();
+                    }
+                    _ => {}
                 }
             }
         }
@@ -1843,29 +1873,35 @@ async fn run_bybit_private_stream(
                     return Err(MarketError::new(ErrorKind::TransportError, "bybit private stream closed"));
                 };
                 let message = message.map_err(|error| transport_error(context.config.venue, "bybit.private_ws.read", error))?;
-                if let Message::Text(payload) = message {
-                    if is_bybit_control_message(&payload) {
-                        continue;
-                    }
-                    for observation in bybit_private_sequence_observations(context, &payload)? {
-                        if let Err(at) = sequence.observe(observation) {
-                            context.shared.write(|state| {
-                                state.apply_private_event(PrivateLaneEvent::Divergence(
-                                    bat_markets_core::DivergenceEvent::SequenceGap {
-                                        at: Some(SequenceNumber::new(at.max(0) as u64)),
-                                    },
-                                ));
-                            });
-                            return Err(sequence_gap_error(context.config.venue, "bybit.private_ws.sequence", Some(at)));
+                match message {
+                    Message::Text(payload) => {
+                        last_frame_at = Instant::now();
+                        if is_bybit_control_message(&payload) {
+                            continue;
                         }
-                    }
-                    let events = context.adapter.as_adapter().parse_private(&payload)?;
-                    context.shared.write(|state| {
-                        for event in events {
-                            state.apply_private_event(event);
+                        for observation in bybit_private_sequence_observations(context, &payload)? {
+                            if let Err(at) = sequence.observe(observation) {
+                                context.shared.write(|state| {
+                                    state.apply_private_event(PrivateLaneEvent::Divergence(
+                                        bat_markets_core::DivergenceEvent::SequenceGap {
+                                            at: Some(SequenceNumber::new(at.max(0) as u64)),
+                                        },
+                                    ));
+                                });
+                                return Err(sequence_gap_error(context.config.venue, "bybit.private_ws.sequence", Some(at)));
+                            }
                         }
-                    });
-                    last_frame_at = Instant::now();
+                        let events = context.adapter.as_adapter().parse_private(&payload)?;
+                        context.shared.write(|state| {
+                            for event in events {
+                                state.apply_private_event(event);
+                            }
+                        });
+                    }
+                    Message::Ping(_) | Message::Pong(_) | Message::Binary(_) => {
+                        last_frame_at = Instant::now();
+                    }
+                    _ => {}
                 }
             }
         }

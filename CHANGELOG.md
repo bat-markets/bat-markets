@@ -16,6 +16,9 @@
 - formalize `0.1.x` as a GitHub/source release with `publish = false` workspace crates, release docs, and reproducible source archives
 - add live diagnostics snapshots for shared-state lock wait/hold costs and key runtime latencies to guide future perf decisions
 - add unified `market().fetch_ohlcv(...)` for Binance and Bybit REST kline history
+- allow unified `market().fetch_ohlcv(...)` to batch `1..=30` instruments per call while preserving ccxt-style intervals and per-candle `instrument_id`
+- add `market().fetch_ohlcv_window(...)` and `market().fetch_ohlcv_all(...)` to fully paginate bounded OHLCV ranges across batched multi-symbol requests
 - add typed `stream().public().watch_ohlcv(...)` for one or many symbols on Binance and Bybit
 - normalize OHLCV intervals to ccxt-style values like `1m`, `5m`, `1h`, and `1d` across REST fetches and websocket watches
+- fix live Bybit `watch_ohlcv()` parsing when websocket kline payloads omit per-row `symbol` and only surface it in the topic name
 - add realistic OHLCV stress harness coverage for multi-symbol live fetch/watch flows and frontend-style `30 symbols x 3 days x 1m` paging

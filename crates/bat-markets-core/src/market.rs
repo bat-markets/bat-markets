@@ -246,14 +246,81 @@ impl From<KlineInterval> for Box<str> {
     }
 }
 
+pub const FETCH_OHLCV_MAX_INSTRUMENTS_PER_CALL: usize = 30;
+
 /// Historical OHLCV request.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FetchOhlcvRequest {
-    pub instrument_id: InstrumentId,
+    pub instrument_ids: Vec<InstrumentId>,
     pub interval: Box<str>,
     pub start_time: Option<TimestampMs>,
     pub end_time: Option<TimestampMs>,
     pub limit: Option<usize>,
+}
+
+impl FetchOhlcvRequest {
+    #[must_use]
+    pub fn for_instrument(
+        instrument_id: InstrumentId,
+        interval: impl Into<Box<str>>,
+        start_time: Option<TimestampMs>,
+        end_time: Option<TimestampMs>,
+        limit: Option<usize>,
+    ) -> Self {
+        Self {
+            instrument_ids: vec![instrument_id],
+            interval: interval.into(),
+            start_time,
+            end_time,
+            limit,
+        }
+    }
+
+    #[must_use]
+    pub fn for_instruments(
+        instrument_ids: Vec<InstrumentId>,
+        interval: impl Into<Box<str>>,
+        start_time: Option<TimestampMs>,
+        end_time: Option<TimestampMs>,
+        limit: Option<usize>,
+    ) -> Self {
+        Self {
+            instrument_ids,
+            interval: interval.into(),
+            start_time,
+            end_time,
+            limit,
+        }
+    }
+
+    pub fn instrument_ids(&self) -> crate::Result<&[InstrumentId]> {
+        if self.instrument_ids.is_empty() {
+            return Err(crate::MarketError::new(
+                crate::ErrorKind::ConfigError,
+                "fetch_ohlcv requires at least one instrument",
+            ));
+        }
+        if self.instrument_ids.len() > FETCH_OHLCV_MAX_INSTRUMENTS_PER_CALL {
+            return Err(crate::MarketError::new(
+                crate::ErrorKind::Unsupported,
+                format!(
+                    "fetch_ohlcv supports at most {FETCH_OHLCV_MAX_INSTRUMENTS_PER_CALL} instruments per call"
+                ),
+            ));
+        }
+        Ok(self.instrument_ids.as_slice())
+    }
+
+    pub fn single_instrument_id(&self) -> crate::Result<&InstrumentId> {
+        let instrument_ids = self.instrument_ids()?;
+        if instrument_ids.len() != 1 {
+            return Err(crate::MarketError::new(
+                crate::ErrorKind::Unsupported,
+                "single-instrument OHLCV parsing requires exactly one instrument_id",
+            ));
+        }
+        Ok(&instrument_ids[0])
+    }
 }
 
 /// Unified funding-rate snapshot.
@@ -354,5 +421,45 @@ fn next_month(month: Month) -> Month {
         Month::October => Month::November,
         Month::November => Month::December,
         Month::December => Month::January,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{FetchOhlcvRequest, InstrumentId, TimestampMs};
+
+    #[test]
+    fn fetch_ohlcv_request_accepts_single_instrument() {
+        let request = FetchOhlcvRequest::for_instrument(
+            InstrumentId::from("BTC/USDT:USDT"),
+            "1m",
+            Some(TimestampMs::new(1)),
+            Some(TimestampMs::new(2)),
+            Some(500),
+        );
+
+        let instrument_ids = request
+            .instrument_ids()
+            .expect("single instrument request should validate");
+        assert_eq!(instrument_ids.len(), 1);
+        assert_eq!(instrument_ids[0], InstrumentId::from("BTC/USDT:USDT"));
+    }
+
+    #[test]
+    fn fetch_ohlcv_request_rejects_more_than_30_instruments() {
+        let request = FetchOhlcvRequest::for_instruments(
+            (0..31)
+                .map(|index| InstrumentId::from(format!("SYM{index}/USDT:USDT")))
+                .collect(),
+            "5m",
+            None,
+            None,
+            Some(1000),
+        );
+
+        let error = request
+            .instrument_ids()
+            .expect_err("31 instruments should be rejected");
+        assert_eq!(error.kind, crate::ErrorKind::Unsupported);
     }
 }

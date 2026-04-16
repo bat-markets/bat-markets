@@ -14,7 +14,8 @@ This matrix documents the current `0.1.x` futures-first surface after live trans
 | manual private reconcile | yes | yes | exposed through `stream().private().reconcile().await` |
 | health snapshot | yes | yes | cheap synchronous snapshot |
 | health subscriptions | yes | yes | watch + broadcast notifications on structural health transitions |
-| OHLCV fetch | yes | yes | REST-backed unified candles via `market().fetch_ohlcv(...)`; intervals use ccxt-style strings such as `1m`, `5m`, `1h`, `1d` |
+| OHLCV fetch | yes | yes | REST-backed unified candles via `market().fetch_ohlcv(...)`; intervals use ccxt-style strings such as `1m`, `5m`, `1h`, `1d`, and each call can batch `1..=30` instruments |
+| OHLCV full-window fetch | yes | yes | `market().fetch_ohlcv_window(...)` / `market().fetch_ohlcv_all(...)` fully paginate a bounded range across the requested symbol batch |
 | OHLCV watch | yes | yes | typed live candles via `stream().public().watch_ohlcv(...)`; one or many symbols per watcher, same ccxt-style interval surface |
 | account refresh | yes | yes | REST snapshot-backed |
 | position refresh | yes | yes | REST snapshot-backed |

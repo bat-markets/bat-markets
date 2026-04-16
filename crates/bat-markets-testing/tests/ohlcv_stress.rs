@@ -1,14 +1,10 @@
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     env,
-    sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use tokio::{
-    task::JoinSet,
-    time::{Instant, sleep, timeout},
-};
+use tokio::time::{Instant, timeout};
 
 use bat_markets::{
     BatMarkets, BatMarketsBuilder, WatchOhlcvRequest,
@@ -25,8 +21,6 @@ const FRONTEND_SYMBOL_TARGET: usize = 30;
 const FRONTEND_LOOKBACK_DAYS: i64 = 3;
 const ONE_MINUTE_MS: i64 = 60_000;
 const DEFAULT_PAGE_LIMIT: usize = 1_000;
-const DEFAULT_FETCH_CONCURRENCY: usize = 4;
-const DEFAULT_PAGE_PAUSE_MS: u64 = 50;
 const DEFAULT_WATCH_TIMEOUT_SECS: u64 = 75;
 const LOCAL_WATCH_ROUNDS: usize = 20;
 
@@ -78,8 +72,6 @@ struct OhlcvStressPlan {
     symbol_target: usize,
     lookback_days: i64,
     page_limit: usize,
-    fetch_concurrency: usize,
-    page_pause: Duration,
     watch_timeout: Duration,
     end_open_time_ms: i64,
 }
@@ -98,15 +90,6 @@ impl OhlcvStressPlan {
             lookback_days: env_i64("BAT_MARKETS_OHLCV_STRESS_DAYS", FRONTEND_LOOKBACK_DAYS).max(1),
             page_limit: env_usize("BAT_MARKETS_OHLCV_STRESS_PAGE_LIMIT", DEFAULT_PAGE_LIMIT)
                 .clamp(1, DEFAULT_PAGE_LIMIT),
-            fetch_concurrency: env_usize(
-                "BAT_MARKETS_OHLCV_STRESS_CONCURRENCY",
-                DEFAULT_FETCH_CONCURRENCY,
-            )
-            .max(1),
-            page_pause: Duration::from_millis(env_u64(
-                "BAT_MARKETS_OHLCV_STRESS_PAGE_PAUSE_MS",
-                DEFAULT_PAGE_PAUSE_MS,
-            )),
             watch_timeout: Duration::from_secs(env_u64(
                 "BAT_MARKETS_OHLCV_STRESS_WATCH_TIMEOUT_SECS",
                 DEFAULT_WATCH_TIMEOUT_SECS,
@@ -132,7 +115,6 @@ impl OhlcvStressPlan {
 struct FetchWindowReport {
     instrument_id: InstrumentId,
     candles: Vec<Kline>,
-    requests: u64,
 }
 
 #[test]
@@ -254,25 +236,27 @@ async fn bybit_mainnet_watch_ohlcv_multisymbol_streams_live_updates() -> Result<
 
 async fn exercise_fetch_ohlcv_frontend_window(venue: Venue) -> Result<()> {
     let plan = OhlcvStressPlan::from_env();
-    let client = Arc::new(build_mainnet_client(venue).await?);
-    let symbols = preferred_ohlcv_symbols(client.as_ref(), plan.symbol_target);
+    let client = build_mainnet_client(venue).await?;
+    let symbols = preferred_ohlcv_symbols(&client, plan.symbol_target);
 
     let diagnostics_before = client.diagnostics().snapshot().fetch_ohlcv.operations;
     let started_at = Instant::now();
-    let reports = fetch_frontend_window(Arc::clone(&client), symbols.clone(), plan).await?;
+    let reports = fetch_frontend_window(&client, symbols.clone(), plan).await?;
     let elapsed = started_at.elapsed();
     let diagnostics_after = client.diagnostics().snapshot().fetch_ohlcv.operations;
     let observed_requests = diagnostics_after.saturating_sub(diagnostics_before);
-    let total_requests = reports.iter().map(|report| report.requests).sum::<u64>();
-
-    assert_eq!(
-        observed_requests, total_requests,
-        "fetch diagnostics request count should match paged fetches"
-    );
+    let total_requests = observed_requests;
 
     for report in &reports {
         assert_dense_minute_window(report, plan);
     }
+
+    let expected_batch_calls = plan.expected_candles().div_ceil(plan.page_limit);
+    let observed_batch_calls = (total_requests as usize).div_ceil(plan.symbol_target);
+    assert_eq!(
+        observed_batch_calls, expected_batch_calls,
+        "expected {expected_batch_calls} batched fetch_ohlcv calls for the requested window"
+    );
 
     let max_expected_requests =
         ((plan.expected_candles().div_ceil(plan.page_limit)) * plan.symbol_target) as u64;
@@ -388,95 +372,49 @@ async fn exercise_watch_ohlcv_live(venue: Venue) -> Result<()> {
 }
 
 async fn fetch_frontend_window(
-    client: Arc<BatMarkets>,
+    client: &BatMarkets,
     symbols: Vec<InstrumentId>,
     plan: OhlcvStressPlan,
 ) -> Result<Vec<FetchWindowReport>> {
-    let mut reports = Vec::with_capacity(symbols.len());
+    let page = client
+        .market()
+        .fetch_ohlcv_window(&FetchOhlcvRequest::for_instruments(
+            symbols.clone(),
+            "1m",
+            Some(TimestampMs::new(plan.start_open_time_ms())),
+            Some(TimestampMs::new(plan.end_close_time_ms())),
+            Some(plan.page_limit),
+        ))
+        .await?;
 
-    for chunk in symbols.chunks(plan.fetch_concurrency) {
-        let mut jobs = JoinSet::new();
-        for instrument_id in chunk.iter().cloned() {
-            let client = Arc::clone(&client);
-            jobs.spawn(async move { fetch_symbol_window(client, instrument_id, plan).await });
-        }
-
-        while let Some(joined) = jobs.join_next().await {
-            let report = joined.map_err(|error| {
-                MarketError::new(
-                    ErrorKind::TransportError,
-                    format!("fetch_ohlcv stress task join failed: {error}"),
-                )
-            })??;
-            reports.push(report);
-        }
-    }
-
-    reports.sort_by(|left, right| left.instrument_id.cmp(&right.instrument_id));
-    Ok(reports)
-}
-
-async fn fetch_symbol_window(
-    client: Arc<BatMarkets>,
-    instrument_id: InstrumentId,
-    plan: OhlcvStressPlan,
-) -> Result<FetchWindowReport> {
-    let mut candles = Vec::with_capacity(plan.expected_candles());
-    let mut next_start = plan.start_open_time_ms();
-    let mut requests = 0_u64;
-
-    while next_start <= plan.end_open_time_ms {
-        let page = client
-            .market()
-            .fetch_ohlcv(&FetchOhlcvRequest {
-                instrument_id: instrument_id.clone(),
-                interval: "1m".into(),
-                start_time: Some(TimestampMs::new(next_start)),
-                end_time: Some(TimestampMs::new(plan.end_close_time_ms())),
-                limit: Some(plan.page_limit),
-            })
-            .await?;
-        requests += 1;
-
-        if page.is_empty() {
+    let mut candles_by_instrument = symbols
+        .iter()
+        .cloned()
+        .map(|instrument_id| (instrument_id, Vec::with_capacity(plan.expected_candles())))
+        .collect::<BTreeMap<_, _>>();
+    for candle in page {
+        let Some(candles) = candles_by_instrument.get_mut(&candle.instrument_id) else {
             return Err(MarketError::new(
                 ErrorKind::TransportError,
-                format!("fetch_ohlcv returned an empty page for {instrument_id}"),
+                format!(
+                    "fetch_ohlcv_window returned unexpected instrument {} in batched response",
+                    candle.instrument_id
+                ),
             ));
-        }
-
-        let mut page_last_open = next_start;
-        for candle in page {
-            if candle.open_time.value() < plan.start_open_time_ms()
-                || candle.open_time.value() > plan.end_open_time_ms
-            {
-                continue;
-            }
-
-            if candles
-                .last()
-                .is_some_and(|existing: &Kline| existing.open_time == candle.open_time)
-            {
-                continue;
-            }
-
-            page_last_open = candle.open_time.value();
-            candles.push(candle);
-        }
-
-        if page_last_open >= plan.end_open_time_ms || candles.len() >= plan.expected_candles() {
-            break;
-        }
-
-        next_start = page_last_open + ONE_MINUTE_MS;
-        sleep(plan.page_pause).await;
+        };
+        candles.push(candle);
     }
 
-    Ok(FetchWindowReport {
-        instrument_id,
-        candles,
-        requests,
-    })
+    let reports = symbols
+        .into_iter()
+        .map(|instrument_id| FetchWindowReport {
+            candles: candles_by_instrument
+                .remove(&instrument_id)
+                .expect("batched fetch should keep every requested instrument"),
+            instrument_id,
+        })
+        .collect();
+    Ok(reports)
 }
 
 fn assert_dense_minute_window(report: &FetchWindowReport, plan: OhlcvStressPlan) {

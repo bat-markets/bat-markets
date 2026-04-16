@@ -389,15 +389,14 @@ impl BybitLinearFuturesAdapter {
             )
             .with_venue(Venue::Bybit, Product::LinearUsdt)
         })?;
-        let spec = self
-            .resolve_instrument(&request.instrument_id)
-            .ok_or_else(|| {
-                MarketError::new(
-                    ErrorKind::Unsupported,
-                    format!("unsupported bybit instrument '{}'", request.instrument_id),
-                )
-                .with_venue(Venue::Bybit, Product::LinearUsdt)
-            })?;
+        let instrument_id = request.single_instrument_id()?;
+        let spec = self.resolve_instrument(instrument_id).ok_or_else(|| {
+            MarketError::new(
+                ErrorKind::Unsupported,
+                format!("unsupported bybit instrument '{}'", instrument_id),
+            )
+            .with_venue(Venue::Bybit, Product::LinearUsdt)
+        })?;
         let response = serde_json::from_str::<KlineListResponse>(payload).map_err(decode_error)?;
         if response.ret_code != 0 {
             return Err(exchange_reject(response.ret_code, &response.ret_msg));
@@ -655,11 +654,22 @@ impl VenueAdapter for BybitLinearFuturesAdapter {
         }
 
         if envelope.topic.starts_with("kline.") {
+            let topic_symbol = envelope.topic.rsplit('.').next().ok_or_else(|| {
+                MarketError::new(
+                    ErrorKind::DecodeError,
+                    format!(
+                        "failed to derive bybit kline symbol from topic '{}'",
+                        envelope.topic
+                    ),
+                )
+                .with_venue(Venue::Bybit, Product::LinearUsdt)
+            })?;
             let data: Vec<native::KlineData> =
                 serde_json::from_value(envelope.data).map_err(decode_error)?;
             let mut events = Vec::with_capacity(data.len());
             for kline in data {
-                let spec = self.require_native_symbol(&kline.symbol)?;
+                let symbol = kline.symbol.as_deref().unwrap_or(topic_symbol);
+                let spec = self.require_native_symbol(symbol)?;
                 events.push(PublicLaneEvent::Kline(FastKline {
                     instrument_id: spec.instrument_id.clone(),
                     interval: kline.interval.into(),
@@ -1059,7 +1069,9 @@ fn now_timestamp_ms() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::BybitLinearFuturesAdapter;
-    use bat_markets_core::{FetchOhlcvRequest, InstrumentId, OrderStatus, TimestampMs};
+    use bat_markets_core::{
+        FetchOhlcvRequest, InstrumentId, OrderStatus, PublicLaneEvent, TimestampMs, VenueAdapter,
+    };
 
     const EXECUTION_HISTORY: &str = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -1105,18 +1117,52 @@ mod tests {
                         ]
                     }
                 }"#,
-                &FetchOhlcvRequest {
-                    instrument_id: InstrumentId::from("BTC/USDT:USDT"),
-                    interval: "1m".into(),
-                    start_time: None,
-                    end_time: None,
-                    limit: Some(2),
-                },
+                &FetchOhlcvRequest::for_instrument(
+                    InstrumentId::from("BTC/USDT:USDT"),
+                    "1m",
+                    None,
+                    None,
+                    Some(2),
+                ),
             )
             .expect("bybit klines snapshot should parse");
 
         assert_eq!(klines.len(), 2);
         assert_eq!(klines[0].open_time, TimestampMs::new(1710000000000));
         assert_eq!(klines[1].close.to_string(), "64100.00");
+    }
+
+    #[test]
+    fn parse_bybit_public_kline_without_symbol_uses_topic_suffix() {
+        let adapter = BybitLinearFuturesAdapter::new();
+        let events = adapter
+            .parse_public(
+                r#"{
+                    "topic":"kline.1.BTCUSDT",
+                    "type":"snapshot",
+                    "ts":1710000005000,
+                    "data":[
+                        {
+                            "start":1710000000000,
+                            "end":1710000059999,
+                            "interval":"1",
+                            "open":"64000.0",
+                            "close":"64010.0",
+                            "high":"64020.0",
+                            "low":"63990.0",
+                            "volume":"12.0",
+                            "confirm":false
+                        }
+                    ]
+                }"#,
+            )
+            .expect("kline payload without symbol should still parse");
+
+        assert_eq!(events.len(), 1);
+        let PublicLaneEvent::Kline(kline) = &events[0] else {
+            panic!("expected kline event");
+        };
+        assert_eq!(kline.instrument_id, InstrumentId::from("BTC/USDT:USDT"));
+        assert_eq!(kline.interval.as_ref(), "1");
     }
 }

@@ -75,8 +75,8 @@ pub struct OrderBookData {
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct KlineData {
-    #[serde(rename = "symbol")]
-    pub symbol: String,
+    #[serde(rename = "symbol", default)]
+    pub symbol: Option<String>,
     #[serde(rename = "start")]
     pub start: i64,
     #[serde(rename = "end")]
