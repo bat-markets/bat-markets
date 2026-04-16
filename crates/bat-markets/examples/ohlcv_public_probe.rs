@@ -140,7 +140,7 @@ async fn probe_fetch(
     let started_at = Instant::now();
     let page = client
         .market()
-        .fetch_ohlcv_window(&FetchOhlcvRequest::for_instruments(
+        .fetch_ohlcv(&FetchOhlcvRequest::for_instruments(
             symbols.to_vec(),
             "1m",
             Some(TimestampMs::new(plan.start_open_time_ms())),

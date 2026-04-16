@@ -97,6 +97,11 @@ impl<'a> MarketClient<'a> {
     ///
     /// Intervals are accepted in unified ccxt-style notation such as `1m`, `5m`, `1h`,
     /// `1d`, `1w`, and `1M`. A single call can request between `1` and `30` instruments.
+    ///
+    /// When both `start_time` and `end_time` are present, this method automatically
+    /// paginates until the full requested window is loaded. Otherwise it behaves as a
+    /// single-page fetch and `limit` controls the page size handed to the exchange.
+    ///
     /// The response is returned as a flat `Vec<Kline>`; each candle carries its own
     /// `instrument_id`, and multi-symbol responses preserve the request instrument order.
     ///
@@ -134,13 +139,13 @@ impl<'a> MarketClient<'a> {
     /// # }
     /// ```
     pub async fn fetch_ohlcv(&self, request: &FetchOhlcvRequest) -> Result<Vec<Kline>> {
-        runtime::fetch_ohlcv(&self.inner.live_context(), request).await
+        match (request.start_time, request.end_time) {
+            (Some(_), Some(_)) => self.fetch_ohlcv_window_impl(request).await,
+            _ => self.fetch_ohlcv_page(request).await,
+        }
     }
 
-    /// Fetch and fully paginate a bounded OHLCV window for `1..=30` instruments.
-    ///
-    /// This method keeps calling `fetch_ohlcv()` until the requested `[start_time, end_time]`
-    /// range is exhausted, then returns a flat `Vec<Kline>` grouped by request instrument order.
+    /// Backward-compatible alias for the full-window behavior of `fetch_ohlcv()`.
     ///
     /// ```no_run
     /// use bat_markets::{
@@ -159,7 +164,7 @@ impl<'a> MarketClient<'a> {
     ///
     /// let candles = client
     ///     .market()
-    ///     .fetch_ohlcv_window(&FetchOhlcvRequest::for_instruments(
+    ///     .fetch_ohlcv(&FetchOhlcvRequest::for_instruments(
     ///         vec![
     ///             InstrumentId::from("BTC/USDT:USDT"),
     ///             InstrumentId::from("ETH/USDT:USDT"),
@@ -176,23 +181,31 @@ impl<'a> MarketClient<'a> {
     /// # }
     /// ```
     pub async fn fetch_ohlcv_window(&self, request: &FetchOhlcvRequest) -> Result<Vec<Kline>> {
+        self.fetch_ohlcv(request).await
+    }
+
+    async fn fetch_ohlcv_page(&self, request: &FetchOhlcvRequest) -> Result<Vec<Kline>> {
+        runtime::fetch_ohlcv(&self.inner.live_context(), request).await
+    }
+
+    async fn fetch_ohlcv_window_impl(&self, request: &FetchOhlcvRequest) -> Result<Vec<Kline>> {
         let instrument_ids = request.instrument_ids()?.to_vec();
         let start_time = request.start_time.ok_or_else(|| {
             MarketError::new(
                 ErrorKind::ConfigError,
-                "fetch_ohlcv_window requires request.start_time",
+                "fetch_ohlcv requires request.start_time",
             )
         })?;
         let end_time = request.end_time.ok_or_else(|| {
             MarketError::new(
                 ErrorKind::ConfigError,
-                "fetch_ohlcv_window requires request.end_time",
+                "fetch_ohlcv requires request.end_time",
             )
         })?;
         if end_time.value() < start_time.value() {
             return Err(MarketError::new(
                 ErrorKind::ConfigError,
-                "fetch_ohlcv_window requires end_time >= start_time",
+                "fetch_ohlcv requires end_time >= start_time",
             ));
         }
         let interval = KlineInterval::parse(request.interval.as_ref()).ok_or_else(|| {
@@ -213,7 +226,7 @@ impl<'a> MarketClient<'a> {
 
         loop {
             let page = self
-                .fetch_ohlcv(&FetchOhlcvRequest::for_instruments(
+                .fetch_ohlcv_page(&FetchOhlcvRequest::for_instruments(
                     instrument_ids.clone(),
                     request.interval.clone(),
                     Some(TimestampMs::new(next_start)),
@@ -238,7 +251,7 @@ impl<'a> MarketClient<'a> {
                     return Err(MarketError::new(
                         ErrorKind::TransportError,
                         format!(
-                            "fetch_ohlcv_window returned unexpected instrument {}",
+                            "fetch_ohlcv returned unexpected instrument {}",
                             candle.instrument_id
                         ),
                     ));
@@ -286,8 +299,8 @@ impl<'a> MarketClient<'a> {
         Ok(flattened)
     }
 
-    /// Alias for `fetch_ohlcv_window()` when the intent is “load the full requested range”.
+    /// Backward-compatible alias for the full-window behavior of `fetch_ohlcv()`.
     pub async fn fetch_ohlcv_all(&self, request: &FetchOhlcvRequest) -> Result<Vec<Kline>> {
-        self.fetch_ohlcv_window(request).await
+        self.fetch_ohlcv(request).await
     }
 }

@@ -378,7 +378,7 @@ async fn fetch_frontend_window(
 ) -> Result<Vec<FetchWindowReport>> {
     let page = client
         .market()
-        .fetch_ohlcv_window(&FetchOhlcvRequest::for_instruments(
+        .fetch_ohlcv(&FetchOhlcvRequest::for_instruments(
             symbols.clone(),
             "1m",
             Some(TimestampMs::new(plan.start_open_time_ms())),
@@ -397,7 +397,7 @@ async fn fetch_frontend_window(
             return Err(MarketError::new(
                 ErrorKind::TransportError,
                 format!(
-                    "fetch_ohlcv_window returned unexpected instrument {} in batched response",
+                    "fetch_ohlcv returned unexpected instrument {} in batched response",
                     candle.instrument_id
                 ),
             ));
