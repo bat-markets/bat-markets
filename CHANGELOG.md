@@ -15,3 +15,7 @@
 - tolerate sparse Binance live account position fields and numeric zero-shapes instead of failing reconcile
 - formalize `0.1.x` as a GitHub/source release with `publish = false` workspace crates, release docs, and reproducible source archives
 - add live diagnostics snapshots for shared-state lock wait/hold costs and key runtime latencies to guide future perf decisions
+- add unified `market().fetch_ohlcv(...)` for Binance and Bybit REST kline history
+- add typed `stream().public().watch_ohlcv(...)` for one or many symbols on Binance and Bybit
+- normalize OHLCV intervals to ccxt-style values like `1m`, `5m`, `1h`, and `1d` across REST fetches and websocket watches
+- add realistic OHLCV stress harness coverage for multi-symbol live fetch/watch flows and frontend-style `30 symbols x 3 days x 1m` paging

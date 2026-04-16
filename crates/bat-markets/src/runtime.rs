@@ -20,11 +20,12 @@ use url::form_urlencoded::Serializer;
 
 use bat_markets_core::{
     CancelOrderRequest, ClientOrderId, CommandOperation, CommandReceipt, CommandStatus,
-    CreateOrderRequest, DegradedReason, ErrorKind, Execution, GetOrderRequest, HealthReport,
-    InstrumentId, InstrumentSpec, ListExecutionsRequest, ListOpenOrdersRequest, MarginMode,
-    MarketError, OpenInterest, Order, OrderId, Price, PrivateLaneEvent, Product, PublicLaneEvent,
-    Quantity, ReconcileOutcome, ReconcileReport, ReconcileTrigger, Result, SequenceNumber,
-    SetLeverageRequest, SetMarginModeRequest, TimestampMs, Venue, VenueAdapter,
+    CreateOrderRequest, DegradedReason, ErrorKind, Execution, FetchOhlcvRequest, GetOrderRequest,
+    HealthReport, InstrumentId, InstrumentSpec, Kline, KlineInterval, ListExecutionsRequest,
+    ListOpenOrdersRequest, MarginMode, MarketError, OpenInterest, Order, OrderId, Price,
+    PrivateLaneEvent, Product, PublicLaneEvent, Quantity, ReconcileOutcome, ReconcileReport,
+    ReconcileTrigger, Result, SequenceNumber, SetLeverageRequest, SetMarginModeRequest,
+    TimestampMs, Venue, VenueAdapter,
 };
 
 #[cfg(feature = "binance")]
@@ -1061,6 +1062,75 @@ pub(crate) async fn refresh_open_interest(
     result
 }
 
+pub(crate) async fn fetch_ohlcv(
+    context: &LiveContext,
+    request: &FetchOhlcvRequest,
+) -> Result<Vec<Kline>> {
+    let started_at = Instant::now();
+    let result = async {
+        let spec = require_spec(context, &request.instrument_id)?;
+        let interval = parse_kline_interval(
+            request.interval.as_ref(),
+            context.config.venue,
+            "fetch_ohlcv.interval",
+        )?;
+        let limit_string = request.limit.map(|limit| limit.to_string());
+        let start_string = request.start_time.map(|value| value.value().to_string());
+        let end_string = request.end_time.map(|value| value.value().to_string());
+
+        let mut query = vec![
+            ("symbol", spec.native_symbol.as_ref()),
+            ("interval", interval.as_binance_str()),
+        ];
+        if let Some(limit) = &limit_string {
+            query.push(("limit", limit.as_str()));
+        }
+
+        let klines = match &context.adapter {
+            #[cfg(feature = "binance")]
+            AdapterHandle::Binance(adapter) => {
+                if let Some(start) = &start_string {
+                    query.push(("startTime", start.as_str()));
+                }
+                if let Some(end) = &end_string {
+                    query.push(("endTime", end.as_str()));
+                }
+                let payload = public_get_with_retry(
+                    context,
+                    "/fapi/v1/klines",
+                    &query,
+                    "binance.fetch_ohlcv",
+                )
+                .await?;
+                adapter.parse_ohlcv_snapshot(&payload, request)?
+            }
+            #[cfg(feature = "bybit")]
+            AdapterHandle::Bybit(adapter) => {
+                query[1] = ("interval", interval.as_bybit_str());
+                query.push(("category", "linear"));
+                if let Some(start) = &start_string {
+                    query.push(("start", start.as_str()));
+                }
+                if let Some(end) = &end_string {
+                    query.push(("end", end.as_str()));
+                }
+                let payload =
+                    public_get_with_retry(context, "/v5/market/kline", &query, "bybit.fetch_ohlcv")
+                        .await?;
+                adapter.parse_ohlcv_snapshot(&payload, request)?
+            }
+        };
+
+        context.shared.write(|state| {
+            state.mark_rest_success(None);
+        });
+        Ok(klines)
+    }
+    .await;
+    record_runtime_latency(context, RuntimeOperation::FetchOhlcv, started_at);
+    result
+}
+
 pub(crate) async fn reconcile_private(
     context: &LiveContext,
     trigger: ReconcileTrigger,
@@ -1359,7 +1429,12 @@ async fn run_binance_public_stream(
             streams.push(format!("{symbol}@markPrice@1s"));
         }
         if let Some(interval_value) = &subscription.kline_interval {
-            streams.push(format!("{symbol}@kline_{interval_value}"));
+            let interval = parse_kline_interval(
+                interval_value.as_ref(),
+                context.config.venue,
+                "binance.public_ws.kline_interval",
+            )?;
+            streams.push(format!("{symbol}@kline_{}", interval.as_binance_str()));
         }
     }
 
@@ -1573,7 +1648,16 @@ async fn run_bybit_public_stream(
             args.push(format!("orderbook.1.{}", spec.native_symbol));
         }
         if let Some(interval_value) = &subscription.kline_interval {
-            args.push(format!("kline.{interval_value}.{}", spec.native_symbol));
+            let interval = parse_kline_interval(
+                interval_value.as_ref(),
+                context.config.venue,
+                "bybit.public_ws.kline_interval",
+            )?;
+            args.push(format!(
+                "kline.{}.{}",
+                interval.as_bybit_str(),
+                spec.native_symbol
+            ));
         }
     }
 
@@ -1853,6 +1937,17 @@ async fn public_get_with_retry(
         public_get_text(context, path, query, operation).await
     })
     .await
+}
+
+fn parse_kline_interval(raw: &str, venue: Venue, operation: &str) -> Result<KlineInterval> {
+    KlineInterval::parse(raw).ok_or_else(|| {
+        MarketError::new(
+            ErrorKind::Unsupported,
+            format!("unsupported OHLCV interval '{raw}'"),
+        )
+        .with_venue(venue, Product::LinearUsdt)
+        .with_operation(operation)
+    })
 }
 
 async fn public_get_text(

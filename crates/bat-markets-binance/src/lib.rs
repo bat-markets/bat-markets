@@ -2,7 +2,10 @@
 
 pub mod native;
 
-use std::sync::Arc;
+use std::{
+    sync::Arc,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use parking_lot::RwLock;
 use rust_decimal::Decimal;
@@ -10,12 +13,13 @@ use rust_decimal::Decimal;
 use bat_markets_core::{
     AccountCapabilities, AccountSnapshot, AggressorSide, AssetCapabilities, AssetCode, Balance,
     BatMarketsConfig, CapabilitySet, CommandOperation, CommandReceipt, CommandStatus, ErrorKind,
-    Execution, FastBookTop, FastKline, FastTicker, FastTrade, FundingRate, InstrumentCatalog,
-    InstrumentId, InstrumentSpec, InstrumentStatus, InstrumentSupport, Leverage, MarginMode,
-    MarketCapabilities, MarketError, MarketType, NativeCapabilities, Notional, OpenInterest, Order,
-    OrderId, OrderStatus, OrderType, Position, PositionCapabilities, PositionDirection, PositionId,
-    PositionMode, Price, PrivateLaneEvent, Product, PublicLaneEvent, Quantity, Rate, RequestId,
-    Result, Side, TimeInForce, TimestampMs, TradeCapabilities, TradeId, Venue, VenueAdapter,
+    Execution, FastBookTop, FastKline, FastTicker, FastTrade, FetchOhlcvRequest, FundingRate,
+    InstrumentCatalog, InstrumentId, InstrumentSpec, InstrumentStatus, InstrumentSupport, Kline,
+    KlineInterval, Leverage, MarginMode, MarketCapabilities, MarketError, MarketType,
+    NativeCapabilities, Notional, OpenInterest, Order, OrderId, OrderStatus, OrderType, Position,
+    PositionCapabilities, PositionDirection, PositionId, PositionMode, Price, PrivateLaneEvent,
+    Product, PublicLaneEvent, Quantity, Rate, RequestId, Result, Side, TimeInForce, TimestampMs,
+    TradeCapabilities, TradeId, Venue, VenueAdapter,
 };
 
 /// Binance linear futures adapter with a handwritten, fixture-backed contract.
@@ -331,6 +335,45 @@ impl BinanceLinearFuturesAdapter {
             .into_iter()
             .map(|snapshot| self.execution_from_snapshot(snapshot))
             .collect()
+    }
+
+    pub fn parse_ohlcv_snapshot(
+        &self,
+        payload: &str,
+        request: &FetchOhlcvRequest,
+    ) -> Result<Vec<Kline>> {
+        let interval = KlineInterval::parse(request.interval.as_ref()).ok_or_else(|| {
+            MarketError::new(
+                ErrorKind::Unsupported,
+                format!("unsupported binance OHLCV interval '{}'", request.interval),
+            )
+            .with_venue(Venue::Binance, Product::LinearUsdt)
+        })?;
+        let spec = self
+            .resolve_instrument(&request.instrument_id)
+            .ok_or_else(|| {
+                MarketError::new(
+                    ErrorKind::Unsupported,
+                    format!("unsupported binance instrument '{}'", request.instrument_id),
+                )
+                .with_venue(Venue::Binance, Product::LinearUsdt)
+            })?;
+        let rows =
+            serde_json::from_str::<Vec<Vec<serde_json::Value>>>(payload).map_err(|error| {
+                MarketError::new(
+                    ErrorKind::DecodeError,
+                    format!("failed to parse binance klines snapshot: {error}"),
+                )
+                .with_venue(Venue::Binance, Product::LinearUsdt)
+                .with_operation("binance.parse_ohlcv_snapshot")
+            })?;
+
+        let mut klines = rows
+            .into_iter()
+            .map(|row| parse_binance_kline_row(&spec, interval, row))
+            .collect::<Result<Vec<_>>>()?;
+        klines.sort_by_key(|kline| kline.open_time.value());
+        Ok(klines)
     }
 
     fn position_from_account_snapshot(
@@ -1003,10 +1046,102 @@ fn require_filter_decimal(
     parse_decimal(raw)
 }
 
+fn parse_binance_kline_row(
+    spec: &InstrumentSpec,
+    interval: KlineInterval,
+    row: Vec<serde_json::Value>,
+) -> Result<Kline> {
+    if row.len() < 7 {
+        return Err(MarketError::new(
+            ErrorKind::DecodeError,
+            format!(
+                "binance kline row has {} fields, expected at least 7",
+                row.len()
+            ),
+        )
+        .with_venue(Venue::Binance, Product::LinearUsdt));
+    }
+
+    let open_time = parse_i64_value(&row[0], "open_time")?;
+    let close_time = parse_i64_value(&row[6], "close_time")?;
+
+    Ok(Kline {
+        instrument_id: spec.instrument_id.clone(),
+        interval: interval.as_ccxt_str().into(),
+        open: spec.price_from_fast(
+            Price::new(parse_decimal(parse_str_value(&row[1], "open")?)?)
+                .quantize(spec.price_scale)?,
+        ),
+        high: spec.price_from_fast(
+            Price::new(parse_decimal(parse_str_value(&row[2], "high")?)?)
+                .quantize(spec.price_scale)?,
+        ),
+        low: spec.price_from_fast(
+            Price::new(parse_decimal(parse_str_value(&row[3], "low")?)?)
+                .quantize(spec.price_scale)?,
+        ),
+        close: spec.price_from_fast(
+            Price::new(parse_decimal(parse_str_value(&row[4], "close")?)?)
+                .quantize(spec.price_scale)?,
+        ),
+        volume: spec.quantity_from_fast(
+            Quantity::new(parse_decimal(parse_str_value(&row[5], "volume")?)?)
+                .quantize(spec.qty_scale)?,
+        ),
+        open_time: TimestampMs::new(open_time),
+        close_time: TimestampMs::new(close_time),
+        closed: close_time < now_timestamp_ms(),
+    })
+}
+
+fn parse_i64_value(value: &serde_json::Value, label: &str) -> Result<i64> {
+    match value {
+        serde_json::Value::Number(number) => number.as_i64().ok_or_else(|| {
+            MarketError::new(
+                ErrorKind::DecodeError,
+                format!("invalid numeric value for binance {label}"),
+            )
+            .with_venue(Venue::Binance, Product::LinearUsdt)
+        }),
+        serde_json::Value::String(raw) => raw.parse::<i64>().map_err(|error| {
+            MarketError::new(
+                ErrorKind::DecodeError,
+                format!("invalid i64 '{raw}' for binance {label}: {error}"),
+            )
+            .with_venue(Venue::Binance, Product::LinearUsdt)
+        }),
+        other => Err(MarketError::new(
+            ErrorKind::DecodeError,
+            format!("unsupported binance {label} representation: {other}"),
+        )
+        .with_venue(Venue::Binance, Product::LinearUsdt)),
+    }
+}
+
+fn parse_str_value<'a>(value: &'a serde_json::Value, label: &str) -> Result<&'a str> {
+    match value {
+        serde_json::Value::String(raw) => Ok(raw),
+        other => Err(MarketError::new(
+            ErrorKind::DecodeError,
+            format!("unsupported binance {label} representation: {other}"),
+        )
+        .with_venue(Venue::Binance, Product::LinearUsdt)),
+    }
+}
+
+fn now_timestamp_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis().min(i128::from(i64::MAX) as u128) as i64)
+        .unwrap_or(0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::BinanceLinearFuturesAdapter;
-    use bat_markets_core::{OrderStatus, TimestampMs, VenueAdapter};
+    use bat_markets_core::{
+        FetchOhlcvRequest, InstrumentId, OrderStatus, TimestampMs, VenueAdapter,
+    };
 
     const USER_TRADES: &str = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -1144,5 +1279,30 @@ mod tests {
             positions[0].margin_mode,
             bat_markets_core::MarginMode::Cross
         );
+    }
+
+    #[test]
+    fn parse_binance_ohlcv_snapshot() {
+        let adapter = BinanceLinearFuturesAdapter::new();
+        let klines = adapter
+            .parse_ohlcv_snapshot(
+                r#"[
+                    [1710000000000,"64000.1","64100.0","63950.0","64050.0","12.345","1710000059999","0","0","0","0","0"],
+                    [1710000060000,"64050.0","64150.0","64000.0","64100.0","23.456","1710000119999","0","0","0","0","0"]
+                ]"#,
+                &FetchOhlcvRequest {
+                    instrument_id: InstrumentId::from("BTC/USDT:USDT"),
+                    interval: "1m".into(),
+                    start_time: None,
+                    end_time: None,
+                    limit: Some(2),
+                },
+            )
+            .expect("binance klines snapshot should parse");
+
+        assert_eq!(klines.len(), 2);
+        assert_eq!(klines[0].interval.as_ref(), "1m");
+        assert_eq!(klines[0].open.to_string(), "64000.10");
+        assert_eq!(klines[1].close.to_string(), "64100.00");
     }
 }

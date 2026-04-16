@@ -40,8 +40,8 @@ pub use health::{DegradedReason, HealthNotification, HealthReport, HealthStatus}
 pub use ids::{AssetCode, ClientOrderId, InstrumentId, OrderId, PositionId, RequestId, TradeId};
 pub use instrument::{InstrumentSpec, InstrumentStatus, InstrumentSupport};
 pub use market::{
-    BookDelta, BookLevel, BookTop, FastBookTop, FastKline, FastTicker, FastTrade, FundingRate,
-    Kline, OpenInterest, Ticker, TradeTick,
+    BookDelta, BookLevel, BookTop, FastBookTop, FastKline, FastTicker, FastTrade,
+    FetchOhlcvRequest, FundingRate, Kline, KlineInterval, OpenInterest, Ticker, TradeTick,
 };
 pub use numeric::{
     Amount, FastNotional, FastPrice, FastQuantity, Leverage, Notional, Price, Quantity, Rate,

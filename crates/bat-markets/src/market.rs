@@ -1,5 +1,6 @@
 use bat_markets_core::{
-    FundingRate, InstrumentId, InstrumentSpec, OpenInterest, Result, Ticker, TradeTick,
+    FetchOhlcvRequest, FundingRate, InstrumentId, InstrumentSpec, Kline, OpenInterest, Result,
+    Ticker, TradeTick,
 };
 
 use crate::{client::BatMarkets, runtime};
@@ -88,5 +89,44 @@ impl<'a> MarketClient<'a> {
         instrument_id: &InstrumentId,
     ) -> Result<OpenInterest> {
         runtime::refresh_open_interest(&self.inner.live_context(), instrument_id).await
+    }
+
+    /// Fetch historical OHLCV / kline candles through the venue REST API.
+    ///
+    /// Intervals are accepted in unified ccxt-style notation such as `1m`, `5m`, `1h`,
+    /// `1d`, `1w`, and `1M`.
+    ///
+    /// ```no_run
+    /// use bat_markets::{
+    ///     BatMarkets,
+    ///     errors::Result,
+    ///     types::{FetchOhlcvRequest, InstrumentId, Product, Venue},
+    /// };
+    ///
+    /// # #[tokio::main]
+    /// # async fn main() -> Result<()> {
+    /// let client = BatMarkets::builder()
+    ///     .venue(Venue::Binance)
+    ///     .product(Product::LinearUsdt)
+    ///     .build_live()
+    ///     .await?;
+    ///
+    /// let candles = client
+    ///     .market()
+    ///     .fetch_ohlcv(&FetchOhlcvRequest {
+    ///         instrument_id: InstrumentId::from("BTC/USDT:USDT"),
+    ///         interval: "1m".into(),
+    ///         start_time: None,
+    ///         end_time: None,
+    ///         limit: Some(200),
+    ///     })
+    ///     .await?;
+    ///
+    /// println!("loaded {} candles", candles.len());
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn fetch_ohlcv(&self, request: &FetchOhlcvRequest) -> Result<Vec<Kline>> {
+        runtime::fetch_ohlcv(&self.inner.live_context(), request).await
     }
 }

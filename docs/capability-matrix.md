@@ -14,6 +14,8 @@ This matrix documents the current `0.1.x` futures-first surface after live trans
 | manual private reconcile | yes | yes | exposed through `stream().private().reconcile().await` |
 | health snapshot | yes | yes | cheap synchronous snapshot |
 | health subscriptions | yes | yes | watch + broadcast notifications on structural health transitions |
+| OHLCV fetch | yes | yes | REST-backed unified candles via `market().fetch_ohlcv(...)`; intervals use ccxt-style strings such as `1m`, `5m`, `1h`, `1d` |
+| OHLCV watch | yes | yes | typed live candles via `stream().public().watch_ohlcv(...)`; one or many symbols per watcher, same ccxt-style interval surface |
 | account refresh | yes | yes | REST snapshot-backed |
 | position refresh | yes | yes | REST snapshot-backed |
 | open orders refresh | yes | yes | REST snapshot-backed |
@@ -45,3 +47,4 @@ This matrix documents the current `0.1.x` futures-first surface after live trans
 - Reconcile still does not rebuild a full historical ledger.
 - Live sandbox tests are env-gated and write flows require an explicit manual gate.
 - Mainnet production-key coverage is intentionally read-only in the repo test harness; private write tests remain sandbox-only by design.
+- OHLCV live stress coverage is opt-in through `BAT_MARKETS_ENABLE_MAINNET_OHLCV_STRESS`; the harness validates paged `fetch_ohlcv()` and multi-symbol `watch_ohlcv()` against a frontend-style `30 symbols x 3 days x 1m` read pattern.

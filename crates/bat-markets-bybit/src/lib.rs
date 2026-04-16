@@ -2,20 +2,25 @@
 
 pub mod native;
 
-use std::sync::Arc;
+use std::{
+    sync::Arc,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use parking_lot::RwLock;
 use rust_decimal::Decimal;
+use serde::Deserialize;
 
 use bat_markets_core::{
     AccountCapabilities, AccountSnapshot, AggressorSide, AssetCapabilities, AssetCode, Balance,
     BatMarketsConfig, CapabilitySet, CommandOperation, CommandReceipt, CommandStatus, ErrorKind,
-    Execution, FastBookTop, FastKline, FastTicker, FastTrade, FundingRate, InstrumentCatalog,
-    InstrumentId, InstrumentSpec, InstrumentStatus, InstrumentSupport, Leverage, MarginMode,
-    MarketCapabilities, MarketError, MarketType, NativeCapabilities, Notional, OpenInterest, Order,
-    OrderId, OrderStatus, OrderType, Position, PositionCapabilities, PositionDirection, PositionId,
-    PositionMode, Price, PrivateLaneEvent, Product, PublicLaneEvent, Quantity, Rate, RequestId,
-    Result, Side, TimeInForce, TimestampMs, TradeCapabilities, TradeId, Venue, VenueAdapter,
+    Execution, FastBookTop, FastKline, FastTicker, FastTrade, FetchOhlcvRequest, FundingRate,
+    InstrumentCatalog, InstrumentId, InstrumentSpec, InstrumentStatus, InstrumentSupport, Kline,
+    KlineInterval, Leverage, MarginMode, MarketCapabilities, MarketError, MarketType,
+    NativeCapabilities, Notional, OpenInterest, Order, OrderId, OrderStatus, OrderType, Position,
+    PositionCapabilities, PositionDirection, PositionId, PositionMode, Price, PrivateLaneEvent,
+    Product, PublicLaneEvent, Quantity, Rate, RequestId, Result, Side, TimeInForce, TimestampMs,
+    TradeCapabilities, TradeId, Venue, VenueAdapter,
 };
 
 /// Bybit account context discovered from authenticated endpoints.
@@ -356,6 +361,92 @@ impl BybitLinearFuturesAdapter {
             .into_iter()
             .map(|execution| self.execution_from_snapshot(execution))
             .collect()
+    }
+
+    pub fn parse_ohlcv_snapshot(
+        &self,
+        payload: &str,
+        request: &FetchOhlcvRequest,
+    ) -> Result<Vec<Kline>> {
+        #[derive(Clone, Debug, Deserialize)]
+        struct KlineListResponse {
+            #[serde(rename = "retCode")]
+            ret_code: i64,
+            #[serde(rename = "retMsg")]
+            ret_msg: String,
+            result: KlineListResult,
+        }
+
+        #[derive(Clone, Debug, Deserialize)]
+        struct KlineListResult {
+            list: Vec<[String; 7]>,
+        }
+
+        let interval = KlineInterval::parse(request.interval.as_ref()).ok_or_else(|| {
+            MarketError::new(
+                ErrorKind::Unsupported,
+                format!("unsupported bybit OHLCV interval '{}'", request.interval),
+            )
+            .with_venue(Venue::Bybit, Product::LinearUsdt)
+        })?;
+        let spec = self
+            .resolve_instrument(&request.instrument_id)
+            .ok_or_else(|| {
+                MarketError::new(
+                    ErrorKind::Unsupported,
+                    format!("unsupported bybit instrument '{}'", request.instrument_id),
+                )
+                .with_venue(Venue::Bybit, Product::LinearUsdt)
+            })?;
+        let response = serde_json::from_str::<KlineListResponse>(payload).map_err(decode_error)?;
+        if response.ret_code != 0 {
+            return Err(exchange_reject(response.ret_code, &response.ret_msg));
+        }
+
+        let mut klines = response
+            .result
+            .list
+            .into_iter()
+            .map(|row| {
+                let open_time = row[0]
+                    .parse::<i64>()
+                    .map_err(|error| decode_string_error("bybit kline startTime", error))?;
+                let close_time = interval.close_time_ms(open_time).ok_or_else(|| {
+                    MarketError::new(
+                        ErrorKind::DecodeError,
+                        format!(
+                            "failed to derive bybit kline close time for interval '{}'",
+                            interval.as_ccxt_str()
+                        ),
+                    )
+                    .with_venue(Venue::Bybit, Product::LinearUsdt)
+                })?;
+                Ok(Kline {
+                    instrument_id: spec.instrument_id.clone(),
+                    interval: interval.as_ccxt_str().into(),
+                    open: spec.price_from_fast(
+                        Price::new(parse_decimal(&row[1])?).quantize(spec.price_scale)?,
+                    ),
+                    high: spec.price_from_fast(
+                        Price::new(parse_decimal(&row[2])?).quantize(spec.price_scale)?,
+                    ),
+                    low: spec.price_from_fast(
+                        Price::new(parse_decimal(&row[3])?).quantize(spec.price_scale)?,
+                    ),
+                    close: spec.price_from_fast(
+                        Price::new(parse_decimal(&row[4])?).quantize(spec.price_scale)?,
+                    ),
+                    volume: spec.quantity_from_fast(
+                        Quantity::new(parse_decimal(&row[5])?).quantize(spec.qty_scale)?,
+                    ),
+                    open_time: TimestampMs::new(open_time),
+                    close_time: TimestampMs::new(close_time),
+                    closed: close_time < now_timestamp_ms(),
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        klines.sort_by_key(|kline| kline.open_time.value());
+        Ok(klines)
     }
 
     fn position_from_snapshot(
@@ -958,10 +1049,17 @@ fn exchange_reject(code: i64, message: &str) -> MarketError {
         .with_native_code(code.to_string())
 }
 
+fn now_timestamp_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis().min(i128::from(i64::MAX) as u128) as i64)
+        .unwrap_or(0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::BybitLinearFuturesAdapter;
-    use bat_markets_core::{OrderStatus, TimestampMs};
+    use bat_markets_core::{FetchOhlcvRequest, InstrumentId, OrderStatus, TimestampMs};
 
     const EXECUTION_HISTORY: &str = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -990,5 +1088,35 @@ mod tests {
             .expect("bybit order history fixture should parse");
         assert_eq!(orders.len(), 1);
         assert_eq!(orders[0].status, OrderStatus::Canceled);
+    }
+
+    #[test]
+    fn parse_bybit_ohlcv_snapshot_sorts_ascending() {
+        let adapter = BybitLinearFuturesAdapter::new();
+        let klines = adapter
+            .parse_ohlcv_snapshot(
+                r#"{
+                    "retCode":0,
+                    "retMsg":"OK",
+                    "result":{
+                        "list":[
+                            ["1710000060000","64050.0","64150.0","64000.0","64100.0","23.456","0"],
+                            ["1710000000000","64000.1","64100.0","63950.0","64050.0","12.345","0"]
+                        ]
+                    }
+                }"#,
+                &FetchOhlcvRequest {
+                    instrument_id: InstrumentId::from("BTC/USDT:USDT"),
+                    interval: "1m".into(),
+                    start_time: None,
+                    end_time: None,
+                    limit: Some(2),
+                },
+            )
+            .expect("bybit klines snapshot should parse");
+
+        assert_eq!(klines.len(), 2);
+        assert_eq!(klines[0].open_time, TimestampMs::new(1710000000000));
+        assert_eq!(klines[1].close.to_string(), "64100.00");
     }
 }

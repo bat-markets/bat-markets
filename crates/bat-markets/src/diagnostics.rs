@@ -60,6 +60,7 @@ pub struct RuntimeDiagnosticsSnapshot {
     pub state_reads: LockDiagnosticsSnapshot,
     pub state_writes: LockDiagnosticsSnapshot,
     pub refresh_metadata: LatencyDiagnosticsSnapshot,
+    pub fetch_ohlcv: LatencyDiagnosticsSnapshot,
     pub refresh_account: LatencyDiagnosticsSnapshot,
     pub refresh_positions: LatencyDiagnosticsSnapshot,
     pub refresh_open_orders: LatencyDiagnosticsSnapshot,
@@ -117,6 +118,7 @@ impl SharedStateDiagnostics {
 #[derive(Debug, Default)]
 pub(crate) struct RuntimeDiagnosticsState {
     refresh_metadata: AtomicLatencyDiagnostics,
+    fetch_ohlcv: AtomicLatencyDiagnostics,
     refresh_account: AtomicLatencyDiagnostics,
     refresh_positions: AtomicLatencyDiagnostics,
     refresh_open_orders: AtomicLatencyDiagnostics,
@@ -132,6 +134,7 @@ impl RuntimeDiagnosticsState {
     pub(crate) fn observe(&self, operation: RuntimeOperation, elapsed: Duration) {
         let diagnostics = match operation {
             RuntimeOperation::RefreshMetadata => &self.refresh_metadata,
+            RuntimeOperation::FetchOhlcv => &self.fetch_ohlcv,
             RuntimeOperation::RefreshAccount => &self.refresh_account,
             RuntimeOperation::RefreshPositions => &self.refresh_positions,
             RuntimeOperation::RefreshOpenOrders => &self.refresh_open_orders,
@@ -150,6 +153,7 @@ impl RuntimeDiagnosticsState {
             state_reads: LockDiagnosticsSnapshot::default(),
             state_writes: LockDiagnosticsSnapshot::default(),
             refresh_metadata: self.refresh_metadata.snapshot(),
+            fetch_ohlcv: self.fetch_ohlcv.snapshot(),
             refresh_account: self.refresh_account.snapshot(),
             refresh_positions: self.refresh_positions.snapshot(),
             refresh_open_orders: self.refresh_open_orders.snapshot(),
@@ -166,6 +170,7 @@ impl RuntimeDiagnosticsState {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum RuntimeOperation {
     RefreshMetadata,
+    FetchOhlcv,
     RefreshAccount,
     RefreshPositions,
     RefreshOpenOrders,

@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use time::{Date, Month, OffsetDateTime, PrimitiveDateTime, Time};
 
 use crate::ids::{InstrumentId, TradeId};
 use crate::instrument::InstrumentSpec;
@@ -118,6 +119,143 @@ pub struct Kline {
     pub closed: bool,
 }
 
+/// Unified OHLCV interval in ccxt-style notation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum KlineInterval {
+    Minute1,
+    Minute3,
+    Minute5,
+    Minute15,
+    Minute30,
+    Hour1,
+    Hour2,
+    Hour4,
+    Hour6,
+    Hour12,
+    Day1,
+    Day3,
+    Week1,
+    Month1,
+}
+
+impl KlineInterval {
+    #[must_use]
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw {
+            "1" | "1m" => Some(Self::Minute1),
+            "3" | "3m" => Some(Self::Minute3),
+            "5" | "5m" => Some(Self::Minute5),
+            "15" | "15m" => Some(Self::Minute15),
+            "30" | "30m" => Some(Self::Minute30),
+            "60" | "1h" => Some(Self::Hour1),
+            "120" | "2h" => Some(Self::Hour2),
+            "240" | "4h" => Some(Self::Hour4),
+            "360" | "6h" => Some(Self::Hour6),
+            "720" | "12h" => Some(Self::Hour12),
+            "D" | "1d" => Some(Self::Day1),
+            "3d" => Some(Self::Day3),
+            "W" | "1w" => Some(Self::Week1),
+            "M" | "1M" => Some(Self::Month1),
+            _ => None,
+        }
+    }
+
+    #[must_use]
+    pub const fn as_ccxt_str(self) -> &'static str {
+        match self {
+            Self::Minute1 => "1m",
+            Self::Minute3 => "3m",
+            Self::Minute5 => "5m",
+            Self::Minute15 => "15m",
+            Self::Minute30 => "30m",
+            Self::Hour1 => "1h",
+            Self::Hour2 => "2h",
+            Self::Hour4 => "4h",
+            Self::Hour6 => "6h",
+            Self::Hour12 => "12h",
+            Self::Day1 => "1d",
+            Self::Day3 => "3d",
+            Self::Week1 => "1w",
+            Self::Month1 => "1M",
+        }
+    }
+
+    #[must_use]
+    pub const fn as_binance_str(self) -> &'static str {
+        self.as_ccxt_str()
+    }
+
+    #[must_use]
+    pub const fn as_bybit_str(self) -> &'static str {
+        match self {
+            Self::Minute1 => "1",
+            Self::Minute3 => "3",
+            Self::Minute5 => "5",
+            Self::Minute15 => "15",
+            Self::Minute30 => "30",
+            Self::Hour1 => "60",
+            Self::Hour2 => "120",
+            Self::Hour4 => "240",
+            Self::Hour6 => "360",
+            Self::Hour12 => "720",
+            Self::Day1 => "D",
+            Self::Day3 => "3d",
+            Self::Week1 => "W",
+            Self::Month1 => "M",
+        }
+    }
+
+    #[must_use]
+    pub fn close_time_ms(self, open_time_ms: i64) -> Option<i64> {
+        let duration_ms = match self {
+            Self::Minute1 => Some(60_000),
+            Self::Minute3 => Some(3 * 60_000),
+            Self::Minute5 => Some(5 * 60_000),
+            Self::Minute15 => Some(15 * 60_000),
+            Self::Minute30 => Some(30 * 60_000),
+            Self::Hour1 => Some(60 * 60_000),
+            Self::Hour2 => Some(120 * 60_000),
+            Self::Hour4 => Some(240 * 60_000),
+            Self::Hour6 => Some(360 * 60_000),
+            Self::Hour12 => Some(720 * 60_000),
+            Self::Day1 => Some(24 * 60 * 60_000),
+            Self::Day3 => Some(3 * 24 * 60 * 60_000),
+            Self::Week1 => Some(7 * 24 * 60 * 60_000),
+            Self::Month1 => None,
+        };
+        if let Some(duration_ms) = duration_ms {
+            return Some(open_time_ms + duration_ms - 1);
+        }
+
+        let open_time =
+            OffsetDateTime::from_unix_timestamp_nanos(i128::from(open_time_ms) * 1_000_000).ok()?;
+        let (year, month) = if open_time.month() == Month::December {
+            (open_time.year() + 1, Month::January)
+        } else {
+            (open_time.year(), next_month(open_time.month()))
+        };
+        let next_month = Date::from_calendar_date(year, month, 1).ok()?;
+        let next_open = PrimitiveDateTime::new(next_month, Time::MIDNIGHT).assume_utc();
+        Some((next_open.unix_timestamp_nanos() / 1_000_000) as i64 - 1)
+    }
+}
+
+impl From<KlineInterval> for Box<str> {
+    fn from(value: KlineInterval) -> Self {
+        value.as_ccxt_str().into()
+    }
+}
+
+/// Historical OHLCV request.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FetchOhlcvRequest {
+    pub instrument_id: InstrumentId,
+    pub interval: Box<str>,
+    pub start_time: Option<TimestampMs>,
+    pub end_time: Option<TimestampMs>,
+    pub limit: Option<usize>,
+}
+
 /// Unified funding-rate snapshot.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FundingRate {
@@ -199,5 +337,22 @@ impl FastKline {
             close_time: self.close_time,
             closed: self.closed,
         }
+    }
+}
+
+fn next_month(month: Month) -> Month {
+    match month {
+        Month::January => Month::February,
+        Month::February => Month::March,
+        Month::March => Month::April,
+        Month::April => Month::May,
+        Month::May => Month::June,
+        Month::June => Month::July,
+        Month::July => Month::August,
+        Month::August => Month::September,
+        Month::September => Month::October,
+        Month::October => Month::November,
+        Month::November => Month::December,
+        Month::December => Month::January,
     }
 }
