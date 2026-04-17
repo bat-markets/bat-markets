@@ -19,13 +19,13 @@ use tokio_tungstenite::tungstenite::Message;
 use url::form_urlencoded::Serializer;
 
 use bat_markets_core::{
-    CancelOrderRequest, ClientOrderId, CommandOperation, CommandReceipt, CommandStatus,
-    CreateOrderRequest, DegradedReason, ErrorKind, Execution, FetchOhlcvRequest, GetOrderRequest,
-    HealthReport, InstrumentId, InstrumentSpec, Kline, KlineInterval, ListExecutionsRequest,
-    ListOpenOrdersRequest, MarginMode, MarketError, OpenInterest, Order, OrderId, Price,
-    PrivateLaneEvent, Product, PublicLaneEvent, Quantity, ReconcileOutcome, ReconcileReport,
-    ReconcileTrigger, Result, SequenceNumber, SetLeverageRequest, SetMarginModeRequest,
-    TimestampMs, Venue, VenueAdapter,
+    BookTop, CancelOrderRequest, ClientOrderId, CommandOperation, CommandReceipt, CommandStatus,
+    CreateOrderRequest, DegradedReason, ErrorKind, Execution, FetchOhlcvRequest,
+    FetchTradesRequest, GetOrderRequest, HealthReport, InstrumentId, InstrumentSpec, Kline,
+    KlineInterval, ListExecutionsRequest, ListOpenOrdersRequest, MarginMode, MarketError,
+    OpenInterest, Order, OrderId, Price, PrivateLaneEvent, Product, PublicLaneEvent, Quantity,
+    ReconcileOutcome, ReconcileReport, ReconcileTrigger, Result, SequenceNumber,
+    SetLeverageRequest, SetMarginModeRequest, Ticker, TimestampMs, TradeTick, Venue, VenueAdapter,
 };
 
 #[cfg(feature = "binance")]
@@ -1083,6 +1083,147 @@ pub(crate) async fn fetch_ohlcv(
         klines.extend(fetch_ohlcv_single(context, &single_request).await?);
     }
     Ok(klines)
+}
+
+pub(crate) async fn fetch_ticker(
+    context: &LiveContext,
+    instrument_id: &InstrumentId,
+) -> Result<Ticker> {
+    let started_at = Instant::now();
+    let result = async {
+        let spec = require_spec(context, instrument_id)?;
+        let ticker = match &context.adapter {
+            #[cfg(feature = "binance")]
+            AdapterHandle::Binance(adapter) => {
+                let payload = public_get_with_retry(
+                    context,
+                    "/fapi/v1/ticker/24hr",
+                    &[("symbol", spec.native_symbol.as_ref())],
+                    "binance.fetch_ticker",
+                )
+                .await?;
+                adapter.parse_ticker_snapshot(&payload, instrument_id)?
+            }
+            #[cfg(feature = "bybit")]
+            AdapterHandle::Bybit(adapter) => {
+                let payload = public_get_with_retry(
+                    context,
+                    "/v5/market/tickers",
+                    &[
+                        ("category", "linear"),
+                        ("symbol", spec.native_symbol.as_ref()),
+                    ],
+                    "bybit.fetch_ticker",
+                )
+                .await?;
+                adapter.parse_ticker_snapshot(&payload, instrument_id)?
+            }
+        };
+
+        context.shared.write(|state| state.mark_rest_success(None));
+        Ok(ticker)
+    }
+    .await;
+    record_runtime_latency(context, RuntimeOperation::FetchTicker, started_at);
+    result
+}
+
+pub(crate) async fn fetch_trades(
+    context: &LiveContext,
+    request: &FetchTradesRequest,
+) -> Result<Vec<TradeTick>> {
+    let started_at = Instant::now();
+    let result = async {
+        let spec = require_spec(context, &request.instrument_id)?;
+        let limit = request.validated_limit()?;
+        let limit_string = limit.map(|value| value.to_string());
+
+        let trades = match &context.adapter {
+            #[cfg(feature = "binance")]
+            AdapterHandle::Binance(adapter) => {
+                let mut query = vec![("symbol", spec.native_symbol.as_ref())];
+                if let Some(limit) = &limit_string {
+                    query.push(("limit", limit.as_str()));
+                }
+                let payload = public_get_with_retry(
+                    context,
+                    "/fapi/v1/aggTrades",
+                    &query,
+                    "binance.fetch_trades",
+                )
+                .await?;
+                adapter.parse_trades_snapshot(&payload, request)?
+            }
+            #[cfg(feature = "bybit")]
+            AdapterHandle::Bybit(adapter) => {
+                let mut query = vec![
+                    ("category", "linear"),
+                    ("symbol", spec.native_symbol.as_ref()),
+                ];
+                if let Some(limit) = &limit_string {
+                    query.push(("limit", limit.as_str()));
+                }
+                let payload = public_get_with_retry(
+                    context,
+                    "/v5/market/recent-trade",
+                    &query,
+                    "bybit.fetch_trades",
+                )
+                .await?;
+                adapter.parse_trades_snapshot(&payload, request)?
+            }
+        };
+
+        context.shared.write(|state| state.mark_rest_success(None));
+        Ok(trades)
+    }
+    .await;
+    record_runtime_latency(context, RuntimeOperation::FetchTrades, started_at);
+    result
+}
+
+pub(crate) async fn fetch_book_top(
+    context: &LiveContext,
+    instrument_id: &InstrumentId,
+) -> Result<BookTop> {
+    let started_at = Instant::now();
+    let result = async {
+        let spec = require_spec(context, instrument_id)?;
+        let book_top = match &context.adapter {
+            #[cfg(feature = "binance")]
+            AdapterHandle::Binance(adapter) => {
+                let payload = public_get_with_retry(
+                    context,
+                    "/fapi/v1/ticker/bookTicker",
+                    &[("symbol", spec.native_symbol.as_ref())],
+                    "binance.fetch_book_top",
+                )
+                .await?;
+                adapter.parse_book_top_snapshot(&payload, instrument_id)?
+            }
+            #[cfg(feature = "bybit")]
+            AdapterHandle::Bybit(adapter) => {
+                let payload = public_get_with_retry(
+                    context,
+                    "/v5/market/orderbook",
+                    &[
+                        ("category", "linear"),
+                        ("symbol", spec.native_symbol.as_ref()),
+                        ("limit", "1"),
+                    ],
+                    "bybit.fetch_book_top",
+                )
+                .await?;
+                adapter.parse_book_top_snapshot(&payload, instrument_id)?
+            }
+        };
+
+        context.shared.write(|state| state.mark_rest_success(None));
+        Ok(book_top)
+    }
+    .await;
+    record_runtime_latency(context, RuntimeOperation::FetchBookTop, started_at);
+    result
 }
 
 async fn fetch_ohlcv_single(

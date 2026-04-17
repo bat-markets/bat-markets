@@ -3,6 +3,7 @@
 pub mod native;
 
 use std::{
+    collections::BTreeMap,
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -14,13 +15,14 @@ use serde::Deserialize;
 use bat_markets_core::{
     AccountCapabilities, AccountSnapshot, AggressorSide, AssetCapabilities, AssetCode, Balance,
     BatMarketsConfig, CapabilitySet, CommandOperation, CommandReceipt, CommandStatus, ErrorKind,
-    Execution, FastBookTop, FastKline, FastTicker, FastTrade, FetchOhlcvRequest, FundingRate,
-    InstrumentCatalog, InstrumentId, InstrumentSpec, InstrumentStatus, InstrumentSupport, Kline,
-    KlineInterval, Leverage, MarginMode, MarketCapabilities, MarketError, MarketType,
-    NativeCapabilities, Notional, OpenInterest, Order, OrderId, OrderStatus, OrderType, Position,
-    PositionCapabilities, PositionDirection, PositionId, PositionMode, Price, PrivateLaneEvent,
-    Product, PublicLaneEvent, Quantity, Rate, RequestId, Result, Side, TimeInForce, TimestampMs,
-    TradeCapabilities, TradeId, Venue, VenueAdapter,
+    Execution, FastBookTop, FastKline, FastTicker, FastTrade, FetchOhlcvRequest,
+    FetchTradesRequest, FundingRate, InstrumentCatalog, InstrumentId, InstrumentSpec,
+    InstrumentStatus, InstrumentSupport, Kline, KlineInterval, Leverage, MarginMode,
+    MarketCapabilities, MarketError, MarketType, NativeCapabilities, Notional, OpenInterest, Order,
+    OrderId, OrderStatus, OrderType, Position, PositionCapabilities, PositionDirection, PositionId,
+    PositionMode, Price, PrivateLaneEvent, Product, PublicLaneEvent, Quantity, Rate, RequestId,
+    Result, Side, Ticker, TimeInForce, TimestampMs, TradeCapabilities, TradeId, Venue,
+    VenueAdapter,
 };
 
 /// Bybit account context discovered from authenticated endpoints.
@@ -37,6 +39,7 @@ pub struct BybitLinearFuturesAdapter {
     capabilities: CapabilitySet,
     lane_set: bat_markets_core::LaneSet,
     instruments: Arc<RwLock<InstrumentCatalog>>,
+    ticker_cache: Arc<RwLock<BTreeMap<String, native::TickerData>>>,
 }
 
 impl Default for BybitLinearFuturesAdapter {
@@ -116,6 +119,7 @@ impl BybitLinearFuturesAdapter {
                 btc_spec(),
                 eth_spec(),
             ]))),
+            ticker_cache: Arc::new(RwLock::new(BTreeMap::new())),
         }
     }
 
@@ -143,6 +147,58 @@ impl BybitLinearFuturesAdapter {
             .with_venue(Venue::Bybit, Product::LinearUsdt)
             .with_operation("bybit.parse_native_private")
         })
+    }
+
+    fn merged_ticker_data(&self, envelope: &native::PublicEnvelope) -> Result<native::TickerData> {
+        let patch = serde_json::from_value::<native::TickerPatch>(envelope.data.clone())
+            .map_err(decode_error)?;
+        let symbol = patch
+            .symbol
+            .clone()
+            .or_else(|| envelope.topic.strip_prefix("tickers.").map(str::to_owned))
+            .ok_or_else(|| {
+                MarketError::new(
+                    ErrorKind::DecodeError,
+                    format!(
+                        "failed to derive bybit ticker symbol from topic '{}'",
+                        envelope.topic
+                    ),
+                )
+            })?;
+
+        let mut cache = self.ticker_cache.write();
+        let entry = cache
+            .entry(symbol.clone())
+            .or_insert_with(|| native::TickerData {
+                symbol: symbol.clone(),
+                last_price: String::new(),
+                mark_price: String::new(),
+                index_price: String::new(),
+                open_interest: String::new(),
+                funding_rate: String::new(),
+                volume_24h: String::new(),
+                turnover_24h: String::new(),
+                bid1_price: None,
+                bid1_size: None,
+                ask1_price: None,
+                ask1_size: None,
+            });
+
+        merge_string_field(&mut entry.last_price, patch.last_price);
+        merge_string_field(&mut entry.mark_price, patch.mark_price);
+        merge_string_field(&mut entry.index_price, patch.index_price);
+        merge_string_field(&mut entry.open_interest, patch.open_interest);
+        merge_string_field(&mut entry.funding_rate, patch.funding_rate);
+        merge_string_field(&mut entry.volume_24h, patch.volume_24h);
+        merge_string_field(&mut entry.turnover_24h, patch.turnover_24h);
+        merge_optional_string_field(&mut entry.bid1_price, patch.bid1_price);
+        merge_optional_string_field(&mut entry.bid1_size, patch.bid1_size);
+        merge_optional_string_field(&mut entry.ask1_price, patch.ask1_price);
+        merge_optional_string_field(&mut entry.ask1_size, patch.ask1_size);
+
+        ensure_non_empty(&entry.last_price, "lastPrice")?;
+
+        Ok(entry.clone())
     }
 
     pub fn parse_server_time(&self, payload: &str) -> Result<TimestampMs> {
@@ -363,6 +419,136 @@ impl BybitLinearFuturesAdapter {
             .collect()
     }
 
+    pub fn parse_ticker_snapshot(
+        &self,
+        payload: &str,
+        instrument_id: &InstrumentId,
+    ) -> Result<Ticker> {
+        let response =
+            serde_json::from_str::<native::MarketTickersResponse>(payload).map_err(decode_error)?;
+        if response.ret_code != 0 {
+            return Err(exchange_reject(response.ret_code, &response.ret_msg));
+        }
+        let spec = self.resolve_instrument(instrument_id).ok_or_else(|| {
+            MarketError::new(
+                ErrorKind::Unsupported,
+                format!("unsupported bybit instrument '{}'", instrument_id),
+            )
+            .with_venue(Venue::Bybit, Product::LinearUsdt)
+        })?;
+        let data = response.result.list.into_iter().next().ok_or_else(|| {
+            MarketError::new(
+                ErrorKind::DecodeError,
+                "missing bybit ticker entry in market/tickers response",
+            )
+        })?;
+
+        Ok(FastTicker {
+            instrument_id: spec.instrument_id.clone(),
+            last_price: Price::new(parse_decimal(&data.last_price)?).quantize(spec.price_scale)?,
+            mark_price: Some(
+                Price::new(parse_decimal(&data.mark_price)?).quantize(spec.price_scale)?,
+            ),
+            index_price: Some(
+                Price::new(parse_decimal(&data.index_price)?).quantize(spec.price_scale)?,
+            ),
+            volume_24h: Some(
+                Quantity::new(parse_decimal(&data.volume_24h)?).quantize(spec.qty_scale)?,
+            ),
+            turnover_24h: Some(
+                Notional::new(parse_decimal(&data.turnover_24h)?).quantize(spec.quote_scale)?,
+            ),
+            event_time: TimestampMs::new(now_timestamp_ms()),
+        }
+        .to_unified(&spec))
+    }
+
+    pub fn parse_trades_snapshot(
+        &self,
+        payload: &str,
+        request: &FetchTradesRequest,
+    ) -> Result<Vec<bat_markets_core::TradeTick>> {
+        let response = serde_json::from_str::<native::RecentPublicTradesResponse>(payload)
+            .map_err(decode_error)?;
+        if response.ret_code != 0 {
+            return Err(exchange_reject(response.ret_code, &response.ret_msg));
+        }
+        let spec = self
+            .resolve_instrument(&request.instrument_id)
+            .ok_or_else(|| {
+                MarketError::new(
+                    ErrorKind::Unsupported,
+                    format!("unsupported bybit instrument '{}'", request.instrument_id),
+                )
+                .with_venue(Venue::Bybit, Product::LinearUsdt)
+            })?;
+
+        response
+            .result
+            .list
+            .into_iter()
+            .map(|trade| {
+                let trade_time = trade
+                    .time
+                    .parse::<i64>()
+                    .map_err(|error| decode_string_error("bybit trade time", error))?;
+                Ok(FastTrade {
+                    instrument_id: spec.instrument_id.clone(),
+                    trade_id: TradeId::from(trade.exec_id),
+                    price: Price::new(parse_decimal(&trade.price)?).quantize(spec.price_scale)?,
+                    quantity: Quantity::new(parse_decimal(&trade.size)?)
+                        .quantize(spec.qty_scale)?,
+                    aggressor_side: parse_aggressor(&trade.side)?,
+                    event_time: TimestampMs::new(trade_time),
+                }
+                .to_unified(&spec))
+            })
+            .collect()
+    }
+
+    pub fn parse_book_top_snapshot(
+        &self,
+        payload: &str,
+        instrument_id: &InstrumentId,
+    ) -> Result<bat_markets_core::BookTop> {
+        let spec = self.resolve_instrument(instrument_id).ok_or_else(|| {
+            MarketError::new(
+                ErrorKind::Unsupported,
+                format!("unsupported bybit instrument '{}'", instrument_id),
+            )
+            .with_venue(Venue::Bybit, Product::LinearUsdt)
+        })?;
+        let response =
+            serde_json::from_str::<native::OrderBookResponse>(payload).map_err(decode_error)?;
+        if response.ret_code != 0 {
+            return Err(exchange_reject(response.ret_code, &response.ret_msg));
+        }
+        let bid =
+            response.result.bids.first().ok_or_else(|| {
+                MarketError::new(ErrorKind::DecodeError, "missing bybit best bid")
+            })?;
+        let ask =
+            response.result.asks.first().ok_or_else(|| {
+                MarketError::new(ErrorKind::DecodeError, "missing bybit best ask")
+            })?;
+
+        Ok(FastBookTop {
+            instrument_id: spec.instrument_id.clone(),
+            bid_price: Price::new(parse_decimal(&bid[0])?).quantize(spec.price_scale)?,
+            bid_quantity: Quantity::new(parse_decimal(&bid[1])?).quantize(spec.qty_scale)?,
+            ask_price: Price::new(parse_decimal(&ask[0])?).quantize(spec.price_scale)?,
+            ask_quantity: Quantity::new(parse_decimal(&ask[1])?).quantize(spec.qty_scale)?,
+            event_time: TimestampMs::new(
+                response
+                    .result
+                    .cts
+                    .or(response.result.ts)
+                    .unwrap_or_else(now_timestamp_ms),
+            ),
+        }
+        .to_unified(&spec))
+    }
+
     pub fn parse_ohlcv_snapshot(
         &self,
         payload: &str,
@@ -577,41 +763,43 @@ impl VenueAdapter for BybitLinearFuturesAdapter {
     fn parse_public(&self, payload: &str) -> Result<Vec<PublicLaneEvent>> {
         let envelope = self.parse_native_public(payload)?;
         if envelope.topic.starts_with("tickers.") {
-            let data: native::TickerData =
-                serde_json::from_value(envelope.data).map_err(decode_error)?;
+            let data = self.merged_ticker_data(&envelope)?;
             let spec = self.require_native_symbol(&data.symbol)?;
-            return Ok(vec![
-                PublicLaneEvent::Ticker(FastTicker {
+            let mut events = Vec::with_capacity(3);
+            events.push(PublicLaneEvent::Ticker(FastTicker {
+                instrument_id: spec.instrument_id.clone(),
+                last_price: Price::new(parse_decimal(&data.last_price)?)
+                    .quantize(spec.price_scale)?,
+                mark_price: parse_optional_decimal_str(&data.mark_price)?
+                    .map(|value| Price::new(value).quantize(spec.price_scale))
+                    .transpose()?,
+                index_price: parse_optional_decimal_str(&data.index_price)?
+                    .map(|value| Price::new(value).quantize(spec.price_scale))
+                    .transpose()?,
+                volume_24h: parse_optional_decimal_str(&data.volume_24h)?
+                    .map(|value| Quantity::new(value).quantize(spec.qty_scale))
+                    .transpose()?,
+                turnover_24h: parse_optional_decimal_str(&data.turnover_24h)?
+                    .map(|value| Notional::new(value).quantize(spec.quote_scale))
+                    .transpose()?,
+                event_time: TimestampMs::new(envelope.ts),
+            }));
+            if let Some(funding_rate) = parse_optional_decimal_str(&data.funding_rate)? {
+                events.push(PublicLaneEvent::FundingRate(FundingRate {
                     instrument_id: spec.instrument_id.clone(),
-                    last_price: Price::new(parse_decimal(&data.last_price)?)
-                        .quantize(spec.price_scale)?,
-                    mark_price: Some(
-                        Price::new(parse_decimal(&data.mark_price)?).quantize(spec.price_scale)?,
-                    ),
-                    index_price: Some(
-                        Price::new(parse_decimal(&data.index_price)?).quantize(spec.price_scale)?,
-                    ),
-                    volume_24h: Some(
-                        Quantity::new(parse_decimal(&data.volume_24h)?).quantize(spec.qty_scale)?,
-                    ),
-                    turnover_24h: Some(
-                        Notional::new(parse_decimal(&data.turnover_24h)?)
-                            .quantize(spec.quote_scale)?,
-                    ),
+                    value: Rate::new(funding_rate),
+                    mark_price: parse_optional_decimal_str(&data.mark_price)?.map(Price::new),
                     event_time: TimestampMs::new(envelope.ts),
-                }),
-                PublicLaneEvent::FundingRate(FundingRate {
+                }));
+            }
+            if let Some(open_interest) = parse_optional_decimal_str(&data.open_interest)? {
+                events.push(PublicLaneEvent::OpenInterest(OpenInterest {
                     instrument_id: spec.instrument_id.clone(),
-                    value: Rate::new(parse_decimal(&data.funding_rate)?),
-                    mark_price: Some(Price::new(parse_decimal(&data.mark_price)?)),
+                    value: Quantity::new(open_interest),
                     event_time: TimestampMs::new(envelope.ts),
-                }),
-                PublicLaneEvent::OpenInterest(OpenInterest {
-                    instrument_id: spec.instrument_id.clone(),
-                    value: Quantity::new(parse_decimal(&data.open_interest)?),
-                    event_time: TimestampMs::new(envelope.ts),
-                }),
-            ]);
+                }));
+            }
+            return Ok(events);
         }
 
         if envelope.topic.starts_with("publicTrade.") {
@@ -1033,6 +1221,39 @@ fn parse_instrument_status(raw: &str) -> InstrumentStatus {
     }
 }
 
+fn merge_string_field(target: &mut String, value: Option<String>) {
+    if let Some(value) = value
+        && !value.is_empty()
+    {
+        *target = value;
+    }
+}
+
+fn merge_optional_string_field(target: &mut Option<String>, value: Option<String>) {
+    if let Some(value) = value
+        && !value.is_empty()
+    {
+        *target = Some(value);
+    }
+}
+
+fn ensure_non_empty(value: &str, field: &str) -> Result<()> {
+    if value.is_empty() {
+        return Err(MarketError::new(
+            ErrorKind::DecodeError,
+            format!("missing bybit ticker field '{field}' after snapshot/delta merge"),
+        ));
+    }
+    Ok(())
+}
+
+fn parse_optional_decimal_str(raw: &str) -> Result<Option<Decimal>> {
+    if raw.is_empty() {
+        return Ok(None);
+    }
+    parse_decimal(raw).map(Some)
+}
+
 fn decimal_scale(value: Decimal) -> u32 {
     value.normalize().scale()
 }
@@ -1070,7 +1291,8 @@ fn now_timestamp_ms() -> i64 {
 mod tests {
     use super::BybitLinearFuturesAdapter;
     use bat_markets_core::{
-        FetchOhlcvRequest, InstrumentId, OrderStatus, PublicLaneEvent, TimestampMs, VenueAdapter,
+        FetchOhlcvRequest, FetchTradesRequest, InstrumentId, OrderStatus, PublicLaneEvent,
+        TimestampMs, VenueAdapter,
     };
 
     const EXECUTION_HISTORY: &str = include_str!(concat!(
@@ -1100,6 +1322,56 @@ mod tests {
             .expect("bybit order history fixture should parse");
         assert_eq!(orders.len(), 1);
         assert_eq!(orders[0].status, OrderStatus::Canceled);
+    }
+
+    #[test]
+    fn parse_bybit_rest_ticker_snapshot() {
+        let adapter = BybitLinearFuturesAdapter::new();
+        let ticker = adapter
+            .parse_ticker_snapshot(
+                r#"{
+                    "retCode":0,
+                    "retMsg":"OK",
+                    "result":{"list":[{"symbol":"BTCUSDT","lastPrice":"70110.0","markPrice":"70108.5","indexPrice":"70105.0","openInterest":"30000.500","fundingRate":"0.000120","volume24h":"5432.100","turnover24h":"381000000.55","bid1Price":"70109.5","bid1Size":"2.500","ask1Price":"70110.5","ask1Size":"1.700"}]}
+                }"#,
+                &InstrumentId::from("BTC/USDT:USDT"),
+            )
+            .expect("bybit rest ticker should parse");
+        assert_eq!(ticker.last_price.to_string(), "70110.00");
+    }
+
+    #[test]
+    fn parse_bybit_rest_trades_snapshot() {
+        let adapter = BybitLinearFuturesAdapter::new();
+        let trades = adapter
+            .parse_trades_snapshot(
+                r#"{
+                    "retCode":0,
+                    "retMsg":"OK",
+                    "result":{"list":[{"execId":"abc123","symbol":"BTCUSDT","price":"70109.9","size":"0.250","side":"Buy","time":"1710000000001"}]}
+                }"#,
+                &FetchTradesRequest::new(InstrumentId::from("BTC/USDT:USDT"), Some(1)),
+            )
+            .expect("bybit rest trades should parse");
+        assert_eq!(trades.len(), 1);
+        assert_eq!(trades[0].price.to_string(), "70109.90");
+    }
+
+    #[test]
+    fn parse_bybit_rest_book_top_snapshot() {
+        let adapter = BybitLinearFuturesAdapter::new();
+        let book_top = adapter
+            .parse_book_top_snapshot(
+                r#"{
+                    "retCode":0,
+                    "retMsg":"OK",
+                    "result":{"s":"BTCUSDT","b":[["70110.0","2.500"]],"a":[["70110.5","1.700"]],"ts":1710000100200,"u":10,"seq":100,"cts":1710000100195}
+                }"#,
+                &InstrumentId::from("BTC/USDT:USDT"),
+            )
+            .expect("bybit rest book top should parse");
+        assert_eq!(book_top.bid.price.to_string(), "70110.00");
+        assert_eq!(book_top.ask.price.to_string(), "70110.50");
     }
 
     #[test]
@@ -1164,5 +1436,48 @@ mod tests {
         };
         assert_eq!(kline.instrument_id, InstrumentId::from("BTC/USDT:USDT"));
         assert_eq!(kline.interval.as_ref(), "1");
+    }
+
+    #[test]
+    fn parse_bybit_ticker_delta_merges_cached_snapshot() {
+        let adapter = BybitLinearFuturesAdapter::new();
+        adapter
+            .parse_public(
+                r#"{
+                    "topic":"tickers.BTCUSDT",
+                    "type":"snapshot",
+                    "ts":1710000100000,
+                    "data":{"symbol":"BTCUSDT","lastPrice":"70110.0","markPrice":"70108.5","indexPrice":"70105.0","openInterest":"30000.500","fundingRate":"0.000120","volume24h":"5432.100","turnover24h":"381000000.55"}
+                }"#,
+            )
+            .expect("snapshot should parse");
+
+        let events = adapter
+            .parse_public(
+                r#"{
+                    "topic":"tickers.BTCUSDT",
+                    "type":"delta",
+                    "ts":1710000100100,
+                    "data":{"symbol":"BTCUSDT","lastPrice":"70111.0","fundingRate":""}
+                }"#,
+            )
+            .expect("delta should merge with cached snapshot");
+
+        let ticker = match &events[0] {
+            PublicLaneEvent::Ticker(ticker) => ticker,
+            other => panic!("expected ticker event, got {other:?}"),
+        };
+        let spec = adapter
+            .resolve_instrument(&InstrumentId::from("BTC/USDT:USDT"))
+            .expect("btc instrument should resolve");
+        let ticker = ticker.to_unified(&spec);
+        assert_eq!(ticker.last_price.to_string(), "70111.00");
+        assert_eq!(
+            ticker
+                .mark_price
+                .expect("mark price should stay cached")
+                .to_string(),
+            "70108.50"
+        );
     }
 }

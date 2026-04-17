@@ -258,6 +258,13 @@ pub struct FetchOhlcvRequest {
     pub limit: Option<usize>,
 }
 
+/// Recent public trades request.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FetchTradesRequest {
+    pub instrument_id: InstrumentId,
+    pub limit: Option<usize>,
+}
+
 impl FetchOhlcvRequest {
     #[must_use]
     pub fn for_instrument(
@@ -320,6 +327,26 @@ impl FetchOhlcvRequest {
             ));
         }
         Ok(&instrument_ids[0])
+    }
+}
+
+impl FetchTradesRequest {
+    #[must_use]
+    pub fn new(instrument_id: InstrumentId, limit: Option<usize>) -> Self {
+        Self {
+            instrument_id,
+            limit,
+        }
+    }
+
+    pub fn validated_limit(&self) -> crate::Result<Option<usize>> {
+        if matches!(self.limit, Some(0)) {
+            return Err(crate::MarketError::new(
+                crate::ErrorKind::ConfigError,
+                "fetch_trades limit must be greater than zero",
+            ));
+        }
+        Ok(self.limit)
     }
 }
 

@@ -1,8 +1,8 @@
 use std::collections::BTreeMap;
 
 use bat_markets_core::{
-    ErrorKind, FetchOhlcvRequest, FundingRate, InstrumentId, InstrumentSpec, Kline, KlineInterval,
-    MarketError, OpenInterest, Result, Ticker, TimestampMs, TradeTick, Venue,
+    ErrorKind, FetchOhlcvRequest, FetchTradesRequest, FundingRate, InstrumentId, InstrumentSpec,
+    Kline, KlineInterval, MarketError, OpenInterest, Result, Ticker, TimestampMs, TradeTick, Venue,
 };
 
 use crate::{client::BatMarkets, runtime};
@@ -91,6 +91,24 @@ impl<'a> MarketClient<'a> {
         instrument_id: &InstrumentId,
     ) -> Result<OpenInterest> {
         runtime::refresh_open_interest(&self.inner.live_context(), instrument_id).await
+    }
+
+    /// Fetch the latest ticker snapshot through the venue REST API.
+    pub async fn fetch_ticker(&self, instrument_id: &InstrumentId) -> Result<Ticker> {
+        runtime::fetch_ticker(&self.inner.live_context(), instrument_id).await
+    }
+
+    /// Fetch recent public trades through the venue REST API.
+    pub async fn fetch_trades(&self, request: &FetchTradesRequest) -> Result<Vec<TradeTick>> {
+        runtime::fetch_trades(&self.inner.live_context(), request).await
+    }
+
+    /// Fetch the latest best bid / ask snapshot through the venue REST API.
+    pub async fn fetch_book_top(
+        &self,
+        instrument_id: &InstrumentId,
+    ) -> Result<bat_markets_core::BookTop> {
+        runtime::fetch_book_top(&self.inner.live_context(), instrument_id).await
     }
 
     /// Fetch historical OHLCV / kline candles through the venue REST API.

@@ -41,8 +41,8 @@ pub use ids::{AssetCode, ClientOrderId, InstrumentId, OrderId, PositionId, Reque
 pub use instrument::{InstrumentSpec, InstrumentStatus, InstrumentSupport};
 pub use market::{
     BookDelta, BookLevel, BookTop, FETCH_OHLCV_MAX_INSTRUMENTS_PER_CALL, FastBookTop, FastKline,
-    FastTicker, FastTrade, FetchOhlcvRequest, FundingRate, Kline, KlineInterval, OpenInterest,
-    Ticker, TradeTick,
+    FastTicker, FastTrade, FetchOhlcvRequest, FetchTradesRequest, FundingRate, Kline,
+    KlineInterval, OpenInterest, Ticker, TradeTick,
 };
 pub use numeric::{
     Amount, FastNotional, FastPrice, FastQuantity, Leverage, Notional, Price, Quantity, Rate,

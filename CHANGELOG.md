@@ -19,6 +19,8 @@
 - allow unified `market().fetch_ohlcv(...)` to batch `1..=30` instruments per call while preserving ccxt-style intervals and per-candle `instrument_id`
 - make `market().fetch_ohlcv(...)` fully paginate bounded OHLCV ranges whenever both `start_time` and `end_time` are provided; `fetch_ohlcv_window(...)` and `fetch_ohlcv_all(...)` remain compatibility aliases
 - add typed `stream().public().watch_ohlcv(...)` for one or many symbols on Binance and Bybit
+- add unified `market().fetch_ticker(...)`, `market().fetch_trades(...)`, and `market().fetch_book_top(...)` for public market snapshots
+- add typed `stream().public().watch_ticker(...)`, `watch_trades(...)`, and `watch_book_top(...)` for one or many symbols
 - normalize OHLCV intervals to ccxt-style values like `1m`, `5m`, `1h`, and `1d` across REST fetches and websocket watches
 - fix live Bybit `watch_ohlcv()` parsing when websocket kline payloads omit per-row `symbol` and only surface it in the topic name
 - add realistic OHLCV stress harness coverage for multi-symbol live fetch/watch flows and frontend-style `30 symbols x 3 days x 1m` paging

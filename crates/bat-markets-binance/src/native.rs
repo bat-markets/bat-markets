@@ -127,6 +127,46 @@ pub struct OpenInterestSnapshot {
 }
 
 #[derive(Clone, Debug, Deserialize)]
+pub struct TickerSnapshot {
+    pub symbol: String,
+    #[serde(rename = "lastPrice")]
+    pub last_price: String,
+    pub volume: String,
+    #[serde(rename = "quoteVolume")]
+    pub quote_volume: String,
+    #[serde(rename = "closeTime")]
+    pub close_time: i64,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct AggTradeSnapshot {
+    #[serde(rename = "a")]
+    pub agg_trade_id: i64,
+    #[serde(rename = "p")]
+    pub price: String,
+    #[serde(rename = "q")]
+    pub quantity: String,
+    #[serde(rename = "T")]
+    pub trade_time: i64,
+    #[serde(rename = "m")]
+    pub is_buyer_maker: bool,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct BookTickerSnapshot {
+    pub symbol: String,
+    #[serde(rename = "bidPrice")]
+    pub bid_price: String,
+    #[serde(rename = "bidQty")]
+    pub bid_qty: String,
+    #[serde(rename = "askPrice")]
+    pub ask_price: String,
+    #[serde(rename = "askQty")]
+    pub ask_qty: String,
+    pub time: i64,
+}
+
+#[derive(Clone, Debug, Deserialize)]
 pub struct ServerTimeResponse {
     #[serde(rename = "serverTime")]
     pub server_time: i64,

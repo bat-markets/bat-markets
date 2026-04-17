@@ -14,8 +14,14 @@ This matrix documents the current `0.1.x` futures-first surface after live trans
 | manual private reconcile | yes | yes | exposed through `stream().private().reconcile().await` |
 | health snapshot | yes | yes | cheap synchronous snapshot |
 | health subscriptions | yes | yes | watch + broadcast notifications on structural health transitions |
+| ticker fetch | yes | yes | REST-backed latest ticker snapshot via `market().fetch_ticker(...)` |
+| recent trades fetch | yes | yes | REST-backed recent public trades via `market().fetch_trades(...)` |
+| book top fetch | yes | yes | REST-backed best bid/ask snapshot via `market().fetch_book_top(...)` |
 | OHLCV fetch | yes | yes | REST-backed unified candles via `market().fetch_ohlcv(...)`; intervals use ccxt-style strings such as `1m`, `5m`, `1h`, `1d`, and each call can batch `1..=30` instruments |
 | OHLCV full-window fetch | yes | yes | `market().fetch_ohlcv(...)` fully paginates a bounded `start_time..end_time` range across the requested symbol batch; `fetch_ohlcv_window(...)` / `fetch_ohlcv_all(...)` remain compatibility aliases |
+| ticker watch | yes | yes | typed live ticker snapshots via `stream().public().watch_ticker(...)` |
+| trades watch | yes | yes | typed live trades via `stream().public().watch_trades(...)` |
+| book top watch | yes | yes | typed live best bid/ask via `stream().public().watch_book_top(...)` |
 | OHLCV watch | yes | yes | typed live candles via `stream().public().watch_ohlcv(...)`; one or many symbols per watcher, same ccxt-style interval surface |
 | account refresh | yes | yes | REST snapshot-backed |
 | position refresh | yes | yes | REST snapshot-backed |
@@ -48,4 +54,5 @@ This matrix documents the current `0.1.x` futures-first surface after live trans
 - Reconcile still does not rebuild a full historical ledger.
 - Live sandbox tests are env-gated and write flows require an explicit manual gate.
 - Mainnet production-key coverage is intentionally read-only in the repo test harness; private write tests remain sandbox-only by design.
+- Unified public market data currently exposes `book_top`, not a full depth-normalized `order_book` contract.
 - OHLCV live stress coverage is opt-in through `BAT_MARKETS_ENABLE_MAINNET_OHLCV_STRESS`; the harness validates paged `fetch_ohlcv()` and multi-symbol `watch_ohlcv()` against a frontend-style `30 symbols x 3 days x 1m` read pattern.

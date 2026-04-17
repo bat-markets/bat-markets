@@ -39,6 +39,42 @@ pub struct TickerData {
     pub volume_24h: String,
     #[serde(rename = "turnover24h")]
     pub turnover_24h: String,
+    #[serde(rename = "bid1Price", default)]
+    pub bid1_price: Option<String>,
+    #[serde(rename = "bid1Size", default)]
+    pub bid1_size: Option<String>,
+    #[serde(rename = "ask1Price", default)]
+    pub ask1_price: Option<String>,
+    #[serde(rename = "ask1Size", default)]
+    pub ask1_size: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct TickerPatch {
+    #[serde(rename = "symbol", default)]
+    pub symbol: Option<String>,
+    #[serde(rename = "lastPrice", default)]
+    pub last_price: Option<String>,
+    #[serde(rename = "markPrice", default)]
+    pub mark_price: Option<String>,
+    #[serde(rename = "indexPrice", default)]
+    pub index_price: Option<String>,
+    #[serde(rename = "openInterest", default)]
+    pub open_interest: Option<String>,
+    #[serde(rename = "fundingRate", default)]
+    pub funding_rate: Option<String>,
+    #[serde(rename = "volume24h", default)]
+    pub volume_24h: Option<String>,
+    #[serde(rename = "turnover24h", default)]
+    pub turnover_24h: Option<String>,
+    #[serde(rename = "bid1Price", default)]
+    pub bid1_price: Option<String>,
+    #[serde(rename = "bid1Size", default)]
+    pub bid1_size: Option<String>,
+    #[serde(rename = "ask1Price", default)]
+    pub ask1_price: Option<String>,
+    #[serde(rename = "ask1Size", default)]
+    pub ask1_size: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -58,6 +94,17 @@ pub struct PublicTradeData {
 }
 
 #[derive(Clone, Debug, Deserialize)]
+pub struct RecentPublicTradeData {
+    #[serde(rename = "execId")]
+    pub exec_id: String,
+    pub symbol: String,
+    pub price: String,
+    pub size: String,
+    pub side: String,
+    pub time: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
 pub struct OrderBookData {
     #[serde(rename = "s")]
     pub symbol: String,
@@ -65,6 +112,8 @@ pub struct OrderBookData {
     pub bids: Vec<[String; 2]>,
     #[serde(rename = "a")]
     pub asks: Vec<[String; 2]>,
+    #[serde(default)]
+    pub ts: Option<i64>,
     #[serde(rename = "u", default)]
     pub update_id: Option<i64>,
     #[serde(default)]
@@ -140,6 +189,29 @@ pub struct MarketTickersResponse {
 #[derive(Clone, Debug, Deserialize)]
 pub struct MarketTickersResult {
     pub list: Vec<TickerData>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct RecentPublicTradesResponse {
+    #[serde(rename = "retCode")]
+    pub ret_code: i64,
+    #[serde(rename = "retMsg")]
+    pub ret_msg: String,
+    pub result: RecentPublicTradesResult,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct RecentPublicTradesResult {
+    pub list: Vec<RecentPublicTradeData>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct OrderBookResponse {
+    #[serde(rename = "retCode")]
+    pub ret_code: i64,
+    #[serde(rename = "retMsg")]
+    pub ret_msg: String,
+    pub result: OrderBookData,
 }
 
 #[derive(Clone, Debug, Deserialize)]

@@ -23,7 +23,8 @@ pub use market::MarketClient;
 pub use native::NativeClient;
 pub use position::PositionClient;
 pub use stream::{
-    CommandLaneClient, LiveStreamHandle, OhlcvUpdates, OhlcvWatch, PrivateLaneClient,
-    PublicLaneClient, PublicSubscription, StreamClient, WatchOhlcvRequest,
+    BookTopUpdates, BookTopWatch, CommandLaneClient, LiveStreamHandle, OhlcvUpdates, OhlcvWatch,
+    PrivateLaneClient, PublicLaneClient, PublicSubscription, StreamClient, TickerUpdates,
+    TickerWatch, TradeUpdates, TradesWatch, WatchInstrumentsRequest, WatchOhlcvRequest,
 };
 pub use trade::TradeClient;

@@ -13,13 +13,14 @@ use rust_decimal::Decimal;
 use bat_markets_core::{
     AccountCapabilities, AccountSnapshot, AggressorSide, AssetCapabilities, AssetCode, Balance,
     BatMarketsConfig, CapabilitySet, CommandOperation, CommandReceipt, CommandStatus, ErrorKind,
-    Execution, FastBookTop, FastKline, FastTicker, FastTrade, FetchOhlcvRequest, FundingRate,
-    InstrumentCatalog, InstrumentId, InstrumentSpec, InstrumentStatus, InstrumentSupport, Kline,
-    KlineInterval, Leverage, MarginMode, MarketCapabilities, MarketError, MarketType,
-    NativeCapabilities, Notional, OpenInterest, Order, OrderId, OrderStatus, OrderType, Position,
-    PositionCapabilities, PositionDirection, PositionId, PositionMode, Price, PrivateLaneEvent,
-    Product, PublicLaneEvent, Quantity, Rate, RequestId, Result, Side, TimeInForce, TimestampMs,
-    TradeCapabilities, TradeId, Venue, VenueAdapter,
+    Execution, FastBookTop, FastKline, FastTicker, FastTrade, FetchOhlcvRequest,
+    FetchTradesRequest, FundingRate, InstrumentCatalog, InstrumentId, InstrumentSpec,
+    InstrumentStatus, InstrumentSupport, Kline, KlineInterval, Leverage, MarginMode,
+    MarketCapabilities, MarketError, MarketType, NativeCapabilities, Notional, OpenInterest, Order,
+    OrderId, OrderStatus, OrderType, Position, PositionCapabilities, PositionDirection, PositionId,
+    PositionMode, Price, PrivateLaneEvent, Product, PublicLaneEvent, Quantity, Rate, RequestId,
+    Result, Side, Ticker, TimeInForce, TimestampMs, TradeCapabilities, TradeId, Venue,
+    VenueAdapter,
 };
 
 /// Binance linear futures adapter with a handwritten, fixture-backed contract.
@@ -335,6 +336,129 @@ impl BinanceLinearFuturesAdapter {
             .into_iter()
             .map(|snapshot| self.execution_from_snapshot(snapshot))
             .collect()
+    }
+
+    pub fn parse_ticker_snapshot(
+        &self,
+        payload: &str,
+        instrument_id: &InstrumentId,
+    ) -> Result<Ticker> {
+        let snapshot =
+            serde_json::from_str::<native::TickerSnapshot>(payload).map_err(|error| {
+                MarketError::new(
+                    ErrorKind::DecodeError,
+                    format!("failed to parse binance ticker snapshot: {error}"),
+                )
+                .with_venue(Venue::Binance, Product::LinearUsdt)
+                .with_operation("binance.parse_ticker_snapshot")
+            })?;
+        let spec = self.resolve_instrument(instrument_id).ok_or_else(|| {
+            MarketError::new(
+                ErrorKind::Unsupported,
+                format!("unsupported binance instrument '{}'", instrument_id),
+            )
+            .with_venue(Venue::Binance, Product::LinearUsdt)
+        })?;
+
+        Ok(FastTicker {
+            instrument_id: spec.instrument_id.clone(),
+            last_price: Price::new(parse_decimal(&snapshot.last_price)?)
+                .quantize(spec.price_scale)?,
+            mark_price: None,
+            index_price: None,
+            volume_24h: Some(
+                Quantity::new(parse_decimal(&snapshot.volume)?).quantize(spec.qty_scale)?,
+            ),
+            turnover_24h: quantize_optional_notional(
+                parse_decimal(&snapshot.quote_volume)?,
+                spec.quote_scale,
+            ),
+            event_time: TimestampMs::new(snapshot.close_time),
+        }
+        .to_unified(&spec))
+    }
+
+    pub fn parse_trades_snapshot(
+        &self,
+        payload: &str,
+        request: &FetchTradesRequest,
+    ) -> Result<Vec<bat_markets_core::TradeTick>> {
+        let spec = self
+            .resolve_instrument(&request.instrument_id)
+            .ok_or_else(|| {
+                MarketError::new(
+                    ErrorKind::Unsupported,
+                    format!("unsupported binance instrument '{}'", request.instrument_id),
+                )
+                .with_venue(Venue::Binance, Product::LinearUsdt)
+            })?;
+        let snapshots =
+            serde_json::from_str::<Vec<native::AggTradeSnapshot>>(payload).map_err(|error| {
+                MarketError::new(
+                    ErrorKind::DecodeError,
+                    format!("failed to parse binance trades snapshot: {error}"),
+                )
+                .with_venue(Venue::Binance, Product::LinearUsdt)
+                .with_operation("binance.parse_trades_snapshot")
+            })?;
+
+        snapshots
+            .into_iter()
+            .map(|snapshot| {
+                Ok(FastTrade {
+                    instrument_id: spec.instrument_id.clone(),
+                    trade_id: TradeId::from(snapshot.agg_trade_id.to_string()),
+                    price: Price::new(parse_decimal(&snapshot.price)?)
+                        .quantize(spec.price_scale)?,
+                    quantity: Quantity::new(parse_decimal(&snapshot.quantity)?)
+                        .quantize(spec.qty_scale)?,
+                    aggressor_side: if snapshot.is_buyer_maker {
+                        AggressorSide::Seller
+                    } else {
+                        AggressorSide::Buyer
+                    },
+                    event_time: TimestampMs::new(snapshot.trade_time),
+                }
+                .to_unified(&spec))
+            })
+            .collect()
+    }
+
+    pub fn parse_book_top_snapshot(
+        &self,
+        payload: &str,
+        instrument_id: &InstrumentId,
+    ) -> Result<bat_markets_core::BookTop> {
+        let spec = self.resolve_instrument(instrument_id).ok_or_else(|| {
+            MarketError::new(
+                ErrorKind::Unsupported,
+                format!("unsupported binance instrument '{}'", instrument_id),
+            )
+            .with_venue(Venue::Binance, Product::LinearUsdt)
+        })?;
+        let snapshot =
+            serde_json::from_str::<native::BookTickerSnapshot>(payload).map_err(|error| {
+                MarketError::new(
+                    ErrorKind::DecodeError,
+                    format!("failed to parse binance book-ticker snapshot: {error}"),
+                )
+                .with_venue(Venue::Binance, Product::LinearUsdt)
+                .with_operation("binance.parse_book_top_snapshot")
+            })?;
+
+        Ok(FastBookTop {
+            instrument_id: spec.instrument_id.clone(),
+            bid_price: Price::new(parse_decimal(&snapshot.bid_price)?)
+                .quantize(spec.price_scale)?,
+            bid_quantity: Quantity::new(parse_decimal(&snapshot.bid_qty)?)
+                .quantize(spec.qty_scale)?,
+            ask_price: Price::new(parse_decimal(&snapshot.ask_price)?)
+                .quantize(spec.price_scale)?,
+            ask_quantity: Quantity::new(parse_decimal(&snapshot.ask_qty)?)
+                .quantize(spec.qty_scale)?,
+            event_time: TimestampMs::new(snapshot.time),
+        }
+        .to_unified(&spec))
     }
 
     pub fn parse_ohlcv_snapshot(
@@ -1139,7 +1263,7 @@ fn now_timestamp_ms() -> i64 {
 mod tests {
     use super::BinanceLinearFuturesAdapter;
     use bat_markets_core::{
-        FetchOhlcvRequest, InstrumentId, OrderStatus, TimestampMs, VenueAdapter,
+        FetchOhlcvRequest, FetchTradesRequest, InstrumentId, OrderStatus, TimestampMs, VenueAdapter,
     };
 
     const USER_TRADES: &str = include_str!(concat!(
@@ -1169,6 +1293,57 @@ mod tests {
             .expect("binance order history fixture should parse");
         assert_eq!(orders.len(), 1);
         assert_eq!(orders[0].status, OrderStatus::Filled);
+    }
+
+    #[test]
+    fn parse_binance_rest_ticker_snapshot() {
+        let adapter = BinanceLinearFuturesAdapter::new();
+        let ticker = adapter
+            .parse_ticker_snapshot(
+                r#"{
+                    "symbol":"BTCUSDT",
+                    "lastPrice":"70100.50",
+                    "volume":"1234.567",
+                    "quoteVolume":"86500000.12",
+                    "closeTime":1710000000000
+                }"#,
+                &InstrumentId::from("BTC/USDT:USDT"),
+            )
+            .expect("binance rest ticker should parse");
+        assert_eq!(ticker.last_price.to_string(), "70100.50");
+    }
+
+    #[test]
+    fn parse_binance_rest_trades_snapshot() {
+        let adapter = BinanceLinearFuturesAdapter::new();
+        let trades = adapter
+            .parse_trades_snapshot(
+                r#"[{"a":1,"p":"70100.10","q":"0.500","T":1710000000001,"m":true}]"#,
+                &FetchTradesRequest::new(InstrumentId::from("BTC/USDT:USDT"), Some(1)),
+            )
+            .expect("binance rest trades should parse");
+        assert_eq!(trades.len(), 1);
+        assert_eq!(trades[0].price.to_string(), "70100.10");
+    }
+
+    #[test]
+    fn parse_binance_rest_book_top_snapshot() {
+        let adapter = BinanceLinearFuturesAdapter::new();
+        let book_top = adapter
+            .parse_book_top_snapshot(
+                r#"{
+                    "symbol":"BTCUSDT",
+                    "bidPrice":"70100.90",
+                    "bidQty":"1.250",
+                    "askPrice":"70101.10",
+                    "askQty":"0.900",
+                    "time":1710000000200
+                }"#,
+                &InstrumentId::from("BTC/USDT:USDT"),
+            )
+            .expect("binance rest book top should parse");
+        assert_eq!(book_top.bid.price.to_string(), "70100.90");
+        assert_eq!(book_top.ask.price.to_string(), "70101.10");
     }
 
     #[test]
