@@ -123,6 +123,20 @@ pub struct OrderBookData {
 }
 
 #[derive(Clone, Debug, Deserialize)]
+pub struct AllLiquidationData {
+    #[serde(rename = "T")]
+    pub updated_time: i64,
+    #[serde(rename = "s")]
+    pub symbol: String,
+    #[serde(rename = "S")]
+    pub side: String,
+    #[serde(rename = "v")]
+    pub quantity: String,
+    #[serde(rename = "p")]
+    pub price: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
 pub struct KlineData {
     #[serde(rename = "symbol", default)]
     pub symbol: Option<String>,
@@ -217,6 +231,8 @@ pub struct OrderBookResponse {
 #[derive(Clone, Debug, Deserialize)]
 pub struct InstrumentInfo {
     pub symbol: String,
+    #[serde(rename = "contractType")]
+    pub contract_type: String,
     pub status: String,
     #[serde(rename = "baseCoin")]
     pub base_coin: String,

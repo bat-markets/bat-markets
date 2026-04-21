@@ -6,20 +6,29 @@ pub struct MarketCapabilities {
     pub ticker: bool,
     pub recent_trades: bool,
     pub book_top: bool,
+    pub order_book: bool,
     pub klines: bool,
+    pub mark_price: bool,
     pub funding_rate: bool,
     pub open_interest: bool,
+    pub liquidations: bool,
     pub public_streams: bool,
+    pub multi_symbol_streams: bool,
 }
 
 /// Trade capabilities for a venue adapter.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TradeCapabilities {
     pub create: bool,
+    pub batch_create: bool,
+    pub amend: bool,
     pub cancel: bool,
+    pub batch_cancel: bool,
+    pub cancel_all: bool,
     pub get: bool,
     pub list_open: bool,
     pub history: bool,
+    pub validate: bool,
 }
 
 /// Position capabilities for a venue adapter.
@@ -28,6 +37,7 @@ pub struct PositionCapabilities {
     pub read: bool,
     pub leverage_set: bool,
     pub margin_mode_set: bool,
+    pub position_mode_set: bool,
     pub hedge_mode: bool,
 }
 
@@ -53,6 +63,7 @@ pub struct AssetCapabilities {
 pub struct NativeCapabilities {
     pub fast_stream: bool,
     pub special_orders: bool,
+    pub ws_order_entry: bool,
 }
 
 /// Complete capability set exposed by a single venue/product adapter.

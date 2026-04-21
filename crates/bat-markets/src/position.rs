@@ -1,5 +1,6 @@
 use bat_markets_core::{
     CommandReceipt, Position, Result, SetLeverageRequest, SetMarginModeRequest,
+    SetPositionModeRequest,
 };
 
 use crate::{client::BatMarkets, runtime};
@@ -30,5 +31,12 @@ impl<'a> PositionClient<'a> {
 
     pub async fn set_margin_mode(&self, request: &SetMarginModeRequest) -> Result<CommandReceipt> {
         runtime::set_margin_mode(&self.inner.live_context(), request).await
+    }
+
+    pub async fn set_position_mode(
+        &self,
+        request: &SetPositionModeRequest,
+    ) -> Result<CommandReceipt> {
+        runtime::set_position_mode(&self.inner.live_context(), request).await
     }
 }

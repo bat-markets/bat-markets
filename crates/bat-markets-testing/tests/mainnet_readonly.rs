@@ -4,12 +4,13 @@ use tokio::time::{sleep, timeout};
 
 use bat_markets::{
     BatMarketsBuilder, PublicSubscription, WatchInstrumentsRequest,
-    config::{AuthConfig, BatMarketsConfig, EndpointConfig},
     errors::Result,
-    types::{FetchTradesRequest, InstrumentId, Product, Venue},
+    types::{FetchTradesRequest, InstrumentId, Venue},
 };
 use bat_markets_core::{ErrorKind, MarketError, VenueAdapter};
-use bat_markets_testing::{has_binance_live_env, has_bybit_live_env};
+use bat_markets_testing::{
+    LiveTestEndpointMode, has_binance_live_env, has_bybit_live_env, live_test_config,
+};
 
 #[tokio::test]
 async fn binance_mainnet_read_flows_are_manual_and_read_only() -> Result<()> {
@@ -17,16 +18,7 @@ async fn binance_mainnet_read_flows_are_manual_and_read_only() -> Result<()> {
         return Ok(());
     }
 
-    let config = BatMarketsConfig {
-        venue: Venue::Binance,
-        product: Product::LinearUsdt,
-        auth: AuthConfig::Env {
-            api_key_var: "BINANCE_API_KEY".into(),
-            api_secret_var: "BINANCE_API_SECRET".into(),
-        },
-        endpoints: EndpointConfig::mainnet_defaults(Venue::Binance),
-        ..BatMarketsConfig::new(Venue::Binance, Product::LinearUsdt)
-    };
+    let config = live_test_config(Venue::Binance, LiveTestEndpointMode::Mainnet);
     let client = BatMarketsBuilder::default()
         .config(config)
         .build_live()
@@ -42,9 +34,12 @@ async fn binance_mainnet_read_flows_are_manual_and_read_only() -> Result<()> {
             ticker: false,
             trades: false,
             book_top: true,
+            order_book: false,
+            mark_price: false,
             funding_rate: false,
             open_interest: false,
-            kline_interval: None,
+            liquidations: false,
+            kline_intervals: Vec::new(),
         })
         .await?;
     let private = client.stream().private().spawn_live().await?;
@@ -103,16 +98,7 @@ async fn bybit_mainnet_read_flows_are_manual_and_read_only() -> Result<()> {
         return Ok(());
     }
 
-    let config = BatMarketsConfig {
-        venue: Venue::Bybit,
-        product: Product::LinearUsdt,
-        auth: AuthConfig::Env {
-            api_key_var: "BYBIT_API_KEY".into(),
-            api_secret_var: "BYBIT_API_SECRET".into(),
-        },
-        endpoints: EndpointConfig::mainnet_defaults(Venue::Bybit),
-        ..BatMarketsConfig::new(Venue::Bybit, Product::LinearUsdt)
-    };
+    let config = live_test_config(Venue::Bybit, LiveTestEndpointMode::Mainnet);
     let client = BatMarketsBuilder::default()
         .config(config)
         .build_live()
@@ -128,9 +114,12 @@ async fn bybit_mainnet_read_flows_are_manual_and_read_only() -> Result<()> {
             ticker: false,
             trades: false,
             book_top: true,
+            order_book: false,
+            mark_price: false,
             funding_rate: false,
             open_interest: false,
-            kline_interval: None,
+            liquidations: false,
+            kline_intervals: Vec::new(),
         })
         .await?;
     let private = client.stream().private().spawn_live().await?;

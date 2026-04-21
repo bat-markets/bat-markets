@@ -1,0 +1,1 @@
+{"retCode":0,"retMsg":"OK","result":{"list":[{"symbol":"BTCUSDT","orderId":"bybit-order-1","orderLinkId":"cli-bybit-1"},{"symbol":"ETHUSDT","orderId":"bybit-order-2","orderLinkId":"cli-bybit-2"}]},"retExtInfo":{"list":[{"code":0,"msg":"OK"},{"code":0,"msg":"OK"}]}}

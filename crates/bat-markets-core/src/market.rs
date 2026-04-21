@@ -5,7 +5,7 @@ use crate::ids::{InstrumentId, TradeId};
 use crate::instrument::InstrumentSpec;
 use crate::numeric::{FastNotional, FastPrice, FastQuantity, Notional, Price, Quantity, Rate};
 use crate::primitives::TimestampMs;
-use crate::types::AggressorSide;
+use crate::types::{AggressorSide, Side};
 
 /// Fast normalized ticker snapshot.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -41,6 +41,15 @@ pub struct FastBookTop {
     pub event_time: TimestampMs,
 }
 
+/// Fast normalized order-book delta.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FastOrderBookDelta {
+    pub instrument_id: InstrumentId,
+    pub bids: Vec<(FastPrice, FastQuantity)>,
+    pub asks: Vec<(FastPrice, FastQuantity)>,
+    pub event_time: TimestampMs,
+}
+
 /// Fast normalized kline snapshot.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FastKline {
@@ -54,6 +63,34 @@ pub struct FastKline {
     pub open_time: TimestampMs,
     pub close_time: TimestampMs,
     pub closed: bool,
+}
+
+/// Fast normalized mark-price snapshot.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FastMarkPrice {
+    pub instrument_id: InstrumentId,
+    pub price: FastPrice,
+    pub funding_rate: Option<Rate>,
+    pub event_time: TimestampMs,
+}
+
+/// Fast normalized funding-rate snapshot.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FastFundingRate {
+    pub instrument_id: InstrumentId,
+    pub value: Rate,
+    pub mark_price: Option<FastPrice>,
+    pub event_time: TimestampMs,
+}
+
+/// Fast normalized liquidation snapshot.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FastLiquidation {
+    pub instrument_id: InstrumentId,
+    pub side: Side,
+    pub price: FastPrice,
+    pub quantity: FastQuantity,
+    pub event_time: TimestampMs,
 }
 
 /// Unified ticker snapshot.
@@ -86,6 +123,13 @@ pub struct BookLevel {
     pub quantity: Quantity,
 }
 
+/// Single level inside a unified order-book snapshot or delta.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OrderBookLevel {
+    pub price: Price,
+    pub quantity: Quantity,
+}
+
 /// Unified top-of-book snapshot.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BookTop {
@@ -104,6 +148,24 @@ pub struct BookDelta {
     pub event_time: TimestampMs,
 }
 
+/// Unified order-book snapshot for focused-symbol depth consumers.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OrderBookSnapshot {
+    pub instrument_id: InstrumentId,
+    pub bids: Vec<OrderBookLevel>,
+    pub asks: Vec<OrderBookLevel>,
+    pub event_time: TimestampMs,
+}
+
+/// Unified order-book delta event.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OrderBookDelta {
+    pub instrument_id: InstrumentId,
+    pub bids: Vec<OrderBookLevel>,
+    pub asks: Vec<OrderBookLevel>,
+    pub event_time: TimestampMs,
+}
+
 /// Unified candlestick snapshot.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Kline {
@@ -117,6 +179,25 @@ pub struct Kline {
     pub open_time: TimestampMs,
     pub close_time: TimestampMs,
     pub closed: bool,
+}
+
+/// Unified mark-price snapshot.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MarkPrice {
+    pub instrument_id: InstrumentId,
+    pub price: Price,
+    pub funding_rate: Option<Rate>,
+    pub event_time: TimestampMs,
+}
+
+/// Unified liquidation snapshot.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Liquidation {
+    pub instrument_id: InstrumentId,
+    pub side: Side,
+    pub price: Price,
+    pub quantity: Quantity,
+    pub event_time: TimestampMs,
 }
 
 /// Unified OHLCV interval in ccxt-style notation.
@@ -265,6 +346,39 @@ pub struct FetchTradesRequest {
     pub limit: Option<usize>,
 }
 
+/// Multi-symbol ticker fetch request.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FetchTickersRequest {
+    pub instrument_ids: Vec<InstrumentId>,
+}
+
+/// Focused-symbol order-book fetch request.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FetchOrderBookRequest {
+    pub instrument_id: InstrumentId,
+    pub limit: Option<usize>,
+}
+
+/// Compact fast-feed watch request for frontend fanout.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WatchFastFeedRequest {
+    pub instrument_ids: Vec<InstrumentId>,
+    pub ticker: bool,
+    pub trades: bool,
+    pub book_top: bool,
+    pub mark_price: bool,
+    pub funding_rate: bool,
+    pub open_interest: bool,
+    pub liquidations: bool,
+}
+
+/// Focused-symbol order-book watch request.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WatchOrderBookRequest {
+    pub instrument_id: InstrumentId,
+    pub limit: Option<usize>,
+}
+
 impl FetchOhlcvRequest {
     #[must_use]
     pub fn for_instrument(
@@ -350,6 +464,86 @@ impl FetchTradesRequest {
     }
 }
 
+impl FetchTickersRequest {
+    #[must_use]
+    pub fn for_instrument(instrument_id: InstrumentId) -> Self {
+        Self {
+            instrument_ids: vec![instrument_id],
+        }
+    }
+
+    #[must_use]
+    pub fn for_instruments(instrument_ids: Vec<InstrumentId>) -> Self {
+        Self { instrument_ids }
+    }
+
+    pub fn instrument_ids(&self) -> crate::Result<&[InstrumentId]> {
+        if self.instrument_ids.is_empty() {
+            return Err(crate::MarketError::new(
+                crate::ErrorKind::ConfigError,
+                "fetch_tickers requires at least one instrument",
+            ));
+        }
+        Ok(self.instrument_ids.as_slice())
+    }
+}
+
+impl FetchOrderBookRequest {
+    #[must_use]
+    pub fn new(instrument_id: InstrumentId, limit: Option<usize>) -> Self {
+        Self {
+            instrument_id,
+            limit,
+        }
+    }
+
+    pub fn validated_limit(&self) -> crate::Result<Option<usize>> {
+        if matches!(self.limit, Some(0)) {
+            return Err(crate::MarketError::new(
+                crate::ErrorKind::ConfigError,
+                "fetch_order_book limit must be greater than zero",
+            ));
+        }
+        Ok(self.limit)
+    }
+}
+
+impl WatchFastFeedRequest {
+    #[must_use]
+    pub fn all_for(instrument_ids: Vec<InstrumentId>) -> Self {
+        Self {
+            instrument_ids,
+            ticker: true,
+            trades: true,
+            book_top: true,
+            mark_price: true,
+            funding_rate: true,
+            open_interest: true,
+            liquidations: true,
+        }
+    }
+
+    pub fn instrument_ids(&self) -> crate::Result<&[InstrumentId]> {
+        if self.instrument_ids.is_empty() {
+            return Err(crate::MarketError::new(
+                crate::ErrorKind::ConfigError,
+                "watch_fast_feed requires at least one instrument",
+            ));
+        }
+        Ok(self.instrument_ids.as_slice())
+    }
+}
+
+impl WatchOrderBookRequest {
+    #[must_use]
+    pub fn new(instrument_id: InstrumentId, limit: Option<usize>) -> Self {
+        Self {
+            instrument_id,
+            limit,
+        }
+    }
+}
+
 /// Unified funding-rate snapshot.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FundingRate {
@@ -416,6 +610,32 @@ impl FastBookTop {
     }
 }
 
+impl FastOrderBookDelta {
+    #[must_use]
+    pub fn to_unified(&self, spec: &InstrumentSpec) -> OrderBookDelta {
+        OrderBookDelta {
+            instrument_id: self.instrument_id.clone(),
+            bids: self
+                .bids
+                .iter()
+                .map(|(price, quantity)| OrderBookLevel {
+                    price: spec.price_from_fast(*price),
+                    quantity: spec.quantity_from_fast(*quantity),
+                })
+                .collect(),
+            asks: self
+                .asks
+                .iter()
+                .map(|(price, quantity)| OrderBookLevel {
+                    price: spec.price_from_fast(*price),
+                    quantity: spec.quantity_from_fast(*quantity),
+                })
+                .collect(),
+            event_time: self.event_time,
+        }
+    }
+}
+
 impl FastKline {
     #[must_use]
     pub fn to_unified(&self, spec: &InstrumentSpec) -> Kline {
@@ -430,6 +650,43 @@ impl FastKline {
             open_time: self.open_time,
             close_time: self.close_time,
             closed: self.closed,
+        }
+    }
+}
+
+impl FastMarkPrice {
+    #[must_use]
+    pub fn to_unified(&self, spec: &InstrumentSpec) -> MarkPrice {
+        MarkPrice {
+            instrument_id: self.instrument_id.clone(),
+            price: spec.price_from_fast(self.price),
+            funding_rate: self.funding_rate,
+            event_time: self.event_time,
+        }
+    }
+}
+
+impl FastFundingRate {
+    #[must_use]
+    pub fn to_unified(&self, spec: &InstrumentSpec) -> FundingRate {
+        FundingRate {
+            instrument_id: self.instrument_id.clone(),
+            value: self.value,
+            mark_price: self.mark_price.map(|value| spec.price_from_fast(value)),
+            event_time: self.event_time,
+        }
+    }
+}
+
+impl FastLiquidation {
+    #[must_use]
+    pub fn to_unified(&self, spec: &InstrumentSpec) -> Liquidation {
+        Liquidation {
+            instrument_id: self.instrument_id.clone(),
+            side: self.side,
+            price: spec.price_from_fast(self.price),
+            quantity: spec.quantity_from_fast(self.quantity),
+            event_time: self.event_time,
         }
     }
 }

@@ -29,20 +29,28 @@ pub use capability::{
     PositionCapabilities, TradeCapabilities,
 };
 pub use catalog::InstrumentCatalog;
-pub use command::{CommandOperation, CommandReceipt, CommandStatus};
+pub use command::{
+    CommandAck, CommandLifecycleEvent, CommandOperation, CommandReceipt, CommandStatus,
+    CommandTransport,
+};
 pub use config::{
     AuthConfig, BatMarketsConfig, EndpointConfig, HealthPolicy, RateLimitPolicy, ReconnectPolicy,
     RetryPolicy, StatePolicy, TimeoutPolicy,
 };
 pub use error::{ErrorContext, ErrorKind, MarketError, Result};
-pub use execution::{DivergenceEvent, LanePolicy, LaneSet, PrivateLaneEvent, PublicLaneEvent};
+pub use execution::{
+    CommandLaneEvent, DivergenceEvent, LanePolicy, LaneSet, PrivateLaneEvent, PublicLaneEvent,
+};
 pub use health::{DegradedReason, HealthNotification, HealthReport, HealthStatus};
 pub use ids::{AssetCode, ClientOrderId, InstrumentId, OrderId, PositionId, RequestId, TradeId};
 pub use instrument::{InstrumentSpec, InstrumentStatus, InstrumentSupport};
 pub use market::{
-    BookDelta, BookLevel, BookTop, FETCH_OHLCV_MAX_INSTRUMENTS_PER_CALL, FastBookTop, FastKline,
-    FastTicker, FastTrade, FetchOhlcvRequest, FetchTradesRequest, FundingRate, Kline,
-    KlineInterval, OpenInterest, Ticker, TradeTick,
+    BookDelta, BookLevel, BookTop, FETCH_OHLCV_MAX_INSTRUMENTS_PER_CALL, FastBookTop,
+    FastFundingRate, FastKline, FastLiquidation, FastMarkPrice, FastOrderBookDelta, FastTicker,
+    FastTrade, FetchOhlcvRequest, FetchOrderBookRequest, FetchTickersRequest, FetchTradesRequest,
+    FundingRate, Kline, KlineInterval, Liquidation, MarkPrice, OpenInterest, OrderBookDelta,
+    OrderBookLevel, OrderBookSnapshot, Ticker, TradeTick, WatchFastFeedRequest,
+    WatchOrderBookRequest,
 };
 pub use numeric::{
     Amount, FastNotional, FastPrice, FastQuantity, Leverage, Notional, Price, Quantity, Rate,
@@ -54,8 +62,10 @@ pub use reconcile::{
 };
 pub use state::EngineState;
 pub use trade::{
-    CancelOrderRequest, CreateOrderRequest, Execution, GetOrderRequest, Liquidity,
-    ListExecutionsRequest, ListOpenOrdersRequest, Order, SetLeverageRequest, SetMarginModeRequest,
+    AmendOrderRequest, AmendOrdersRequest, CancelAllOrdersRequest, CancelOrderRequest,
+    CancelOrdersRequest, ClosePositionRequest, CreateOrderRequest, CreateOrdersRequest, Execution,
+    GetOrderRequest, Liquidity, ListExecutionsRequest, ListOpenOrdersRequest, Order, OrderTarget,
+    SetLeverageRequest, SetMarginModeRequest, SetPositionModeRequest, ValidateOrderRequest,
 };
 pub use types::{
     AggressorSide, MarginMode, MarketType, OrderStatus, OrderType, PositionDirection, PositionMode,

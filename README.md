@@ -15,8 +15,12 @@ This repository currently implements the initial production-grade foundation:
 - three API layers encoded in code and docs,
 - three execution lanes encoded in code and docs,
 - fixture-backed Binance and Bybit adapters for linear futures payloads,
+- shared public/private websocket subscription hubs with typed watchers,
+- a low-latency `entry()` surface with command acknowledgements and lifecycle tracking,
 - a state engine that applies private events and tracks command uncertainty,
 - a live diagnostics snapshot for lock contention and key runtime latencies,
+- env-gated live stress harnesses plus operator-facing examples,
+- a simple Bun-based realtime operator panel under `examples/realtime-web`,
 - quality gates for formatting, linting, tests, docs, and benchmarks.
 
 ## Release Model
@@ -42,26 +46,30 @@ The repository keeps every workspace crate `publish = false` until there is an e
 
 ## What This Milestone Is
 
-This milestone is the engine-first foundation for `0.1.x`.
+This milestone is the live, WS-first engine foundation for `0.1.x`.
 
 It is designed to be:
 
 - honest about venue differences,
 - testable without live keys,
 - narrow enough to evolve safely,
-- ready for transport integration without breaking the core model.
+- fast enough to operate through shared live feeds without per-watch socket sprawl,
+- ready to evolve without breaking the core model.
 
 ## What This Milestone Is Not
 
-This repository does not yet claim complete live transport coverage for every `0.1.0` operation.
-The implemented foundation focuses first on:
+This repository does not claim complete exchange coverage.
+The implemented foundation focuses on:
 
 - parsing native exchange payloads,
 - mapping them into normalized and unified events,
 - maintaining market/private state in memory,
-- classifying command outcomes, including `UnknownExecution`.
+- routing market/private streams through shared websocket hubs,
+- issuing low-latency commands with explicit `UnknownExecution` handling.
 
 Any live or sandbox checks remain opt-in and env-gated.
+
+Advanced venue-only flags and unstable exchange semantics still stay in `native()`.
 
 ## Quick Start
 
@@ -76,6 +84,18 @@ Run the workspace tests:
 ```bash
 cargo test --workspace
 ```
+
+Run the simple realtime web menu:
+
+```bash
+cd examples/realtime-web
+bun run dev
+```
+
+Then open `http://127.0.0.1:3107`.
+
+The web panel launches the real Rust examples and streams their logs in realtime.
+Live write scenarios can place real orders on approved testing subaccounts.
 
 Read the architecture documents:
 

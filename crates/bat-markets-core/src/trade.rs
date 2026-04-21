@@ -3,7 +3,9 @@ use serde::{Deserialize, Serialize};
 use crate::ids::{AssetCode, ClientOrderId, InstrumentId, OrderId, RequestId, TradeId};
 use crate::numeric::{Amount, Leverage, Price, Quantity};
 use crate::primitives::TimestampMs;
-use crate::types::{MarginMode, OrderStatus, OrderType, Side, TimeInForce};
+use crate::types::{
+    MarginMode, OrderStatus, OrderType, PositionMode, Side, TimeInForce, TriggerType,
+};
 
 /// Unified order snapshot.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -61,8 +63,44 @@ pub struct CreateOrderRequest {
     pub time_in_force: Option<TimeInForce>,
     pub quantity: Quantity,
     pub price: Option<Price>,
+    pub trigger_price: Option<Price>,
+    pub trigger_type: Option<TriggerType>,
     pub reduce_only: bool,
     pub post_only: bool,
+}
+
+/// Order-target locator used by amend/cancel requests.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OrderTarget {
+    pub instrument_id: InstrumentId,
+    pub order_id: Option<OrderId>,
+    pub client_order_id: Option<ClientOrderId>,
+}
+
+/// Batch create-order request for the unified command layer.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CreateOrdersRequest {
+    pub request_id: Option<RequestId>,
+    pub orders: Vec<CreateOrderRequest>,
+}
+
+/// Amend-order request for the unified command layer.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AmendOrderRequest {
+    pub request_id: Option<RequestId>,
+    pub instrument_id: InstrumentId,
+    pub order_id: Option<OrderId>,
+    pub client_order_id: Option<ClientOrderId>,
+    pub quantity: Option<Quantity>,
+    pub price: Option<Price>,
+    pub trigger_price: Option<Price>,
+}
+
+/// Batch amend-order request.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AmendOrdersRequest {
+    pub request_id: Option<RequestId>,
+    pub orders: Vec<AmendOrderRequest>,
 }
 
 /// Cancel-order request for the unified command layer.
@@ -72,6 +110,20 @@ pub struct CancelOrderRequest {
     pub instrument_id: InstrumentId,
     pub order_id: Option<OrderId>,
     pub client_order_id: Option<ClientOrderId>,
+}
+
+/// Batch cancel-order request for the unified command layer.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CancelOrdersRequest {
+    pub request_id: Option<RequestId>,
+    pub orders: Vec<OrderTarget>,
+}
+
+/// Cancel-all-orders request for the unified command layer.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CancelAllOrdersRequest {
+    pub request_id: Option<RequestId>,
+    pub instrument_id: Option<InstrumentId>,
 }
 
 /// Get-order request for the unified command layer.
@@ -110,4 +162,31 @@ pub struct SetMarginModeRequest {
     pub request_id: Option<RequestId>,
     pub instrument_id: InstrumentId,
     pub margin_mode: MarginMode,
+}
+
+/// Close-position request.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClosePositionRequest {
+    pub request_id: Option<RequestId>,
+    pub instrument_id: InstrumentId,
+    pub quantity: Option<Quantity>,
+    pub client_order_id: Option<ClientOrderId>,
+    pub price: Option<Price>,
+    pub time_in_force: Option<TimeInForce>,
+    pub post_only: bool,
+}
+
+/// Order-validation request using venue-native dry-run surfaces where available.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ValidateOrderRequest {
+    pub request_id: Option<RequestId>,
+    pub order: CreateOrderRequest,
+}
+
+/// Set-position-mode request.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SetPositionModeRequest {
+    pub request_id: Option<RequestId>,
+    pub instrument_id: Option<InstrumentId>,
+    pub position_mode: PositionMode,
 }

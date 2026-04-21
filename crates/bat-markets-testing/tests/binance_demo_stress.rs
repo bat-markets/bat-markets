@@ -45,9 +45,12 @@ async fn binance_demo_create_cancel_stress_is_stable() -> Result<()> {
             ticker: true,
             trades: false,
             book_top: true,
+            order_book: false,
+            mark_price: false,
             funding_rate: false,
             open_interest: false,
-            kline_interval: None,
+            liquidations: false,
+            kline_intervals: Vec::new(),
         })
         .await?;
     let private = client.stream().private().spawn_live().await?;
@@ -77,6 +80,8 @@ async fn binance_demo_create_cancel_stress_is_stable() -> Result<()> {
                 time_in_force: Some(TimeInForce::Gtc),
                 quantity,
                 price: Some(price),
+                trigger_price: None,
+                trigger_type: None,
                 reduce_only: false,
                 post_only: true,
             })

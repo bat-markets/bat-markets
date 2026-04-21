@@ -10,6 +10,10 @@ pub enum AuthConfig {
         api_key_var: Box<str>,
         api_secret_var: Box<str>,
     },
+    Inline {
+        api_key: Box<str>,
+        api_secret: Box<str>,
+    },
 }
 
 /// Network endpoints for the selected venue/product.
@@ -18,6 +22,7 @@ pub struct EndpointConfig {
     pub rest_base: Box<str>,
     pub public_ws_base: Box<str>,
     pub private_ws_base: Box<str>,
+    pub command_ws_base: Box<str>,
     pub sandbox: bool,
 }
 
@@ -142,12 +147,14 @@ impl EndpointConfig {
                 rest_base: "https://demo-fapi.binance.com".into(),
                 public_ws_base: "wss://stream.binancefuture.com/ws".into(),
                 private_ws_base: "wss://stream.binancefuture.com/ws".into(),
+                command_ws_base: "wss://testnet.binancefuture.com/ws-fapi/v1".into(),
                 sandbox: true,
             },
             Venue::Bybit => Self {
                 rest_base: "https://api-testnet.bybit.com".into(),
                 public_ws_base: "wss://stream-testnet.bybit.com/v5/public/linear".into(),
                 private_ws_base: "wss://stream-testnet.bybit.com/v5/private".into(),
+                command_ws_base: "wss://stream-testnet.bybit.com/v5/trade".into(),
                 sandbox: true,
             },
         }
@@ -160,12 +167,14 @@ impl EndpointConfig {
                 rest_base: "https://fapi.binance.com".into(),
                 public_ws_base: "wss://fstream.binance.com/ws".into(),
                 private_ws_base: "wss://fstream.binance.com/ws".into(),
+                command_ws_base: "wss://ws-fapi.binance.com/ws-fapi/v1".into(),
                 sandbox: false,
             },
             Venue::Bybit => Self {
                 rest_base: "https://api.bybit.com".into(),
                 public_ws_base: "wss://stream.bybit.com/v5/public/linear".into(),
                 private_ws_base: "wss://stream.bybit.com/v5/private".into(),
+                command_ws_base: "wss://stream.bybit.com/v5/trade".into(),
                 sandbox: false,
             },
         }

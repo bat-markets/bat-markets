@@ -15,14 +15,14 @@ use serde::Deserialize;
 use bat_markets_core::{
     AccountCapabilities, AccountSnapshot, AggressorSide, AssetCapabilities, AssetCode, Balance,
     BatMarketsConfig, CapabilitySet, CommandOperation, CommandReceipt, CommandStatus, ErrorKind,
-    Execution, FastBookTop, FastKline, FastTicker, FastTrade, FetchOhlcvRequest,
-    FetchTradesRequest, FundingRate, InstrumentCatalog, InstrumentId, InstrumentSpec,
-    InstrumentStatus, InstrumentSupport, Kline, KlineInterval, Leverage, MarginMode,
-    MarketCapabilities, MarketError, MarketType, NativeCapabilities, Notional, OpenInterest, Order,
-    OrderId, OrderStatus, OrderType, Position, PositionCapabilities, PositionDirection, PositionId,
-    PositionMode, Price, PrivateLaneEvent, Product, PublicLaneEvent, Quantity, Rate, RequestId,
-    Result, Side, Ticker, TimeInForce, TimestampMs, TradeCapabilities, TradeId, Venue,
-    VenueAdapter,
+    Execution, FastBookTop, FastKline, FastLiquidation, FastMarkPrice, FastOrderBookDelta,
+    FastTicker, FastTrade, FetchOhlcvRequest, FetchTradesRequest, FundingRate, InstrumentCatalog,
+    InstrumentId, InstrumentSpec, InstrumentStatus, InstrumentSupport, Kline, KlineInterval,
+    Leverage, MarginMode, MarketCapabilities, MarketError, MarketType, NativeCapabilities,
+    Notional, OpenInterest, Order, OrderId, OrderStatus, OrderType, Position, PositionCapabilities,
+    PositionDirection, PositionId, PositionMode, Price, PrivateLaneEvent, Product, PublicLaneEvent,
+    Quantity, Rate, RequestId, Result, Side, Ticker, TimeInForce, TimestampMs, TradeCapabilities,
+    TradeId, Venue, VenueAdapter,
 };
 
 /// Bybit account context discovered from authenticated endpoints.
@@ -63,22 +63,32 @@ impl BybitLinearFuturesAdapter {
                     ticker: true,
                     recent_trades: true,
                     book_top: true,
+                    order_book: true,
                     klines: true,
+                    mark_price: true,
                     funding_rate: true,
                     open_interest: true,
+                    liquidations: false,
                     public_streams: true,
+                    multi_symbol_streams: true,
                 },
                 trade: TradeCapabilities {
                     create: true,
+                    batch_create: true,
+                    amend: true,
                     cancel: true,
+                    batch_cancel: true,
+                    cancel_all: true,
                     get: true,
                     list_open: true,
                     history: true,
+                    validate: true,
                 },
                 position: PositionCapabilities {
                     read: true,
                     leverage_set: true,
                     margin_mode_set: true,
+                    position_mode_set: true,
                     hedge_mode: true,
                 },
                 account: AccountCapabilities {
@@ -90,6 +100,7 @@ impl BybitLinearFuturesAdapter {
                 native: NativeCapabilities {
                     fast_stream: true,
                     special_orders: true,
+                    ws_order_entry: true,
                 },
             },
             lane_set: bat_markets_core::LaneSet {
@@ -224,6 +235,9 @@ impl BybitLinearFuturesAdapter {
 
         let mut instruments = Vec::new();
         for instrument in response.result.list {
+            if instrument.contract_type != "LinearPerpetual" {
+                continue;
+            }
             let tick_size = parse_decimal(&instrument.price_filter.tick_size)?;
             let qty_step = parse_decimal(&instrument.lot_size_filter.qty_step)?;
             let min_qty = parse_decimal(&instrument.lot_size_filter.min_order_qty)?;
@@ -324,7 +338,8 @@ impl BybitLinearFuturesAdapter {
                 Ok(Balance {
                     asset: AssetCode::from(coin.coin),
                     wallet_balance: parse_decimal(&coin.wallet_balance)?.into(),
-                    available_balance: parse_decimal(&coin.available_to_withdraw)?.into(),
+                    available_balance: parse_decimal_or_zero_on_empty(&coin.available_to_withdraw)?
+                        .into(),
                     updated_at: observed_at,
                 })
             })
@@ -334,12 +349,11 @@ impl BybitLinearFuturesAdapter {
             balances,
             summary: Some(bat_markets_core::AccountSummary {
                 total_wallet_balance: parse_decimal(&account.total_wallet_balance)?.into(),
-                total_available_balance: parse_decimal(&account.total_available_balance)?.into(),
-                total_unrealized_pnl: account
-                    .total_perp_upl
-                    .as_deref()
-                    .map(parse_decimal)
-                    .transpose()?
+                total_available_balance: parse_decimal_or_zero_on_empty(
+                    &account.total_available_balance,
+                )?
+                .into(),
+                total_unrealized_pnl: parse_optional_decimal(account.total_perp_upl.as_deref())?
                     .unwrap_or(Decimal::ZERO)
                     .into(),
                 updated_at: observed_at,
@@ -652,9 +666,9 @@ impl BybitLinearFuturesAdapter {
                 Side::Sell => PositionDirection::Short,
             },
             size: Quantity::new(parse_decimal(&position.size)?),
-            entry_price: Some(Price::new(parse_decimal(&position.entry_price)?)),
+            entry_price: parse_optional_decimal_str(&position.entry_price)?.map(Price::new),
             mark_price: None,
-            unrealized_pnl: Some(parse_decimal(&position.unrealised_pnl)?.into()),
+            unrealized_pnl: parse_optional_decimal_str(&position.unrealised_pnl)?.map(Into::into),
             leverage: parse_optional_decimal(position.leverage.as_deref())?.map(Leverage::new),
             margin_mode: parse_trade_mode(position.trade_mode),
             position_mode: parse_position_mode(position.position_idx),
@@ -686,7 +700,7 @@ impl BybitLinearFuturesAdapter {
             order_type: parse_order_type(&order.order_type)?,
             time_in_force: Some(parse_time_in_force(&order.time_in_force)?),
             status: parse_order_status(&order.order_status)?,
-            price: Some(Price::new(parse_decimal(&order.price)?)),
+            price: parse_optional_decimal_str(&order.price)?.map(Price::new),
             quantity: Quantity::new(parse_decimal(&order.quantity)?),
             filled_quantity: Quantity::new(parse_decimal(&order.cumulative_exec_qty)?),
             average_fill_price: parse_optional_decimal(order.average_price.as_deref())?
@@ -765,7 +779,7 @@ impl VenueAdapter for BybitLinearFuturesAdapter {
         if envelope.topic.starts_with("tickers.") {
             let data = self.merged_ticker_data(&envelope)?;
             let spec = self.require_native_symbol(&data.symbol)?;
-            let mut events = Vec::with_capacity(3);
+            let mut events = Vec::with_capacity(4);
             events.push(PublicLaneEvent::Ticker(FastTicker {
                 instrument_id: spec.instrument_id.clone(),
                 last_price: Price::new(parse_decimal(&data.last_price)?)
@@ -784,6 +798,14 @@ impl VenueAdapter for BybitLinearFuturesAdapter {
                     .transpose()?,
                 event_time: TimestampMs::new(envelope.ts),
             }));
+            if let Some(mark_price) = parse_optional_decimal_str(&data.mark_price)? {
+                events.push(PublicLaneEvent::MarkPrice(FastMarkPrice {
+                    instrument_id: spec.instrument_id.clone(),
+                    price: Price::new(mark_price).quantize(spec.price_scale)?,
+                    funding_rate: parse_optional_decimal_str(&data.funding_rate)?.map(Rate::new),
+                    event_time: TimestampMs::new(envelope.ts),
+                }));
+            }
             if let Some(funding_rate) = parse_optional_decimal_str(&data.funding_rate)? {
                 events.push(PublicLaneEvent::FundingRate(FundingRate {
                     instrument_id: spec.instrument_id.clone(),
@@ -831,14 +853,63 @@ impl VenueAdapter for BybitLinearFuturesAdapter {
             let ask = data.asks.first().ok_or_else(|| {
                 MarketError::new(ErrorKind::DecodeError, "missing bybit best ask")
             })?;
-            return Ok(vec![PublicLaneEvent::BookTop(FastBookTop {
-                instrument_id: spec.instrument_id.clone(),
-                bid_price: Price::new(parse_decimal(&bid[0])?).quantize(spec.price_scale)?,
-                bid_quantity: Quantity::new(parse_decimal(&bid[1])?).quantize(spec.qty_scale)?,
-                ask_price: Price::new(parse_decimal(&ask[0])?).quantize(spec.price_scale)?,
-                ask_quantity: Quantity::new(parse_decimal(&ask[1])?).quantize(spec.qty_scale)?,
-                event_time: TimestampMs::new(envelope.ts),
-            })]);
+            return Ok(vec![
+                PublicLaneEvent::BookTop(FastBookTop {
+                    instrument_id: spec.instrument_id.clone(),
+                    bid_price: Price::new(parse_decimal(&bid[0])?).quantize(spec.price_scale)?,
+                    bid_quantity: Quantity::new(parse_decimal(&bid[1])?)
+                        .quantize(spec.qty_scale)?,
+                    ask_price: Price::new(parse_decimal(&ask[0])?).quantize(spec.price_scale)?,
+                    ask_quantity: Quantity::new(parse_decimal(&ask[1])?)
+                        .quantize(spec.qty_scale)?,
+                    event_time: TimestampMs::new(envelope.ts),
+                }),
+                PublicLaneEvent::OrderBookDelta(FastOrderBookDelta {
+                    instrument_id: spec.instrument_id.clone(),
+                    bids: data
+                        .bids
+                        .iter()
+                        .map(|level| {
+                            Ok((
+                                Price::new(parse_decimal(&level[0])?).quantize(spec.price_scale)?,
+                                Quantity::new(parse_decimal(&level[1])?)
+                                    .quantize(spec.qty_scale)?,
+                            ))
+                        })
+                        .collect::<Result<Vec<_>>>()?,
+                    asks: data
+                        .asks
+                        .iter()
+                        .map(|level| {
+                            Ok((
+                                Price::new(parse_decimal(&level[0])?).quantize(spec.price_scale)?,
+                                Quantity::new(parse_decimal(&level[1])?)
+                                    .quantize(spec.qty_scale)?,
+                            ))
+                        })
+                        .collect::<Result<Vec<_>>>()?,
+                    event_time: TimestampMs::new(envelope.ts),
+                }),
+            ]);
+        }
+
+        if envelope.topic.starts_with("allLiquidation.") {
+            let data: Vec<native::AllLiquidationData> =
+                serde_json::from_value(envelope.data).map_err(decode_error)?;
+            let mut events = Vec::with_capacity(data.len());
+            for liquidation in data {
+                let spec = self.require_native_symbol(&liquidation.symbol)?;
+                events.push(PublicLaneEvent::Liquidation(FastLiquidation {
+                    instrument_id: spec.instrument_id.clone(),
+                    side: parse_side(&liquidation.side)?,
+                    price: Price::new(parse_decimal(&liquidation.price)?)
+                        .quantize(spec.price_scale)?,
+                    quantity: Quantity::new(parse_decimal(&liquidation.quantity)?)
+                        .quantize(spec.qty_scale)?,
+                    event_time: TimestampMs::new(liquidation.updated_time),
+                }));
+            }
+            return Ok(events);
         }
 
         if envelope.topic.starts_with("kline.") {
@@ -892,7 +963,10 @@ impl VenueAdapter for BybitLinearFuturesAdapter {
                     events.push(PrivateLaneEvent::Balance(Balance {
                         asset: AssetCode::from(coin.coin),
                         wallet_balance: parse_decimal(&coin.wallet_balance)?.into(),
-                        available_balance: parse_decimal(&coin.available_to_withdraw)?.into(),
+                        available_balance: parse_decimal_or_zero_on_empty(
+                            &coin.available_to_withdraw,
+                        )?
+                        .into(),
                         updated_at: TimestampMs::new(envelope.creation_time),
                     }));
                 }
@@ -921,9 +995,10 @@ impl VenueAdapter for BybitLinearFuturesAdapter {
                         Side::Sell => PositionDirection::Short,
                     },
                     size: Quantity::new(parse_decimal(&position.size)?),
-                    entry_price: Some(Price::new(parse_decimal(&position.entry_price)?)),
+                    entry_price: parse_optional_decimal_str(&position.entry_price)?.map(Price::new),
                     mark_price: None,
-                    unrealized_pnl: Some(parse_decimal(&position.unrealised_pnl)?.into()),
+                    unrealized_pnl: parse_optional_decimal_str(&position.unrealised_pnl)?
+                        .map(Into::into),
                     leverage: parse_optional_decimal(position.leverage.as_deref())?
                         .map(Leverage::new),
                     margin_mode: parse_trade_mode(position.trade_mode),
@@ -998,13 +1073,31 @@ impl VenueAdapter for BybitLinearFuturesAdapter {
             });
         };
 
-        let response =
-            serde_json::from_str::<native::RetCodeResponse>(payload).map_err(|error| {
-                MarketError::new(
-                    ErrorKind::DecodeError,
-                    format!("failed to classify bybit command response: {error}"),
-                )
-            })?;
+        let value = serde_json::from_str::<serde_json::Value>(payload).map_err(|error| {
+            MarketError::new(
+                ErrorKind::DecodeError,
+                format!("failed to classify bybit command response: {error}"),
+            )
+        })?;
+        let response = native::RetCodeResponse {
+            ret_code: value
+                .get("retCode")
+                .and_then(|value| {
+                    value
+                        .as_i64()
+                        .or_else(|| value.as_str().and_then(|raw| raw.parse::<i64>().ok()))
+                })
+                .unwrap_or_default(),
+            ret_msg: value
+                .get("retMsg")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_owned(),
+            result: value
+                .get("result")
+                .cloned()
+                .or_else(|| value.get("data").cloned()),
+        };
 
         if response.ret_code != 0 {
             return Ok(CommandReceipt {
@@ -1026,7 +1119,9 @@ impl VenueAdapter for BybitLinearFuturesAdapter {
 
         let (instrument_id, order_id, client_order_id) = match operation {
             CommandOperation::CreateOrder
+            | CommandOperation::AmendOrder
             | CommandOperation::CancelOrder
+            | CommandOperation::ClosePosition
             | CommandOperation::GetOrder => {
                 let order = serde_json::from_value::<native::OrderResult>(result)
                     .unwrap_or_else(|_| native::OrderResult::default());
@@ -1123,7 +1218,14 @@ fn parse_decimal(raw: &str) -> Result<Decimal> {
 }
 
 fn parse_optional_decimal(raw: Option<&str>) -> Result<Option<Decimal>> {
-    raw.map(parse_decimal).transpose()
+    raw.map(str::trim)
+        .filter(|raw| !raw.is_empty())
+        .map(parse_decimal)
+        .transpose()
+}
+
+fn parse_decimal_or_zero_on_empty(raw: &str) -> Result<Decimal> {
+    Ok(parse_optional_decimal_str(raw)?.unwrap_or(Decimal::ZERO))
 }
 
 fn parse_side(raw: &str) -> Result<Side> {
@@ -1154,6 +1256,8 @@ fn parse_order_type(raw: &str) -> Result<OrderType> {
         "Limit" => Ok(OrderType::Limit),
         "Stop" => Ok(OrderType::StopLimit),
         "StopMarket" => Ok(OrderType::StopMarket),
+        "TakeProfit" => Ok(OrderType::TakeProfitLimit),
+        "TakeProfitMarket" => Ok(OrderType::TakeProfitMarket),
         other => Err(MarketError::new(
             ErrorKind::DecodeError,
             format!("unsupported bybit order type '{other}'"),
@@ -1248,6 +1352,7 @@ fn ensure_non_empty(value: &str, field: &str) -> Result<()> {
 }
 
 fn parse_optional_decimal_str(raw: &str) -> Result<Option<Decimal>> {
+    let raw = raw.trim();
     if raw.is_empty() {
         return Ok(None);
     }
@@ -1478,6 +1583,120 @@ mod tests {
                 .expect("mark price should stay cached")
                 .to_string(),
             "70108.50"
+        );
+    }
+
+    #[test]
+    fn parse_bybit_wallet_snapshot_tolerates_empty_available_balances() {
+        let adapter = BybitLinearFuturesAdapter::new();
+        let snapshot = adapter
+            .parse_account_snapshot(
+                r#"{
+                    "retCode":0,
+                    "retMsg":"OK",
+                    "result":{
+                        "list":[
+                            {
+                                "accountType":"UNIFIED",
+                                "totalWalletBalance":"125.5",
+                                "totalAvailableBalance":"",
+                                "totalPerpUPL":"",
+                                "coin":[
+                                    {"coin":"USDT","walletBalance":"125.5","availableToWithdraw":""}
+                                ]
+                            }
+                        ]
+                    }
+                }"#,
+                TimestampMs::new(1710000000000),
+            )
+            .expect("wallet snapshot with empty optional balances should parse");
+
+        assert_eq!(snapshot.balances.len(), 1);
+        assert_eq!(snapshot.balances[0].available_balance.to_string(), "0");
+        let summary = snapshot.summary.expect("summary should be present");
+        assert_eq!(summary.total_available_balance.to_string(), "0");
+        assert_eq!(summary.total_unrealized_pnl.to_string(), "0");
+    }
+
+    #[test]
+    fn parse_bybit_position_snapshot_tolerates_empty_optional_numeric_fields() {
+        let adapter = BybitLinearFuturesAdapter::new();
+        let positions = adapter
+            .parse_positions_snapshot(
+                r#"{
+                    "retCode":0,
+                    "retMsg":"OK",
+                    "result":{
+                        "list":[
+                            {
+                                "symbol":"BTCUSDT",
+                                "side":"Buy",
+                                "size":"0.010",
+                                "entryPrice":"",
+                                "unrealisedPnl":"",
+                                "tradeMode":0,
+                                "positionIdx":1,
+                                "leverage":""
+                            }
+                        ]
+                    }
+                }"#,
+                TimestampMs::new(1710000000000),
+            )
+            .expect("position snapshot with empty optional decimals should parse");
+
+        assert_eq!(positions.len(), 1);
+        assert!(positions[0].entry_price.is_none());
+        assert!(positions[0].unrealized_pnl.is_none());
+        assert!(positions[0].leverage.is_none());
+    }
+
+    #[test]
+    fn parse_bybit_metadata_snapshot_keeps_linear_perpetual_and_skips_dated_futures() {
+        let adapter = BybitLinearFuturesAdapter::new();
+        let instruments = adapter
+            .parse_metadata_snapshot(
+                r#"{
+                    "retCode":0,
+                    "retMsg":"OK",
+                    "result":{
+                        "list":[
+                            {
+                                "symbol":"BTCUSDT",
+                                "contractType":"LinearPerpetual",
+                                "status":"Trading",
+                                "baseCoin":"BTC",
+                                "quoteCoin":"USDT",
+                                "settleCoin":"USDT",
+                                "priceScale":"2",
+                                "priceFilter":{"tickSize":"0.10"},
+                                "lotSizeFilter":{"qtyStep":"0.001","minOrderQty":"0.001","minNotionalValue":"5"},
+                                "leverageFilter":{"maxLeverage":"100.00"}
+                            },
+                            {
+                                "symbol":"BTCUSDT-29MAY26",
+                                "contractType":"LinearFutures",
+                                "status":"Trading",
+                                "baseCoin":"BTC",
+                                "quoteCoin":"USDT",
+                                "settleCoin":"USDT",
+                                "priceScale":"2",
+                                "priceFilter":{"tickSize":"0.10"},
+                                "lotSizeFilter":{"qtyStep":"0.001","minOrderQty":"0.001","minNotionalValue":"5"},
+                                "leverageFilter":{"maxLeverage":"50.00"}
+                            }
+                        ]
+                    }
+                }"#,
+            )
+            .expect("metadata snapshot should parse");
+
+        assert_eq!(instruments.len(), 1);
+        assert_eq!(instruments[0].native_symbol.as_ref(), "BTCUSDT");
+        assert_eq!(
+            instruments[0].instrument_id,
+            InstrumentId::from("BTC/USDT:USDT")
         );
     }
 }

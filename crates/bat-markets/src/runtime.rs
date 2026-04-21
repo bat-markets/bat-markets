@@ -4,7 +4,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use futures_util::{SinkExt, StreamExt};
+use futures_util::{SinkExt, StreamExt, future::try_join_all};
 #[cfg(feature = "binance")]
 use reqwest::Method;
 use reqwest::StatusCode;
@@ -19,13 +19,18 @@ use tokio_tungstenite::tungstenite::Message;
 use url::form_urlencoded::Serializer;
 
 use bat_markets_core::{
-    BookTop, CancelOrderRequest, ClientOrderId, CommandOperation, CommandReceipt, CommandStatus,
-    CreateOrderRequest, DegradedReason, ErrorKind, Execution, FetchOhlcvRequest,
-    FetchTradesRequest, GetOrderRequest, HealthReport, InstrumentId, InstrumentSpec, Kline,
-    KlineInterval, ListExecutionsRequest, ListOpenOrdersRequest, MarginMode, MarketError,
-    OpenInterest, Order, OrderId, Price, PrivateLaneEvent, Product, PublicLaneEvent, Quantity,
-    ReconcileOutcome, ReconcileReport, ReconcileTrigger, Result, SequenceNumber,
-    SetLeverageRequest, SetMarginModeRequest, Ticker, TimestampMs, TradeTick, Venue, VenueAdapter,
+    AmendOrderRequest, AmendOrdersRequest, BookTop, CancelAllOrdersRequest, CancelOrderRequest,
+    CancelOrdersRequest, ClientOrderId, ClosePositionRequest, CommandAck, CommandLaneEvent,
+    CommandLifecycleEvent, CommandOperation, CommandReceipt, CommandStatus, CommandTransport,
+    CreateOrderRequest, CreateOrdersRequest, DegradedReason, ErrorKind, Execution,
+    FetchOhlcvRequest, FetchOrderBookRequest, FetchTickersRequest, FetchTradesRequest,
+    GetOrderRequest, HealthReport, InstrumentId, InstrumentSpec, Kline, KlineInterval, Liquidation,
+    ListExecutionsRequest, ListOpenOrdersRequest, MarginMode, MarkPrice, MarketError, OpenInterest,
+    Order, OrderBookLevel, OrderBookSnapshot, OrderId, OrderTarget, OrderType, Price,
+    PrivateLaneEvent, Product, PublicLaneEvent, Quantity, ReconcileOutcome, ReconcileReport,
+    ReconcileTrigger, RequestId, Result, SequenceNumber, SetLeverageRequest, SetMarginModeRequest,
+    SetPositionModeRequest, Ticker, TimestampMs, TradeTick, ValidateOrderRequest, Venue,
+    VenueAdapter,
 };
 
 #[cfg(feature = "binance")]
@@ -37,6 +42,7 @@ use crate::{
     client::{AdapterHandle, LiveContext},
     diagnostics::{RuntimeDiagnosticsState, RuntimeOperation},
     stream::{LiveStreamHandle, PublicSubscription},
+    transport::CommandWsRequestError,
 };
 
 #[derive(Debug)]
@@ -415,7 +421,20 @@ pub(crate) async fn refresh_open_orders(
                     "binance.open_orders",
                 )
                 .await?;
-                adapter.parse_open_orders_snapshot(&payload, timestamp_now_ms())?
+                let mut orders =
+                    adapter.parse_open_orders_snapshot(&payload, timestamp_now_ms())?;
+                let algo_payload = binance_signed_request_text(
+                    context,
+                    Method::GET,
+                    "/fapi/v1/openAlgoOrders",
+                    &pairs,
+                    "binance.open_algo_orders",
+                )
+                .await?;
+                orders.extend(
+                    adapter.parse_open_algo_orders_snapshot(&algo_payload, timestamp_now_ms())?,
+                );
+                orders
             }
             #[cfg(feature = "bybit")]
             AdapterHandle::Bybit(adapter) => {
@@ -534,23 +553,34 @@ pub(crate) async fn get_order(context: &LiveContext, request: &GetOrderRequest) 
         let order = match &context.adapter {
             #[cfg(feature = "binance")]
             AdapterHandle::Binance(adapter) => {
-                let query = order_identity_query(
-                    &spec.native_symbol,
-                    request.order_id.as_ref(),
-                    request.client_order_id.as_ref(),
-                )?;
+                let (path, operation, query) =
+                    if is_binance_algo_order_id(request.order_id.as_ref()) {
+                        (
+                            "/fapi/v1/algoOrder",
+                            "binance.get_algo_order",
+                            binance_algo_identity_query(
+                                request.order_id.as_ref(),
+                                request.client_order_id.as_ref(),
+                            )?,
+                        )
+                    } else {
+                        (
+                            "/fapi/v1/order",
+                            "binance.get_order",
+                            order_identity_query(
+                                &spec.native_symbol,
+                                request.order_id.as_ref(),
+                                request.client_order_id.as_ref(),
+                            )?,
+                        )
+                    };
                 let pairs = query
                     .iter()
                     .map(|(key, value)| (key.as_str(), value.as_str()))
                     .collect::<Vec<_>>();
-                let payload = binance_signed_request_text(
-                    context,
-                    Method::GET,
-                    "/fapi/v1/order",
-                    &pairs,
-                    "binance.get_order",
-                )
-                .await?;
+                let payload =
+                    binance_signed_request_text(context, Method::GET, path, &pairs, operation)
+                        .await?;
                 adapter.parse_order_snapshot(&payload, timestamp_now_ms())?
             }
             #[cfg(feature = "bybit")]
@@ -559,7 +589,7 @@ pub(crate) async fn get_order(context: &LiveContext, request: &GetOrderRequest) 
                     ("category".to_owned(), "linear".to_owned()),
                     ("symbol".to_owned(), spec.native_symbol.to_string()),
                 ];
-                append_order_identity(
+                append_bybit_order_identity(
                     &mut query,
                     request.order_id.as_ref(),
                     request.client_order_id.as_ref(),
@@ -575,9 +605,10 @@ pub(crate) async fn get_order(context: &LiveContext, request: &GetOrderRequest) 
             }
         };
 
-        let order_for_state = order.clone();
+        context
+            .shared
+            .apply_private_event(PrivateLaneEvent::Order(order.clone()));
         context.shared.write(|state| {
-            state.apply_private_event(PrivateLaneEvent::Order(order_for_state));
             state.mark_rest_success(None);
         });
         Ok(order)
@@ -590,99 +621,283 @@ pub(crate) async fn get_order(context: &LiveContext, request: &GetOrderRequest) 
 pub(crate) async fn create_order(
     context: &LiveContext,
     request: &CreateOrderRequest,
-) -> Result<CommandReceipt> {
+) -> Result<CommandAck> {
     let started_at = Instant::now();
     let result = async {
         validate_create_order(context, request)?;
         context.command_limiter.acquire().await;
-        let receipt = match &context.adapter {
+        let (receipt, transport) = match &context.adapter {
         #[cfg(feature = "binance")]
         AdapterHandle::Binance(adapter) => {
             let spec = require_spec(context, &request.instrument_id)?;
-            let mut owned = vec![
-                ("symbol".to_owned(), spec.native_symbol.to_string()),
-                ("side".to_owned(), binance_side(request.side).to_owned()),
-                (
-                    "type".to_owned(),
-                    binance_order_type(request.order_type).to_owned(),
-                ),
-                ("quantity".to_owned(), format_quantity(request.quantity)),
-            ];
-            if let Some(client_order_id) = &request.client_order_id {
-                owned.push(("newClientOrderId".to_owned(), client_order_id.to_string()));
-            }
-            if let Some(price) = request.price {
-                owned.push(("price".to_owned(), format_price(price)));
-            }
-            if let Some(time_in_force) = request.time_in_force {
-                owned.push((
-                    "timeInForce".to_owned(),
-                    binance_time_in_force(time_in_force, request.post_only).to_owned(),
-                ));
-            }
-            if request.reduce_only {
-                owned.push(("reduceOnly".to_owned(), "true".to_owned()));
-            }
-            let pairs = owned
-                .iter()
-                .map(|(key, value)| (key.as_str(), value.as_str()))
-                .collect::<Vec<_>>();
-            match binance_signed_request_text(
-                context,
-                Method::POST,
-                "/fapi/v1/order",
-                &pairs,
-                "binance.create_order",
-            )
-            .await
-            {
-                Ok(payload) => adapter.classify_command(
-                    CommandOperation::CreateOrder,
-                    Some(&payload),
-                    request.request_id.clone(),
-                )?,
-                Err(error) if is_uncertain_command_error(&error) => adapter.classify_command(
-                    CommandOperation::CreateOrder,
-                    None,
-                    request.request_id.clone(),
-                )?,
-                Err(error) => return Err(error),
+            if binance_create_uses_algo_order_endpoint(request) {
+                let pairs =
+                    build_binance_algo_create_pairs(&spec.native_symbol, request);
+                let pairs = pairs
+                    .iter()
+                    .map(|(key, value)| (key.as_str(), value.as_str()))
+                    .collect::<Vec<_>>();
+                match binance_signed_request_text(
+                    context,
+                    Method::POST,
+                    "/fapi/v1/algoOrder",
+                    &pairs,
+                    "binance.create_algo_order",
+                )
+                .await
+                {
+                    Ok(payload) => (
+                        adapter.classify_command(
+                            CommandOperation::CreateOrder,
+                            Some(&payload),
+                            request.request_id.clone(),
+                        )?,
+                        CommandTransport::Rest,
+                    ),
+                    Err(error) if is_uncertain_command_error(&error) => (
+                        adapter.classify_command(
+                            CommandOperation::CreateOrder,
+                            None,
+                            request.request_id.clone(),
+                        )?,
+                        CommandTransport::Rest,
+                    ),
+                    Err(error) => return Err(error),
+                }
+            } else {
+                let mut owned = vec![
+                    ("symbol".to_owned(), spec.native_symbol.to_string()),
+                    ("side".to_owned(), binance_side(request.side).to_owned()),
+                    (
+                        "type".to_owned(),
+                        binance_order_type(request.order_type).to_owned(),
+                    ),
+                    ("quantity".to_owned(), format_quantity(request.quantity)),
+                ];
+                if let Some(client_order_id) = &request.client_order_id {
+                    owned.push(("newClientOrderId".to_owned(), client_order_id.to_string()));
+                }
+                if let Some(price) = request.price {
+                    owned.push(("price".to_owned(), format_price(price)));
+                }
+                if let Some(trigger_price) = request.trigger_price {
+                    owned.push(("stopPrice".to_owned(), format_price(trigger_price)));
+                }
+                if let Some(trigger_type) = request.trigger_type {
+                    owned.push((
+                        "workingType".to_owned(),
+                        binance_trigger_type(trigger_type).to_owned(),
+                    ));
+                }
+                if let Some(time_in_force) = request.time_in_force {
+                    owned.push((
+                        "timeInForce".to_owned(),
+                        binance_time_in_force(time_in_force, request.post_only).to_owned(),
+                    ));
+                }
+                if request.reduce_only {
+                    owned.push(("reduceOnly".to_owned(), "true".to_owned()));
+                }
+                if context.adapter.capabilities().native.ws_order_entry
+                    && binance_create_prefers_ws(request)
+                {
+                match binance_signed_ws_request_text(
+                    context,
+                    "order.place",
+                    owned.clone(),
+                    "binance.create_order_ws",
+                )
+                .await
+                {
+                    Ok(payload) => (
+                        adapter.classify_command(
+                            CommandOperation::CreateOrder,
+                            Some(&payload),
+                            request.request_id.clone(),
+                        )?,
+                        CommandTransport::WebSocket,
+                    ),
+                    Err(CommandWsRequestError::Uncertain(_)) => (
+                        adapter.classify_command(
+                            CommandOperation::CreateOrder,
+                            None,
+                            request.request_id.clone(),
+                        )?,
+                        CommandTransport::WebSocket,
+                    ),
+                    Err(CommandWsRequestError::Unavailable(_)) => {
+                        let pairs = owned
+                            .iter()
+                            .map(|(key, value)| (key.as_str(), value.as_str()))
+                            .collect::<Vec<_>>();
+                        match binance_signed_request_text(
+                            context,
+                            Method::POST,
+                            "/fapi/v1/order",
+                            &pairs,
+                            "binance.create_order",
+                        )
+                        .await
+                        {
+                            Ok(payload) => (
+                                adapter.classify_command(
+                                    CommandOperation::CreateOrder,
+                                    Some(&payload),
+                                    request.request_id.clone(),
+                                )?,
+                                CommandTransport::Rest,
+                            ),
+                            Err(error) if is_uncertain_command_error(&error) => (
+                                adapter.classify_command(
+                                    CommandOperation::CreateOrder,
+                                    None,
+                                    request.request_id.clone(),
+                                )?,
+                                CommandTransport::Rest,
+                            ),
+                            Err(error) => return Err(error),
+                        }
+                    }
+                }
+                } else {
+                    let pairs = owned
+                        .iter()
+                        .map(|(key, value)| (key.as_str(), value.as_str()))
+                        .collect::<Vec<_>>();
+                    match binance_signed_request_text(
+                        context,
+                        Method::POST,
+                        "/fapi/v1/order",
+                        &pairs,
+                        "binance.create_order",
+                    )
+                    .await
+                    {
+                        Ok(payload) => (
+                            adapter.classify_command(
+                                CommandOperation::CreateOrder,
+                                Some(&payload),
+                                request.request_id.clone(),
+                            )?,
+                            CommandTransport::Rest,
+                        ),
+                        Err(error) if is_uncertain_command_error(&error) => (
+                            adapter.classify_command(
+                                CommandOperation::CreateOrder,
+                                None,
+                                request.request_id.clone(),
+                            )?,
+                            CommandTransport::Rest,
+                        ),
+                        Err(error) => return Err(error),
+                    }
+                }
             }
         }
         #[cfg(feature = "bybit")]
         AdapterHandle::Bybit(adapter) => {
             let spec = require_spec(context, &request.instrument_id)?;
-            let body = json!({
+            let body_value = json!({
                 "category": "linear",
                 "symbol": spec.native_symbol,
                 "side": bybit_side(request.side),
                 "orderType": bybit_order_type(request.order_type),
                 "qty": format_quantity(request.quantity),
                 "price": request.price.map(format_price),
+                "triggerPrice": request.trigger_price.map(format_price),
+                "triggerBy": request.trigger_type.map(bybit_trigger_type),
                 "timeInForce": request.time_in_force.map(|value| bybit_time_in_force(value, request.post_only)),
                 "orderLinkId": request.client_order_id.as_ref().map(ToString::to_string),
                 "reduceOnly": request.reduce_only,
             });
-            let body = serde_json::to_string(&body).map_err(|error| {
-                MarketError::new(
-                    ErrorKind::ConfigError,
-                    format!("failed to serialize bybit create order body: {error}"),
+            if context.adapter.capabilities().native.ws_order_entry {
+                match bybit_trade_ws_request_text(
+                    context,
+                    "order.create",
+                    vec![body_value.clone()],
+                    "bybit.create_order_ws",
                 )
-            })?;
-            match bybit_signed_post_text(context, "/v5/order/create", &body, "bybit.create_order")
                 .await
-            {
-                Ok(payload) => adapter.classify_command(
-                    CommandOperation::CreateOrder,
-                    Some(&payload),
-                    request.request_id.clone(),
-                )?,
-                Err(error) if is_uncertain_command_error(&error) => adapter.classify_command(
-                    CommandOperation::CreateOrder,
-                    None,
-                    request.request_id.clone(),
-                )?,
-                Err(error) => return Err(error),
+                {
+                    Ok(payload) => (
+                        adapter.classify_command(
+                            CommandOperation::CreateOrder,
+                            Some(&payload),
+                            request.request_id.clone(),
+                        )?,
+                        CommandTransport::WebSocket,
+                    ),
+                    Err(CommandWsRequestError::Uncertain(_)) => (
+                        adapter.classify_command(
+                            CommandOperation::CreateOrder,
+                            None,
+                            request.request_id.clone(),
+                        )?,
+                        CommandTransport::WebSocket,
+                    ),
+                    Err(CommandWsRequestError::Unavailable(_)) => {
+                        let body = serde_json::to_string(&body_value).map_err(|error| {
+                            MarketError::new(
+                                ErrorKind::ConfigError,
+                                format!("failed to serialize bybit create order body: {error}"),
+                            )
+                        })?;
+                        match bybit_signed_post_text(
+                            context,
+                            "/v5/order/create",
+                            &body,
+                            "bybit.create_order",
+                        )
+                        .await
+                        {
+                            Ok(payload) => (
+                                adapter.classify_command(
+                                    CommandOperation::CreateOrder,
+                                    Some(&payload),
+                                    request.request_id.clone(),
+                                )?,
+                                CommandTransport::Rest,
+                            ),
+                            Err(error) if is_uncertain_command_error(&error) => (
+                                adapter.classify_command(
+                                    CommandOperation::CreateOrder,
+                                    None,
+                                    request.request_id.clone(),
+                                )?,
+                                CommandTransport::Rest,
+                            ),
+                            Err(error) => return Err(error),
+                        }
+                    }
+                }
+            } else {
+                let body = serde_json::to_string(&body_value).map_err(|error| {
+                    MarketError::new(
+                        ErrorKind::ConfigError,
+                        format!("failed to serialize bybit create order body: {error}"),
+                    )
+                })?;
+                match bybit_signed_post_text(context, "/v5/order/create", &body, "bybit.create_order")
+                    .await
+                {
+                    Ok(payload) => (
+                        adapter.classify_command(
+                            CommandOperation::CreateOrder,
+                            Some(&payload),
+                            request.request_id.clone(),
+                        )?,
+                        CommandTransport::Rest,
+                    ),
+                    Err(error) if is_uncertain_command_error(&error) => (
+                        adapter.classify_command(
+                            CommandOperation::CreateOrder,
+                            None,
+                            request.request_id.clone(),
+                        )?,
+                        CommandTransport::Rest,
+                    ),
+                    Err(error) => return Err(error),
+                }
             }
         }
     };
@@ -698,56 +913,1110 @@ pub(crate) async fn create_order(
                 client_order_id: request.client_order_id.clone(),
                 recorded_at: timestamp_now_ms(),
             })
-            .await;
+                .await;
     }
-    apply_command_receipt(context, receipt.clone()).await;
-        Ok(receipt)
+    let ack = apply_command_receipt(context, receipt.clone(), transport).await;
+        Ok(ack)
     }
     .await;
     record_runtime_latency(context, RuntimeOperation::CreateOrder, started_at);
     result
 }
 
+pub(crate) async fn create_orders(
+    context: &LiveContext,
+    request: &CreateOrdersRequest,
+) -> Result<Vec<CommandAck>> {
+    let started_at = Instant::now();
+    let result = async {
+        validate_create_orders(context, request)?;
+        if request.orders.len() == 1 {
+            let single = request.orders[0].clone();
+            let single = hydrate_create_request_with_batch_id(single, request.request_id.clone());
+            return Ok(vec![create_order(context, &single).await?]);
+        }
+
+        let mut acks = vec![None; request.orders.len()];
+        match &context.adapter {
+            #[cfg(feature = "binance")]
+            AdapterHandle::Binance(adapter) => {
+                if context.adapter.capabilities().native.ws_order_entry {
+                    let indexed = request.orders.iter().enumerate().collect::<Vec<_>>();
+                    for chunk in indexed.chunks(5) {
+                        let chunk_requests = chunk
+                            .iter()
+                            .map(|(_, order)| {
+                                hydrate_create_request_with_batch_id(
+                                    (*order).clone(),
+                                    request.request_id.clone(),
+                                )
+                            })
+                            .collect::<Vec<_>>();
+                        let chunk_acks = try_join_all(
+                            chunk_requests
+                                .iter()
+                                .map(|order| create_order(context, order)),
+                        )
+                        .await?;
+                        for ((index, _), ack) in chunk.iter().zip(chunk_acks) {
+                            acks[*index] = Some(ack);
+                        }
+                    }
+                } else {
+                    for chunk in request
+                        .orders
+                        .iter()
+                        .enumerate()
+                        .collect::<Vec<_>>()
+                        .chunks(5)
+                    {
+                        context.command_limiter.acquire().await;
+                        let chunk_requests = chunk
+                            .iter()
+                            .map(|(_, order)| {
+                                hydrate_create_request_with_batch_id(
+                                    (*order).clone(),
+                                    request.request_id.clone(),
+                                )
+                            })
+                            .collect::<Vec<_>>();
+                        let batch_orders = chunk_requests
+                            .iter()
+                            .map(|order| build_binance_batch_create_object(context, order))
+                            .collect::<Result<Vec<_>>>()?;
+                        let batch_json = serde_json::to_string(&batch_orders).map_err(|error| {
+                            MarketError::new(
+                                ErrorKind::ConfigError,
+                                format!("failed to serialize binance batch create body: {error}"),
+                            )
+                        })?;
+                        let pairs = [("batchOrders", batch_json.as_str())];
+                        let chunk_receipts = match binance_signed_request_text(
+                            context,
+                            Method::POST,
+                            "/fapi/v1/batchOrders",
+                            &pairs,
+                            "binance.create_orders",
+                        )
+                        .await
+                        {
+                            Ok(payload) => classify_binance_batch_payload(
+                                adapter,
+                                CommandOperation::CreateOrder,
+                                &payload,
+                                &chunk_requests
+                                    .iter()
+                                    .map(|order| order.request_id.clone())
+                                    .collect::<Vec<_>>(),
+                            )?,
+                            Err(error) if is_uncertain_command_error(&error) => chunk_requests
+                                .iter()
+                                .map(|order| {
+                                    unknown_command_receipt(
+                                        context,
+                                        CommandOperation::CreateOrder,
+                                        Some(order.instrument_id.clone()),
+                                        None,
+                                        order.client_order_id.clone(),
+                                        order.request_id.clone(),
+                                    )
+                                })
+                                .collect(),
+                            Err(error) => return Err(error),
+                        };
+                        if chunk_receipts.len() != chunk.len() {
+                            return Err(MarketError::new(
+                                ErrorKind::DecodeError,
+                                format!(
+                                    "binance batch create returned {} receipts for {} requests",
+                                    chunk_receipts.len(),
+                                    chunk.len()
+                                ),
+                            ));
+                        }
+                        let chunk_acks = cache_and_emit_create_receipts(
+                            context,
+                            &chunk_receipts,
+                            &chunk_requests,
+                            CommandTransport::Rest,
+                        )
+                        .await;
+                        for ((index, _), ack) in chunk.iter().zip(chunk_acks) {
+                            acks[*index] = Some(ack);
+                        }
+                    }
+                }
+            }
+            #[cfg(feature = "bybit")]
+            AdapterHandle::Bybit(_) => {
+                for chunk in request
+                    .orders
+                    .iter()
+                    .enumerate()
+                    .collect::<Vec<_>>()
+                    .chunks(20)
+                {
+                    context.command_limiter.acquire().await;
+                    let chunk_requests = chunk
+                        .iter()
+                        .map(|(_, order)| {
+                            hydrate_create_request_with_batch_id(
+                                (*order).clone(),
+                                request.request_id.clone(),
+                            )
+                        })
+                        .collect::<Vec<_>>();
+                    let batch = chunk_requests
+                        .iter()
+                        .map(|order| build_bybit_batch_create_object(context, order))
+                        .collect::<Result<Vec<_>>>()?;
+                    let batch_body = json!({
+                        "category": "linear",
+                        "request": batch,
+                    });
+                    let body = serde_json::to_string(&batch_body).map_err(|error| {
+                        MarketError::new(
+                            ErrorKind::ConfigError,
+                            format!("failed to serialize bybit batch create body: {error}"),
+                        )
+                    })?;
+                    let identities = chunk_requests
+                        .iter()
+                        .map(|order| BatchIdentity {
+                            instrument_id: Some(order.instrument_id.clone()),
+                            order_id: None,
+                            client_order_id: order.client_order_id.clone(),
+                            request_id: order.request_id.clone(),
+                        })
+                        .collect::<Vec<_>>();
+                    let (chunk_receipts, transport) =
+                        if context.adapter.capabilities().native.ws_order_entry {
+                            match bybit_trade_ws_request_text(
+                                context,
+                                "order.create-batch",
+                                vec![batch_body.clone()],
+                                "bybit.create_orders_ws",
+                            )
+                            .await
+                            {
+                                Ok(payload) => (
+                                    classify_bybit_batch_payload(
+                                        context,
+                                        CommandOperation::CreateOrder,
+                                        &payload,
+                                        &identities,
+                                    )?,
+                                    CommandTransport::WebSocket,
+                                ),
+                                Err(CommandWsRequestError::Uncertain(_)) => (
+                                    chunk_requests
+                                        .iter()
+                                        .map(|order| {
+                                            unknown_command_receipt(
+                                                context,
+                                                CommandOperation::CreateOrder,
+                                                Some(order.instrument_id.clone()),
+                                                None,
+                                                order.client_order_id.clone(),
+                                                order.request_id.clone(),
+                                            )
+                                        })
+                                        .collect(),
+                                    CommandTransport::WebSocket,
+                                ),
+                                Err(CommandWsRequestError::Unavailable(_)) => {
+                                    match bybit_signed_post_text(
+                                        context,
+                                        "/v5/order/create-batch",
+                                        &body,
+                                        "bybit.create_orders",
+                                    )
+                                    .await
+                                    {
+                                        Ok(payload) => (
+                                            classify_bybit_batch_payload(
+                                                context,
+                                                CommandOperation::CreateOrder,
+                                                &payload,
+                                                &identities,
+                                            )?,
+                                            CommandTransport::Rest,
+                                        ),
+                                        Err(error) if is_uncertain_command_error(&error) => (
+                                            chunk_requests
+                                                .iter()
+                                                .map(|order| {
+                                                    unknown_command_receipt(
+                                                        context,
+                                                        CommandOperation::CreateOrder,
+                                                        Some(order.instrument_id.clone()),
+                                                        None,
+                                                        order.client_order_id.clone(),
+                                                        order.request_id.clone(),
+                                                    )
+                                                })
+                                                .collect(),
+                                            CommandTransport::Rest,
+                                        ),
+                                        Err(error) => return Err(error),
+                                    }
+                                }
+                            }
+                        } else {
+                            match bybit_signed_post_text(
+                                context,
+                                "/v5/order/create-batch",
+                                &body,
+                                "bybit.create_orders",
+                            )
+                            .await
+                            {
+                                Ok(payload) => (
+                                    classify_bybit_batch_payload(
+                                        context,
+                                        CommandOperation::CreateOrder,
+                                        &payload,
+                                        &identities,
+                                    )?,
+                                    CommandTransport::Rest,
+                                ),
+                                Err(error) if is_uncertain_command_error(&error) => (
+                                    chunk_requests
+                                        .iter()
+                                        .map(|order| {
+                                            unknown_command_receipt(
+                                                context,
+                                                CommandOperation::CreateOrder,
+                                                Some(order.instrument_id.clone()),
+                                                None,
+                                                order.client_order_id.clone(),
+                                                order.request_id.clone(),
+                                            )
+                                        })
+                                        .collect(),
+                                    CommandTransport::Rest,
+                                ),
+                                Err(error) => return Err(error),
+                            }
+                        };
+                    if chunk_receipts.len() != chunk.len() {
+                        return Err(MarketError::new(
+                            ErrorKind::DecodeError,
+                            format!(
+                                "bybit batch create returned {} receipts for {} requests",
+                                chunk_receipts.len(),
+                                chunk.len()
+                            ),
+                        ));
+                    }
+                    let chunk_acks = cache_and_emit_create_receipts(
+                        context,
+                        &chunk_receipts,
+                        &chunk_requests,
+                        transport,
+                    )
+                    .await;
+                    for ((index, _), ack) in chunk.iter().zip(chunk_acks) {
+                        acks[*index] = Some(ack);
+                    }
+                }
+            }
+        }
+
+        collect_batch_acks(acks, "create_orders")
+    }
+    .await;
+    record_runtime_latency(context, RuntimeOperation::CreateOrders, started_at);
+    result
+}
+
+#[cfg(feature = "binance")]
+fn binance_create_prefers_ws(request: &CreateOrderRequest) -> bool {
+    // On live USDⓈ-M testing subaccounts, conditional algo orders can still be rejected on the
+    // websocket trade path despite the current public docs listing them under `order.place`.
+    // Keep the hot path on WS for Market/Limit, but route slower protective/conditional flow
+    // through the stable REST path until the live behavior is proven end-to-end.
+    !binance_create_uses_algo_order_endpoint(request)
+}
+
+#[cfg(feature = "binance")]
+fn binance_create_uses_algo_order_endpoint(request: &CreateOrderRequest) -> bool {
+    matches!(
+        request.order_type,
+        OrderType::StopMarket
+            | OrderType::StopLimit
+            | OrderType::TakeProfitMarket
+            | OrderType::TakeProfitLimit
+    )
+}
+
+#[cfg(feature = "binance")]
+fn build_binance_algo_create_pairs(
+    native_symbol: &str,
+    request: &CreateOrderRequest,
+) -> Vec<(String, String)> {
+    let mut owned = vec![
+        ("algoType".to_owned(), "CONDITIONAL".to_owned()),
+        ("symbol".to_owned(), native_symbol.to_owned()),
+        ("side".to_owned(), binance_side(request.side).to_owned()),
+        (
+            "type".to_owned(),
+            binance_order_type(request.order_type).to_owned(),
+        ),
+        ("quantity".to_owned(), format_quantity(request.quantity)),
+    ];
+    if let Some(client_order_id) = &request.client_order_id {
+        owned.push(("clientAlgoId".to_owned(), client_order_id.to_string()));
+    }
+    if let Some(price) = request.price {
+        owned.push(("price".to_owned(), format_price(price)));
+    }
+    if let Some(trigger_price) = request.trigger_price {
+        owned.push(("triggerPrice".to_owned(), format_price(trigger_price)));
+    }
+    if let Some(trigger_type) = request.trigger_type {
+        owned.push((
+            "workingType".to_owned(),
+            binance_trigger_type(trigger_type).to_owned(),
+        ));
+    }
+    if let Some(time_in_force) = request.time_in_force {
+        owned.push((
+            "timeInForce".to_owned(),
+            binance_time_in_force(time_in_force, request.post_only).to_owned(),
+        ));
+    }
+    if request.reduce_only {
+        owned.push(("reduceOnly".to_owned(), "true".to_owned()));
+    }
+    owned
+}
+
+pub(crate) async fn amend_order(
+    context: &LiveContext,
+    request: &AmendOrderRequest,
+) -> Result<CommandAck> {
+    let started_at = Instant::now();
+    let result = async {
+        validate_amend_order(context, request).await?;
+        context.command_limiter.acquire().await;
+        let (receipt, transport) = match &context.adapter {
+            #[cfg(feature = "binance")]
+            AdapterHandle::Binance(adapter) => {
+                let spec = require_spec(context, &request.instrument_id)?;
+                let current_order = resolve_order_for_amend(context, request).await?;
+                if current_order.order_type != OrderType::Limit {
+                    return Err(MarketError::new(
+                        ErrorKind::Unsupported,
+                        "binance amend currently supports only LIMIT orders",
+                    ));
+                }
+                if request.trigger_price.is_some() {
+                    return Err(MarketError::new(
+                        ErrorKind::Unsupported,
+                        "binance amend does not support modifying trigger_price on linear futures",
+                    ));
+                }
+                let price = request.price.or(current_order.price).ok_or_else(|| {
+                    MarketError::new(
+                        ErrorKind::ConfigError,
+                        "binance amend requires a limit price or a cached order price",
+                    )
+                })?;
+                let quantity = request.quantity.unwrap_or(current_order.quantity);
+                let mut owned = vec![
+                    ("symbol".to_owned(), spec.native_symbol.to_string()),
+                    (
+                        "side".to_owned(),
+                        binance_side(current_order.side).to_owned(),
+                    ),
+                    ("quantity".to_owned(), format_quantity(quantity)),
+                    ("price".to_owned(), format_price(price)),
+                ];
+                append_order_identity(
+                    &mut owned,
+                    request.order_id.as_ref(),
+                    request.client_order_id.as_ref(),
+                )?;
+                if context.adapter.capabilities().native.ws_order_entry {
+                    let mut ws_params = owned.clone();
+                    ws_params.push((
+                        "origType".to_owned(),
+                        binance_order_type(current_order.order_type).to_owned(),
+                    ));
+                    match binance_signed_ws_request_text(
+                        context,
+                        "order.modify",
+                        ws_params,
+                        "binance.amend_order_ws",
+                    )
+                    .await
+                    {
+                        Ok(payload) => (
+                            adapter.classify_command(
+                                CommandOperation::AmendOrder,
+                                Some(&payload),
+                                request.request_id.clone(),
+                            )?,
+                            CommandTransport::WebSocket,
+                        ),
+                        Err(CommandWsRequestError::Uncertain(_)) => (
+                            adapter.classify_command(
+                                CommandOperation::AmendOrder,
+                                None,
+                                request.request_id.clone(),
+                            )?,
+                            CommandTransport::WebSocket,
+                        ),
+                        Err(CommandWsRequestError::Unavailable(_)) => {
+                            let pairs = owned
+                                .iter()
+                                .map(|(key, value)| (key.as_str(), value.as_str()))
+                                .collect::<Vec<_>>();
+                            match binance_signed_request_text(
+                                context,
+                                Method::PUT,
+                                "/fapi/v1/order",
+                                &pairs,
+                                "binance.amend_order",
+                            )
+                            .await
+                            {
+                                Ok(payload) => (
+                                    adapter.classify_command(
+                                        CommandOperation::AmendOrder,
+                                        Some(&payload),
+                                        request.request_id.clone(),
+                                    )?,
+                                    CommandTransport::Rest,
+                                ),
+                                Err(error) if is_uncertain_command_error(&error) => (
+                                    adapter.classify_command(
+                                        CommandOperation::AmendOrder,
+                                        None,
+                                        request.request_id.clone(),
+                                    )?,
+                                    CommandTransport::Rest,
+                                ),
+                                Err(error) => return Err(error),
+                            }
+                        }
+                    }
+                } else {
+                    let pairs = owned
+                        .iter()
+                        .map(|(key, value)| (key.as_str(), value.as_str()))
+                        .collect::<Vec<_>>();
+                    match binance_signed_request_text(
+                        context,
+                        Method::PUT,
+                        "/fapi/v1/order",
+                        &pairs,
+                        "binance.amend_order",
+                    )
+                    .await
+                    {
+                        Ok(payload) => (
+                            adapter.classify_command(
+                                CommandOperation::AmendOrder,
+                                Some(&payload),
+                                request.request_id.clone(),
+                            )?,
+                            CommandTransport::Rest,
+                        ),
+                        Err(error) if is_uncertain_command_error(&error) => (
+                            adapter.classify_command(
+                                CommandOperation::AmendOrder,
+                                None,
+                                request.request_id.clone(),
+                            )?,
+                            CommandTransport::Rest,
+                        ),
+                        Err(error) => return Err(error),
+                    }
+                }
+            }
+            #[cfg(feature = "bybit")]
+            AdapterHandle::Bybit(adapter) => {
+                let spec = require_spec(context, &request.instrument_id)?;
+                let mut body = vec![
+                    ("category".to_owned(), "linear".to_owned()),
+                    ("symbol".to_owned(), spec.native_symbol.to_string()),
+                ];
+                append_bybit_order_identity(
+                    &mut body,
+                    request.order_id.as_ref(),
+                    request.client_order_id.as_ref(),
+                )?;
+                if let Some(quantity) = request.quantity {
+                    body.push(("qty".to_owned(), format_quantity(quantity)));
+                }
+                if let Some(price) = request.price {
+                    body.push(("price".to_owned(), format_price(price)));
+                }
+                if let Some(trigger_price) = request.trigger_price {
+                    body.push(("triggerPrice".to_owned(), format_price(trigger_price)));
+                }
+                let body = body_to_object(body);
+                if context.adapter.capabilities().native.ws_order_entry {
+                    match bybit_trade_ws_request_text(
+                        context,
+                        "order.amend",
+                        vec![Value::Object(body.clone())],
+                        "bybit.amend_order_ws",
+                    )
+                    .await
+                    {
+                        Ok(payload) => (
+                            adapter.classify_command(
+                                CommandOperation::AmendOrder,
+                                Some(&payload),
+                                request.request_id.clone(),
+                            )?,
+                            CommandTransport::WebSocket,
+                        ),
+                        Err(CommandWsRequestError::Uncertain(_)) => (
+                            adapter.classify_command(
+                                CommandOperation::AmendOrder,
+                                None,
+                                request.request_id.clone(),
+                            )?,
+                            CommandTransport::WebSocket,
+                        ),
+                        Err(CommandWsRequestError::Unavailable(_)) => {
+                            let body = serde_json::to_string(&body).map_err(|error| {
+                                MarketError::new(
+                                    ErrorKind::ConfigError,
+                                    format!("failed to serialize bybit amend order body: {error}"),
+                                )
+                            })?;
+                            match bybit_signed_post_text(
+                                context,
+                                "/v5/order/amend",
+                                &body,
+                                "bybit.amend_order",
+                            )
+                            .await
+                            {
+                                Ok(payload) => (
+                                    adapter.classify_command(
+                                        CommandOperation::AmendOrder,
+                                        Some(&payload),
+                                        request.request_id.clone(),
+                                    )?,
+                                    CommandTransport::Rest,
+                                ),
+                                Err(error) if is_uncertain_command_error(&error) => (
+                                    adapter.classify_command(
+                                        CommandOperation::AmendOrder,
+                                        None,
+                                        request.request_id.clone(),
+                                    )?,
+                                    CommandTransport::Rest,
+                                ),
+                                Err(error) => return Err(error),
+                            }
+                        }
+                    }
+                } else {
+                    let body = serde_json::to_string(&body).map_err(|error| {
+                        MarketError::new(
+                            ErrorKind::ConfigError,
+                            format!("failed to serialize bybit amend order body: {error}"),
+                        )
+                    })?;
+                    match bybit_signed_post_text(
+                        context,
+                        "/v5/order/amend",
+                        &body,
+                        "bybit.amend_order",
+                    )
+                    .await
+                    {
+                        Ok(payload) => (
+                            adapter.classify_command(
+                                CommandOperation::AmendOrder,
+                                Some(&payload),
+                                request.request_id.clone(),
+                            )?,
+                            CommandTransport::Rest,
+                        ),
+                        Err(error) if is_uncertain_command_error(&error) => (
+                            adapter.classify_command(
+                                CommandOperation::AmendOrder,
+                                None,
+                                request.request_id.clone(),
+                            )?,
+                            CommandTransport::Rest,
+                        ),
+                        Err(error) => return Err(error),
+                    }
+                }
+            }
+        };
+
+        let receipt = hydrate_amend_receipt(receipt, request);
+        if receipt.status == CommandStatus::UnknownExecution {
+            context
+                .runtime_state
+                .cache_pending_unknown(PendingUnknownCommand {
+                    operation: CommandOperation::AmendOrder,
+                    instrument_id: request.instrument_id.clone(),
+                    order_id: request.order_id.clone(),
+                    client_order_id: request.client_order_id.clone(),
+                    recorded_at: timestamp_now_ms(),
+                })
+                .await;
+        }
+        let ack = apply_command_receipt(context, receipt.clone(), transport).await;
+        Ok(ack)
+    }
+    .await;
+    record_runtime_latency(context, RuntimeOperation::AmendOrder, started_at);
+    result
+}
+
+pub(crate) async fn amend_orders(
+    context: &LiveContext,
+    request: &AmendOrdersRequest,
+) -> Result<Vec<CommandAck>> {
+    let started_at = Instant::now();
+    let result = async {
+        validate_amend_orders(context, request).await?;
+        if request.orders.len() == 1 {
+            let single = request.orders[0].clone();
+            let single = hydrate_amend_request_with_batch_id(single, request.request_id.clone());
+            return Ok(vec![amend_order(context, &single).await?]);
+        }
+
+        let mut acks = vec![None; request.orders.len()];
+        match &context.adapter {
+            #[cfg(feature = "binance")]
+            AdapterHandle::Binance(adapter) => {
+                let indexed = request.orders.iter().enumerate().collect::<Vec<_>>();
+                if context.adapter.capabilities().native.ws_order_entry {
+                    for chunk in indexed.chunks(5) {
+                        let chunk_requests = chunk
+                            .iter()
+                            .map(|(_, order)| {
+                                hydrate_amend_request_with_batch_id(
+                                    (*order).clone(),
+                                    request.request_id.clone(),
+                                )
+                            })
+                            .collect::<Vec<_>>();
+                        let chunk_acks = try_join_all(
+                            chunk_requests
+                                .iter()
+                                .map(|order| amend_order(context, order)),
+                        )
+                        .await?;
+                        for ((index, _), ack) in chunk.iter().zip(chunk_acks) {
+                            acks[*index] = Some(ack);
+                        }
+                    }
+                } else {
+                    for chunk in indexed.chunks(5) {
+                        context.command_limiter.acquire().await;
+                        let chunk_requests = chunk
+                            .iter()
+                            .map(|(_, order)| {
+                                hydrate_amend_request_with_batch_id(
+                                    (*order).clone(),
+                                    request.request_id.clone(),
+                                )
+                            })
+                            .collect::<Vec<_>>();
+                        let batch_orders = chunk_requests
+                            .iter()
+                            .map(|order| build_binance_batch_amend_object(context, order))
+                            .collect::<Result<Vec<_>>>()?;
+                        let batch_json = serde_json::to_string(&batch_orders).map_err(|error| {
+                            MarketError::new(
+                                ErrorKind::ConfigError,
+                                format!("failed to serialize binance batch amend body: {error}"),
+                            )
+                        })?;
+                        let pairs = [("batchOrders", batch_json.as_str())];
+                        let chunk_receipts = match binance_signed_request_text(
+                            context,
+                            Method::PUT,
+                            "/fapi/v1/batchOrders",
+                            &pairs,
+                            "binance.amend_orders",
+                        )
+                        .await
+                        {
+                            Ok(payload) => classify_binance_batch_payload(
+                                adapter,
+                                CommandOperation::AmendOrder,
+                                &payload,
+                                &chunk_requests
+                                    .iter()
+                                    .map(|order| order.request_id.clone())
+                                    .collect::<Vec<_>>(),
+                            )?,
+                            Err(error) if is_uncertain_command_error(&error) => chunk_requests
+                                .iter()
+                                .map(|order| {
+                                    unknown_command_receipt(
+                                        context,
+                                        CommandOperation::AmendOrder,
+                                        Some(order.instrument_id.clone()),
+                                        order.order_id.clone(),
+                                        order.client_order_id.clone(),
+                                        order.request_id.clone(),
+                                    )
+                                })
+                                .collect(),
+                            Err(error) => return Err(error),
+                        };
+                        if chunk_receipts.len() != chunk.len() {
+                            return Err(MarketError::new(
+                                ErrorKind::DecodeError,
+                                format!(
+                                    "binance batch amend returned {} receipts for {} requests",
+                                    chunk_receipts.len(),
+                                    chunk.len()
+                                ),
+                            ));
+                        }
+                        let chunk_acks = cache_and_emit_amend_receipts(
+                            context,
+                            &chunk_receipts,
+                            &chunk_requests,
+                            CommandTransport::Rest,
+                        )
+                        .await;
+                        for ((index, _), ack) in chunk.iter().zip(chunk_acks) {
+                            acks[*index] = Some(ack);
+                        }
+                    }
+                }
+            }
+            #[cfg(feature = "bybit")]
+            AdapterHandle::Bybit(_) => {
+                let indexed = request.orders.iter().enumerate().collect::<Vec<_>>();
+                for chunk in indexed.chunks(20) {
+                    context.command_limiter.acquire().await;
+                    let chunk_requests = chunk
+                        .iter()
+                        .map(|(_, order)| {
+                            hydrate_amend_request_with_batch_id(
+                                (*order).clone(),
+                                request.request_id.clone(),
+                            )
+                        })
+                        .collect::<Vec<_>>();
+                    let batch = chunk_requests
+                        .iter()
+                        .map(|order| build_bybit_batch_amend_object(context, order))
+                        .collect::<Result<Vec<_>>>()?;
+                    let batch_body = json!({
+                        "category": "linear",
+                        "request": batch,
+                    });
+                    let body = serde_json::to_string(&batch_body).map_err(|error| {
+                        MarketError::new(
+                            ErrorKind::ConfigError,
+                            format!("failed to serialize bybit batch amend body: {error}"),
+                        )
+                    })?;
+                    let identities = chunk_requests
+                        .iter()
+                        .map(|order| BatchIdentity {
+                            instrument_id: Some(order.instrument_id.clone()),
+                            order_id: order.order_id.clone(),
+                            client_order_id: order.client_order_id.clone(),
+                            request_id: order.request_id.clone(),
+                        })
+                        .collect::<Vec<_>>();
+                    let (chunk_receipts, transport) =
+                        if context.adapter.capabilities().native.ws_order_entry {
+                            match bybit_trade_ws_request_text(
+                                context,
+                                "order.amend-batch",
+                                vec![batch_body.clone()],
+                                "bybit.amend_orders_ws",
+                            )
+                            .await
+                            {
+                                Ok(payload) => (
+                                    classify_bybit_batch_payload(
+                                        context,
+                                        CommandOperation::AmendOrder,
+                                        &payload,
+                                        &identities,
+                                    )?,
+                                    CommandTransport::WebSocket,
+                                ),
+                                Err(CommandWsRequestError::Uncertain(_)) => (
+                                    chunk_requests
+                                        .iter()
+                                        .map(|order| {
+                                            unknown_command_receipt(
+                                                context,
+                                                CommandOperation::AmendOrder,
+                                                Some(order.instrument_id.clone()),
+                                                order.order_id.clone(),
+                                                order.client_order_id.clone(),
+                                                order.request_id.clone(),
+                                            )
+                                        })
+                                        .collect(),
+                                    CommandTransport::WebSocket,
+                                ),
+                                Err(CommandWsRequestError::Unavailable(_)) => {
+                                    match bybit_signed_post_text(
+                                        context,
+                                        "/v5/order/amend-batch",
+                                        &body,
+                                        "bybit.amend_orders",
+                                    )
+                                    .await
+                                    {
+                                        Ok(payload) => (
+                                            classify_bybit_batch_payload(
+                                                context,
+                                                CommandOperation::AmendOrder,
+                                                &payload,
+                                                &identities,
+                                            )?,
+                                            CommandTransport::Rest,
+                                        ),
+                                        Err(error) if is_uncertain_command_error(&error) => (
+                                            chunk_requests
+                                                .iter()
+                                                .map(|order| {
+                                                    unknown_command_receipt(
+                                                        context,
+                                                        CommandOperation::AmendOrder,
+                                                        Some(order.instrument_id.clone()),
+                                                        order.order_id.clone(),
+                                                        order.client_order_id.clone(),
+                                                        order.request_id.clone(),
+                                                    )
+                                                })
+                                                .collect(),
+                                            CommandTransport::Rest,
+                                        ),
+                                        Err(error) => return Err(error),
+                                    }
+                                }
+                            }
+                        } else {
+                            match bybit_signed_post_text(
+                                context,
+                                "/v5/order/amend-batch",
+                                &body,
+                                "bybit.amend_orders",
+                            )
+                            .await
+                            {
+                                Ok(payload) => (
+                                    classify_bybit_batch_payload(
+                                        context,
+                                        CommandOperation::AmendOrder,
+                                        &payload,
+                                        &identities,
+                                    )?,
+                                    CommandTransport::Rest,
+                                ),
+                                Err(error) if is_uncertain_command_error(&error) => (
+                                    chunk_requests
+                                        .iter()
+                                        .map(|order| {
+                                            unknown_command_receipt(
+                                                context,
+                                                CommandOperation::AmendOrder,
+                                                Some(order.instrument_id.clone()),
+                                                order.order_id.clone(),
+                                                order.client_order_id.clone(),
+                                                order.request_id.clone(),
+                                            )
+                                        })
+                                        .collect(),
+                                    CommandTransport::Rest,
+                                ),
+                                Err(error) => return Err(error),
+                            }
+                        };
+                    if chunk_receipts.len() != chunk.len() {
+                        return Err(MarketError::new(
+                            ErrorKind::DecodeError,
+                            format!(
+                                "bybit batch amend returned {} receipts for {} requests",
+                                chunk_receipts.len(),
+                                chunk.len()
+                            ),
+                        ));
+                    }
+                    let chunk_acks = cache_and_emit_amend_receipts(
+                        context,
+                        &chunk_receipts,
+                        &chunk_requests,
+                        transport,
+                    )
+                    .await;
+                    for ((index, _), ack) in chunk.iter().zip(chunk_acks) {
+                        acks[*index] = Some(ack);
+                    }
+                }
+            }
+        }
+
+        collect_batch_acks(acks, "amend_orders")
+    }
+    .await;
+    record_runtime_latency(context, RuntimeOperation::AmendOrders, started_at);
+    result
+}
+
 pub(crate) async fn cancel_order(
     context: &LiveContext,
     request: &CancelOrderRequest,
-) -> Result<CommandReceipt> {
+) -> Result<CommandAck> {
     let started_at = Instant::now();
     let result = async {
         let spec = require_spec(context, &request.instrument_id)?;
         context.command_limiter.acquire().await;
-        let receipt = match &context.adapter {
+        let (receipt, transport) = match &context.adapter {
             #[cfg(feature = "binance")]
             AdapterHandle::Binance(adapter) => {
-                let query = order_identity_query(
-                    &spec.native_symbol,
-                    request.order_id.as_ref(),
-                    request.client_order_id.as_ref(),
-                )?;
-                let pairs = query
-                    .iter()
-                    .map(|(key, value)| (key.as_str(), value.as_str()))
-                    .collect::<Vec<_>>();
-                match binance_signed_request_text(
-                    context,
-                    Method::DELETE,
-                    "/fapi/v1/order",
-                    &pairs,
-                    "binance.cancel_order",
-                )
-                .await
-                {
-                    Ok(payload) => adapter.classify_command(
-                        CommandOperation::CancelOrder,
-                        Some(&payload),
-                        request.request_id.clone(),
-                    )?,
-                    Err(error) if is_uncertain_command_error(&error) => adapter.classify_command(
-                        CommandOperation::CancelOrder,
-                        None,
-                        request.request_id.clone(),
-                    )?,
-                    Err(error) => return Err(error),
+                if is_binance_algo_order_id(request.order_id.as_ref()) {
+                    let pairs = binance_algo_identity_query(
+                        request.order_id.as_ref(),
+                        request.client_order_id.as_ref(),
+                    )?;
+                    let pairs = pairs
+                        .iter()
+                        .map(|(key, value)| (key.as_str(), value.as_str()))
+                        .collect::<Vec<_>>();
+                    match binance_signed_request_text(
+                        context,
+                        Method::DELETE,
+                        "/fapi/v1/algoOrder",
+                        &pairs,
+                        "binance.cancel_algo_order",
+                    )
+                    .await
+                    {
+                        Ok(payload) => (
+                            adapter.classify_command(
+                                CommandOperation::CancelOrder,
+                                Some(&payload),
+                                request.request_id.clone(),
+                            )?,
+                            CommandTransport::Rest,
+                        ),
+                        Err(error) if is_uncertain_command_error(&error) => (
+                            adapter.classify_command(
+                                CommandOperation::CancelOrder,
+                                None,
+                                request.request_id.clone(),
+                            )?,
+                            CommandTransport::Rest,
+                        ),
+                        Err(error) => return Err(error),
+                    }
+                } else {
+                    let query = order_identity_query(
+                        &spec.native_symbol,
+                        request.order_id.as_ref(),
+                        request.client_order_id.as_ref(),
+                    )?;
+                    if context.adapter.capabilities().native.ws_order_entry {
+                        match binance_signed_ws_request_text(
+                            context,
+                            "order.cancel",
+                            query.clone(),
+                            "binance.cancel_order_ws",
+                        )
+                        .await
+                        {
+                            Ok(payload) => (
+                                adapter.classify_command(
+                                    CommandOperation::CancelOrder,
+                                    Some(&payload),
+                                    request.request_id.clone(),
+                                )?,
+                                CommandTransport::WebSocket,
+                            ),
+                            Err(CommandWsRequestError::Uncertain(_)) => (
+                                adapter.classify_command(
+                                    CommandOperation::CancelOrder,
+                                    None,
+                                    request.request_id.clone(),
+                                )?,
+                                CommandTransport::WebSocket,
+                            ),
+                            Err(CommandWsRequestError::Unavailable(_)) => {
+                                let pairs = query
+                                    .iter()
+                                    .map(|(key, value)| (key.as_str(), value.as_str()))
+                                    .collect::<Vec<_>>();
+                                match binance_signed_request_text(
+                                    context,
+                                    Method::DELETE,
+                                    "/fapi/v1/order",
+                                    &pairs,
+                                    "binance.cancel_order",
+                                )
+                                .await
+                                {
+                                    Ok(payload) => (
+                                        adapter.classify_command(
+                                            CommandOperation::CancelOrder,
+                                            Some(&payload),
+                                            request.request_id.clone(),
+                                        )?,
+                                        CommandTransport::Rest,
+                                    ),
+                                    Err(error) if is_uncertain_command_error(&error) => (
+                                        adapter.classify_command(
+                                            CommandOperation::CancelOrder,
+                                            None,
+                                            request.request_id.clone(),
+                                        )?,
+                                        CommandTransport::Rest,
+                                    ),
+                                    Err(error) => return Err(error),
+                                }
+                            }
+                        }
+                    } else {
+                        let pairs = query
+                            .iter()
+                            .map(|(key, value)| (key.as_str(), value.as_str()))
+                            .collect::<Vec<_>>();
+                        match binance_signed_request_text(
+                            context,
+                            Method::DELETE,
+                            "/fapi/v1/order",
+                            &pairs,
+                            "binance.cancel_order",
+                        )
+                        .await
+                        {
+                            Ok(payload) => (
+                                adapter.classify_command(
+                                    CommandOperation::CancelOrder,
+                                    Some(&payload),
+                                    request.request_id.clone(),
+                                )?,
+                                CommandTransport::Rest,
+                            ),
+                            Err(error) if is_uncertain_command_error(&error) => (
+                                adapter.classify_command(
+                                    CommandOperation::CancelOrder,
+                                    None,
+                                    request.request_id.clone(),
+                                )?,
+                                CommandTransport::Rest,
+                            ),
+                            Err(error) => return Err(error),
+                        }
+                    }
                 }
             }
             #[cfg(feature = "bybit")]
@@ -756,36 +2025,105 @@ pub(crate) async fn cancel_order(
                     ("category".to_owned(), "linear".to_owned()),
                     ("symbol".to_owned(), spec.native_symbol.to_string()),
                 ];
-                append_order_identity(
+                append_bybit_order_identity(
                     &mut body,
                     request.order_id.as_ref(),
                     request.client_order_id.as_ref(),
                 )?;
-                let body = serde_json::to_string(&body_to_object(body)).map_err(|error| {
-                    MarketError::new(
-                        ErrorKind::ConfigError,
-                        format!("failed to serialize bybit cancel order body: {error}"),
+                let body = body_to_object(body);
+                if context.adapter.capabilities().native.ws_order_entry {
+                    match bybit_trade_ws_request_text(
+                        context,
+                        "order.cancel",
+                        vec![Value::Object(body.clone())],
+                        "bybit.cancel_order_ws",
                     )
-                })?;
-                match bybit_signed_post_text(
-                    context,
-                    "/v5/order/cancel",
-                    &body,
-                    "bybit.cancel_order",
-                )
-                .await
-                {
-                    Ok(payload) => adapter.classify_command(
-                        CommandOperation::CancelOrder,
-                        Some(&payload),
-                        request.request_id.clone(),
-                    )?,
-                    Err(error) if is_uncertain_command_error(&error) => adapter.classify_command(
-                        CommandOperation::CancelOrder,
-                        None,
-                        request.request_id.clone(),
-                    )?,
-                    Err(error) => return Err(error),
+                    .await
+                    {
+                        Ok(payload) => (
+                            adapter.classify_command(
+                                CommandOperation::CancelOrder,
+                                Some(&payload),
+                                request.request_id.clone(),
+                            )?,
+                            CommandTransport::WebSocket,
+                        ),
+                        Err(CommandWsRequestError::Uncertain(_)) => (
+                            adapter.classify_command(
+                                CommandOperation::CancelOrder,
+                                None,
+                                request.request_id.clone(),
+                            )?,
+                            CommandTransport::WebSocket,
+                        ),
+                        Err(CommandWsRequestError::Unavailable(_)) => {
+                            let body = serde_json::to_string(&body).map_err(|error| {
+                                MarketError::new(
+                                    ErrorKind::ConfigError,
+                                    format!("failed to serialize bybit cancel order body: {error}"),
+                                )
+                            })?;
+                            match bybit_signed_post_text(
+                                context,
+                                "/v5/order/cancel",
+                                &body,
+                                "bybit.cancel_order",
+                            )
+                            .await
+                            {
+                                Ok(payload) => (
+                                    adapter.classify_command(
+                                        CommandOperation::CancelOrder,
+                                        Some(&payload),
+                                        request.request_id.clone(),
+                                    )?,
+                                    CommandTransport::Rest,
+                                ),
+                                Err(error) if is_uncertain_command_error(&error) => (
+                                    adapter.classify_command(
+                                        CommandOperation::CancelOrder,
+                                        None,
+                                        request.request_id.clone(),
+                                    )?,
+                                    CommandTransport::Rest,
+                                ),
+                                Err(error) => return Err(error),
+                            }
+                        }
+                    }
+                } else {
+                    let body = serde_json::to_string(&body).map_err(|error| {
+                        MarketError::new(
+                            ErrorKind::ConfigError,
+                            format!("failed to serialize bybit cancel order body: {error}"),
+                        )
+                    })?;
+                    match bybit_signed_post_text(
+                        context,
+                        "/v5/order/cancel",
+                        &body,
+                        "bybit.cancel_order",
+                    )
+                    .await
+                    {
+                        Ok(payload) => (
+                            adapter.classify_command(
+                                CommandOperation::CancelOrder,
+                                Some(&payload),
+                                request.request_id.clone(),
+                            )?,
+                            CommandTransport::Rest,
+                        ),
+                        Err(error) if is_uncertain_command_error(&error) => (
+                            adapter.classify_command(
+                                CommandOperation::CancelOrder,
+                                None,
+                                request.request_id.clone(),
+                            )?,
+                            CommandTransport::Rest,
+                        ),
+                        Err(error) => return Err(error),
+                    }
                 }
             }
         };
@@ -803,11 +2141,806 @@ pub(crate) async fn cancel_order(
                 })
                 .await;
         }
-        apply_command_receipt(context, receipt.clone()).await;
-        Ok(receipt)
+        let ack = apply_command_receipt(context, receipt.clone(), transport).await;
+        Ok(ack)
     }
     .await;
     record_runtime_latency(context, RuntimeOperation::CancelOrder, started_at);
+    result
+}
+
+pub(crate) async fn cancel_orders(
+    context: &LiveContext,
+    request: &CancelOrdersRequest,
+) -> Result<Vec<CommandAck>> {
+    let started_at = Instant::now();
+    let result = async {
+        validate_cancel_orders(request)?;
+        if request.orders.len() == 1 {
+            let target = &request.orders[0];
+            return Ok(vec![cancel_order(
+                context,
+                &CancelOrderRequest {
+                    request_id: request.request_id.clone(),
+                    instrument_id: target.instrument_id.clone(),
+                    order_id: target.order_id.clone(),
+                    client_order_id: target.client_order_id.clone(),
+                },
+            )
+            .await?]);
+        }
+
+        let mut acks = vec![None; request.orders.len()];
+        match &context.adapter {
+            #[cfg(feature = "binance")]
+            AdapterHandle::Binance(adapter) => {
+                let indexed = request.orders.iter().enumerate().collect::<Vec<_>>();
+                if context.adapter.capabilities().native.ws_order_entry {
+                    for chunk in indexed.chunks(10) {
+                        let chunk_requests = chunk
+                            .iter()
+                            .map(|(_, target)| CancelOrderRequest {
+                                request_id: request.request_id.clone(),
+                                instrument_id: target.instrument_id.clone(),
+                                order_id: target.order_id.clone(),
+                                client_order_id: target.client_order_id.clone(),
+                            })
+                            .collect::<Vec<_>>();
+                        let chunk_acks =
+                            try_join_all(chunk_requests.iter().map(|order| cancel_order(context, order)))
+                                .await?;
+                        for ((index, _), ack) in chunk.iter().zip(chunk_acks) {
+                            acks[*index] = Some(ack);
+                        }
+                    }
+                } else {
+                    let mut order_id_groups =
+                        BTreeMap::<InstrumentId, Vec<(usize, &OrderTarget)>>::new();
+                    let mut client_id_groups =
+                        BTreeMap::<InstrumentId, Vec<(usize, &OrderTarget)>>::new();
+                    for (index, target) in indexed {
+                        match (&target.order_id, &target.client_order_id) {
+                            (Some(_), _) => order_id_groups
+                                .entry(target.instrument_id.clone())
+                                .or_default()
+                                .push((index, target)),
+                            (None, Some(_)) => client_id_groups
+                                .entry(target.instrument_id.clone())
+                                .or_default()
+                                .push((index, target)),
+                            (None, None) => {}
+                        }
+                    }
+
+                    for groups in [&order_id_groups, &client_id_groups] {
+                        for (instrument_id, targets) in groups {
+                            let spec = require_spec(context, instrument_id)?;
+                            for chunk in targets.chunks(10) {
+                                context.command_limiter.acquire().await;
+                                let mut owned =
+                                    vec![("symbol".to_owned(), spec.native_symbol.to_string())];
+                                if chunk[0].1.order_id.is_some() {
+                                    owned.push((
+                                        "orderIdList".to_owned(),
+                                        format!(
+                                            "[{}]",
+                                            chunk
+                                                .iter()
+                                                .filter_map(|(_, target)| {
+                                                    target.order_id.as_ref().map(ToString::to_string)
+                                                })
+                                                .collect::<Vec<_>>()
+                                                .join(",")
+                                        ),
+                                    ));
+                                } else {
+                                    owned.push((
+                                        "origClientOrderIdList".to_owned(),
+                                        serde_json::to_string(
+                                            &chunk
+                                                .iter()
+                                                .filter_map(|(_, target)| {
+                                                    target.client_order_id.as_ref().map(ToString::to_string)
+                                                })
+                                                .collect::<Vec<_>>(),
+                                        )
+                                        .map_err(|error| {
+                                            MarketError::new(
+                                                ErrorKind::ConfigError,
+                                                format!(
+                                                    "failed to serialize binance cancel batch client ids: {error}"
+                                                ),
+                                            )
+                                        })?,
+                                    ));
+                                }
+                                let pairs = owned
+                                    .iter()
+                                    .map(|(key, value)| (key.as_str(), value.as_str()))
+                                    .collect::<Vec<_>>();
+                                let chunk_receipts = match binance_signed_request_text(
+                                    context,
+                                    Method::DELETE,
+                                    "/fapi/v1/batchOrders",
+                                    &pairs,
+                                    "binance.cancel_orders",
+                                )
+                                .await
+                                {
+                                    Ok(payload) => classify_binance_batch_payload(
+                                        adapter,
+                                        CommandOperation::CancelOrder,
+                                        &payload,
+                                        &vec![None; chunk.len()],
+                                    )?,
+                                    Err(error) if is_uncertain_command_error(&error) => chunk
+                                        .iter()
+                                        .map(|(_, target)| {
+                                            unknown_command_receipt(
+                                                context,
+                                                CommandOperation::CancelOrder,
+                                                Some(target.instrument_id.clone()),
+                                                target.order_id.clone(),
+                                                target.client_order_id.clone(),
+                                                None,
+                                            )
+                                        })
+                                        .collect(),
+                                    Err(error) => return Err(error),
+                                };
+                                if chunk_receipts.len() != chunk.len() {
+                                    return Err(MarketError::new(
+                                        ErrorKind::DecodeError,
+                                        format!(
+                                            "binance batch cancel returned {} receipts for {} requests",
+                                            chunk_receipts.len(),
+                                            chunk.len()
+                                        ),
+                                    ));
+                                }
+                                let chunk_targets = chunk
+                                    .iter()
+                                    .map(|(_, target)| (*target).clone())
+                                    .collect::<Vec<_>>();
+                                let chunk_acks = cache_and_emit_cancel_receipts(
+                                    context,
+                                    &chunk_receipts,
+                                    &chunk_targets,
+                                    CommandTransport::Rest,
+                                )
+                                .await;
+                                for ((index, _), ack) in chunk.iter().zip(chunk_acks) {
+                                    acks[*index] = Some(ack);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            #[cfg(feature = "bybit")]
+            AdapterHandle::Bybit(_) => {
+                let indexed = request.orders.iter().enumerate().collect::<Vec<_>>();
+                for chunk in indexed.chunks(20) {
+                    context.command_limiter.acquire().await;
+                    let chunk_targets = chunk
+                        .iter()
+                        .map(|(_, target)| (*target).clone())
+                        .collect::<Vec<_>>();
+                    let batch = chunk_targets
+                        .iter()
+                        .map(|target| build_bybit_batch_cancel_object(context, target))
+                        .collect::<Result<Vec<_>>>()?;
+                    let batch_body = json!({
+                        "category": "linear",
+                        "request": batch,
+                    });
+                    let body = serde_json::to_string(&batch_body)
+                    .map_err(|error| {
+                        MarketError::new(
+                            ErrorKind::ConfigError,
+                            format!("failed to serialize bybit batch cancel body: {error}"),
+                        )
+                    })?;
+                    let identities = chunk_targets
+                        .iter()
+                        .map(|target| BatchIdentity {
+                            instrument_id: Some(target.instrument_id.clone()),
+                            order_id: target.order_id.clone(),
+                            client_order_id: target.client_order_id.clone(),
+                            request_id: None,
+                        })
+                        .collect::<Vec<_>>();
+                    let (chunk_receipts, transport) = if context
+                        .adapter
+                        .capabilities()
+                        .native
+                        .ws_order_entry
+                    {
+                        match bybit_trade_ws_request_text(
+                            context,
+                            "order.cancel-batch",
+                            vec![batch_body.clone()],
+                            "bybit.cancel_orders_ws",
+                        )
+                        .await
+                        {
+                            Ok(payload) => (
+                                classify_bybit_batch_payload(
+                                    context,
+                                    CommandOperation::CancelOrder,
+                                    &payload,
+                                    &identities,
+                                )?,
+                                CommandTransport::WebSocket,
+                            ),
+                            Err(CommandWsRequestError::Uncertain(_)) => (
+                                chunk_targets
+                                    .iter()
+                                    .map(|target| {
+                                        unknown_command_receipt(
+                                            context,
+                                            CommandOperation::CancelOrder,
+                                            Some(target.instrument_id.clone()),
+                                            target.order_id.clone(),
+                                            target.client_order_id.clone(),
+                                            None,
+                                        )
+                                    })
+                                    .collect(),
+                                CommandTransport::WebSocket,
+                            ),
+                            Err(CommandWsRequestError::Unavailable(_)) => {
+                                match bybit_signed_post_text(
+                                    context,
+                                    "/v5/order/cancel-batch",
+                                    &body,
+                                    "bybit.cancel_orders",
+                                )
+                                .await
+                                {
+                                    Ok(payload) => (
+                                        classify_bybit_batch_payload(
+                                            context,
+                                            CommandOperation::CancelOrder,
+                                            &payload,
+                                            &identities,
+                                        )?,
+                                        CommandTransport::Rest,
+                                    ),
+                                    Err(error) if is_uncertain_command_error(&error) => (
+                                        chunk_targets
+                                            .iter()
+                                            .map(|target| {
+                                                unknown_command_receipt(
+                                                    context,
+                                                    CommandOperation::CancelOrder,
+                                                    Some(target.instrument_id.clone()),
+                                                    target.order_id.clone(),
+                                                    target.client_order_id.clone(),
+                                                    None,
+                                                )
+                                            })
+                                            .collect(),
+                                        CommandTransport::Rest,
+                                    ),
+                                    Err(error) => return Err(error),
+                                }
+                            }
+                        }
+                    } else {
+                        match bybit_signed_post_text(
+                            context,
+                            "/v5/order/cancel-batch",
+                            &body,
+                            "bybit.cancel_orders",
+                        )
+                        .await
+                        {
+                            Ok(payload) => (
+                                classify_bybit_batch_payload(
+                                    context,
+                                    CommandOperation::CancelOrder,
+                                    &payload,
+                                    &identities,
+                                )?,
+                                CommandTransport::Rest,
+                            ),
+                            Err(error) if is_uncertain_command_error(&error) => (
+                                chunk_targets
+                                    .iter()
+                                    .map(|target| {
+                                        unknown_command_receipt(
+                                            context,
+                                            CommandOperation::CancelOrder,
+                                            Some(target.instrument_id.clone()),
+                                            target.order_id.clone(),
+                                            target.client_order_id.clone(),
+                                            None,
+                                        )
+                                    })
+                                    .collect(),
+                                CommandTransport::Rest,
+                            ),
+                            Err(error) => return Err(error),
+                        }
+                    };
+                    if chunk_receipts.len() != chunk.len() {
+                        return Err(MarketError::new(
+                            ErrorKind::DecodeError,
+                            format!(
+                                "bybit batch cancel returned {} receipts for {} requests",
+                                chunk_receipts.len(),
+                                chunk.len()
+                            ),
+                        ));
+                    }
+                    let chunk_acks =
+                        cache_and_emit_cancel_receipts(context, &chunk_receipts, &chunk_targets, transport)
+                            .await;
+                    for ((index, _), ack) in chunk.iter().zip(chunk_acks) {
+                        acks[*index] = Some(ack);
+                    }
+                }
+            }
+        }
+
+        collect_batch_acks(acks, "cancel_orders")
+    }
+    .await;
+    record_runtime_latency(context, RuntimeOperation::CancelOrders, started_at);
+    result
+}
+
+pub(crate) async fn cancel_all_orders(
+    context: &LiveContext,
+    request: &CancelAllOrdersRequest,
+) -> Result<CommandReceipt> {
+    let started_at = Instant::now();
+    let result = async {
+        context.command_limiter.acquire().await;
+        let receipt = match (&context.adapter, &request.instrument_id) {
+            #[cfg(feature = "binance")]
+            (AdapterHandle::Binance(adapter), Some(instrument_id)) => {
+                let spec = require_spec(context, instrument_id)?;
+                let pairs = [("symbol", spec.native_symbol.as_ref())];
+                let payload = binance_signed_request_text(
+                    context,
+                    Method::DELETE,
+                    "/fapi/v1/allOpenOrders",
+                    &pairs,
+                    "binance.cancel_all_orders",
+                )
+                .await?;
+                let _ = binance_signed_request_text(
+                    context,
+                    Method::DELETE,
+                    "/fapi/v1/algoOpenOrders",
+                    &pairs,
+                    "binance.cancel_all_algo_orders",
+                )
+                .await?;
+                adapter.classify_command(
+                    CommandOperation::CancelAllOrders,
+                    Some(&payload),
+                    request.request_id.clone(),
+                )?
+            }
+            #[cfg(feature = "binance")]
+            (AdapterHandle::Binance(_), None) => {
+                let instruments = context.shared.read(|state| {
+                    state
+                        .open_orders()
+                        .into_iter()
+                        .map(|order| order.instrument_id)
+                        .collect::<std::collections::BTreeSet<_>>()
+                });
+                for instrument_id in instruments {
+                    let spec = require_spec(context, &instrument_id)?;
+                    let pairs = [("symbol", spec.native_symbol.as_ref())];
+                    let _ = binance_signed_request_text(
+                        context,
+                        Method::DELETE,
+                        "/fapi/v1/allOpenOrders",
+                        &pairs,
+                        "binance.cancel_all_orders",
+                    )
+                    .await?;
+                    let _ = binance_signed_request_text(
+                        context,
+                        Method::DELETE,
+                        "/fapi/v1/algoOpenOrders",
+                        &pairs,
+                        "binance.cancel_all_algo_orders",
+                    )
+                    .await?;
+                }
+                CommandReceipt {
+                    operation: CommandOperation::CancelAllOrders,
+                    status: CommandStatus::Accepted,
+                    venue: context.config.venue,
+                    product: context.config.product,
+                    instrument_id: None,
+                    order_id: None,
+                    client_order_id: None,
+                    request_id: request.request_id.clone(),
+                    message: Some("accepted".into()),
+                    native_code: None,
+                    retriable: false,
+                }
+            }
+            #[cfg(feature = "bybit")]
+            (AdapterHandle::Bybit(adapter), Some(instrument_id)) => {
+                let spec = require_spec(context, instrument_id)?;
+                let body = serde_json::to_string(&json!({
+                    "category": "linear",
+                    "symbol": spec.native_symbol,
+                }))
+                .map_err(|error| {
+                    MarketError::new(
+                        ErrorKind::ConfigError,
+                        format!("failed to serialize bybit cancel-all body: {error}"),
+                    )
+                })?;
+                let payload = bybit_signed_post_text(
+                    context,
+                    "/v5/order/cancel-all",
+                    &body,
+                    "bybit.cancel_all_orders",
+                )
+                .await?;
+                adapter.classify_command(
+                    CommandOperation::CancelAllOrders,
+                    Some(&payload),
+                    request.request_id.clone(),
+                )?
+            }
+            #[cfg(feature = "bybit")]
+            (AdapterHandle::Bybit(adapter), None) => {
+                let body = serde_json::to_string(&json!({
+                    "category": "linear",
+                    "coin": "USDT",
+                }))
+                .map_err(|error| {
+                    MarketError::new(
+                        ErrorKind::ConfigError,
+                        format!("failed to serialize bybit cancel-all body: {error}"),
+                    )
+                })?;
+                let payload = bybit_signed_post_text(
+                    context,
+                    "/v5/order/cancel-all",
+                    &body,
+                    "bybit.cancel_all_orders",
+                )
+                .await?;
+                adapter.classify_command(
+                    CommandOperation::CancelAllOrders,
+                    Some(&payload),
+                    request.request_id.clone(),
+                )?
+            }
+        };
+
+        apply_command_receipt(context, receipt.clone(), CommandTransport::Rest).await;
+        Ok(receipt)
+    }
+    .await;
+    record_runtime_latency(context, RuntimeOperation::CancelAllOrders, started_at);
+    result
+}
+
+pub(crate) async fn close_position(
+    context: &LiveContext,
+    request: &ClosePositionRequest,
+) -> Result<CommandAck> {
+    let position = context
+        .shared
+        .read(|state| {
+            state
+                .positions()
+                .into_iter()
+                .find(|position| position.instrument_id == request.instrument_id)
+        })
+        .ok_or_else(|| {
+            MarketError::new(
+                ErrorKind::ConfigError,
+                format!("no cached position found for {}", request.instrument_id),
+            )
+        })?;
+    let position_size = position.size;
+    if position_size.value().is_zero() {
+        return Err(MarketError::new(
+            ErrorKind::ConfigError,
+            format!("position {} is already flat", request.instrument_id),
+        ));
+    }
+    let quantity = request.quantity.unwrap_or(position_size);
+    if quantity.value() > position_size.value() {
+        return Err(MarketError::new(
+            ErrorKind::ConfigError,
+            "close_position quantity exceeds current position size",
+        ));
+    }
+
+    let derived_request = CreateOrderRequest {
+        request_id: request.request_id.clone(),
+        instrument_id: request.instrument_id.clone(),
+        client_order_id: request.client_order_id.clone(),
+        side: match position.direction {
+            bat_markets_core::PositionDirection::Long => bat_markets_core::Side::Sell,
+            bat_markets_core::PositionDirection::Short => bat_markets_core::Side::Buy,
+            bat_markets_core::PositionDirection::Flat => {
+                return Err(MarketError::new(
+                    ErrorKind::ConfigError,
+                    format!("position {} is already flat", request.instrument_id),
+                ));
+            }
+        },
+        order_type: if request.price.is_some() {
+            bat_markets_core::OrderType::Limit
+        } else {
+            bat_markets_core::OrderType::Market
+        },
+        time_in_force: request.time_in_force,
+        quantity,
+        price: request.price,
+        trigger_price: None,
+        trigger_type: None,
+        reduce_only: true,
+        post_only: request.post_only,
+    };
+
+    let started_at = Instant::now();
+    let result = async {
+        validate_create_order(context, &derived_request)?;
+        context.command_limiter.acquire().await;
+        let (receipt, transport) = match &context.adapter {
+            #[cfg(feature = "binance")]
+            AdapterHandle::Binance(adapter) => {
+                let spec = require_spec(context, &derived_request.instrument_id)?;
+                let mut owned = vec![
+                    ("symbol".to_owned(), spec.native_symbol.to_string()),
+                    ("side".to_owned(), binance_side(derived_request.side).to_owned()),
+                    (
+                        "type".to_owned(),
+                        binance_order_type(derived_request.order_type).to_owned(),
+                    ),
+                    ("quantity".to_owned(), format_quantity(derived_request.quantity)),
+                ];
+                if let Some(client_order_id) = &derived_request.client_order_id {
+                    owned.push(("newClientOrderId".to_owned(), client_order_id.to_string()));
+                }
+                if let Some(price) = derived_request.price {
+                    owned.push(("price".to_owned(), format_price(price)));
+                }
+                if let Some(time_in_force) = derived_request.time_in_force {
+                    owned.push((
+                        "timeInForce".to_owned(),
+                        binance_time_in_force(time_in_force, derived_request.post_only).to_owned(),
+                    ));
+                }
+                owned.push(("reduceOnly".to_owned(), "true".to_owned()));
+                if context.adapter.capabilities().native.ws_order_entry {
+                    match binance_signed_ws_request_text(
+                        context,
+                        "order.place",
+                        owned.clone(),
+                        "binance.close_position_ws",
+                    )
+                    .await
+                    {
+                        Ok(payload) => (
+                            adapter.classify_command(
+                                CommandOperation::ClosePosition,
+                                Some(&payload),
+                                derived_request.request_id.clone(),
+                            )?,
+                            CommandTransport::WebSocket,
+                        ),
+                        Err(CommandWsRequestError::Uncertain(_)) => (
+                            adapter.classify_command(
+                                CommandOperation::ClosePosition,
+                                None,
+                                derived_request.request_id.clone(),
+                            )?,
+                            CommandTransport::WebSocket,
+                        ),
+                        Err(CommandWsRequestError::Unavailable(_)) => {
+                            let pairs = owned
+                                .iter()
+                                .map(|(key, value)| (key.as_str(), value.as_str()))
+                                .collect::<Vec<_>>();
+                            match binance_signed_request_text(
+                                context,
+                                Method::POST,
+                                "/fapi/v1/order",
+                                &pairs,
+                                "binance.close_position",
+                            )
+                            .await
+                            {
+                                Ok(payload) => (
+                                    adapter.classify_command(
+                                        CommandOperation::ClosePosition,
+                                        Some(&payload),
+                                        derived_request.request_id.clone(),
+                                    )?,
+                                    CommandTransport::Rest,
+                                ),
+                                Err(error) if is_uncertain_command_error(&error) => (
+                                    adapter.classify_command(
+                                        CommandOperation::ClosePosition,
+                                        None,
+                                        derived_request.request_id.clone(),
+                                    )?,
+                                    CommandTransport::Rest,
+                                ),
+                                Err(error) => return Err(error),
+                            }
+                        }
+                    }
+                } else {
+                    let pairs = owned
+                        .iter()
+                        .map(|(key, value)| (key.as_str(), value.as_str()))
+                        .collect::<Vec<_>>();
+                    match binance_signed_request_text(
+                        context,
+                        Method::POST,
+                        "/fapi/v1/order",
+                        &pairs,
+                        "binance.close_position",
+                    )
+                    .await
+                    {
+                        Ok(payload) => (
+                            adapter.classify_command(
+                                CommandOperation::ClosePosition,
+                                Some(&payload),
+                                derived_request.request_id.clone(),
+                            )?,
+                            CommandTransport::Rest,
+                        ),
+                        Err(error) if is_uncertain_command_error(&error) => (
+                            adapter.classify_command(
+                                CommandOperation::ClosePosition,
+                                None,
+                                derived_request.request_id.clone(),
+                            )?,
+                            CommandTransport::Rest,
+                        ),
+                        Err(error) => return Err(error),
+                    }
+                }
+            }
+            #[cfg(feature = "bybit")]
+            AdapterHandle::Bybit(adapter) => {
+                let spec = require_spec(context, &derived_request.instrument_id)?;
+                let body = json!({
+                    "category": "linear",
+                    "symbol": spec.native_symbol,
+                    "side": bybit_side(derived_request.side),
+                    "orderType": bybit_order_type(derived_request.order_type),
+                    "qty": format_quantity(derived_request.quantity),
+                    "price": derived_request.price.map(format_price),
+                    "timeInForce": derived_request.time_in_force.map(|value| bybit_time_in_force(value, derived_request.post_only)),
+                    "orderLinkId": derived_request.client_order_id.as_ref().map(ToString::to_string),
+                    "reduceOnly": true,
+                });
+                if context.adapter.capabilities().native.ws_order_entry {
+                    match bybit_trade_ws_request_text(
+                        context,
+                        "order.create",
+                        vec![body.clone()],
+                        "bybit.close_position_ws",
+                    )
+                    .await
+                    {
+                        Ok(payload) => (
+                            adapter.classify_command(
+                                CommandOperation::ClosePosition,
+                                Some(&payload),
+                                derived_request.request_id.clone(),
+                            )?,
+                            CommandTransport::WebSocket,
+                        ),
+                        Err(CommandWsRequestError::Uncertain(_)) => (
+                            adapter.classify_command(
+                                CommandOperation::ClosePosition,
+                                None,
+                                derived_request.request_id.clone(),
+                            )?,
+                            CommandTransport::WebSocket,
+                        ),
+                        Err(CommandWsRequestError::Unavailable(_)) => {
+                            let body = serde_json::to_string(&body).map_err(|error| {
+                                MarketError::new(
+                                    ErrorKind::ConfigError,
+                                    format!("failed to serialize bybit close-position body: {error}"),
+                                )
+                            })?;
+                            match bybit_signed_post_text(
+                                context,
+                                "/v5/order/create",
+                                &body,
+                                "bybit.close_position",
+                            )
+                            .await
+                            {
+                                Ok(payload) => (
+                                    adapter.classify_command(
+                                        CommandOperation::ClosePosition,
+                                        Some(&payload),
+                                        derived_request.request_id.clone(),
+                                    )?,
+                                    CommandTransport::Rest,
+                                ),
+                                Err(error) if is_uncertain_command_error(&error) => (
+                                    adapter.classify_command(
+                                        CommandOperation::ClosePosition,
+                                        None,
+                                        derived_request.request_id.clone(),
+                                    )?,
+                                    CommandTransport::Rest,
+                                ),
+                                Err(error) => return Err(error),
+                            }
+                        }
+                    }
+                } else {
+                    let body = serde_json::to_string(&body).map_err(|error| {
+                        MarketError::new(
+                            ErrorKind::ConfigError,
+                            format!("failed to serialize bybit close-position body: {error}"),
+                        )
+                    })?;
+                    match bybit_signed_post_text(
+                        context,
+                        "/v5/order/create",
+                        &body,
+                        "bybit.close_position",
+                    )
+                    .await
+                    {
+                        Ok(payload) => (
+                            adapter.classify_command(
+                                CommandOperation::ClosePosition,
+                                Some(&payload),
+                                derived_request.request_id.clone(),
+                            )?,
+                            CommandTransport::Rest,
+                        ),
+                        Err(error) if is_uncertain_command_error(&error) => (
+                            adapter.classify_command(
+                                CommandOperation::ClosePosition,
+                                None,
+                                derived_request.request_id.clone(),
+                            )?,
+                            CommandTransport::Rest,
+                        ),
+                        Err(error) => return Err(error),
+                    }
+                }
+            }
+        };
+
+        if receipt.status == CommandStatus::UnknownExecution {
+            context
+                .runtime_state
+                .cache_pending_unknown(PendingUnknownCommand {
+                    operation: CommandOperation::ClosePosition,
+                    instrument_id: derived_request.instrument_id.clone(),
+                    order_id: None,
+                    client_order_id: derived_request.client_order_id.clone(),
+                    recorded_at: timestamp_now_ms(),
+                })
+                .await;
+        }
+        let ack = apply_command_receipt(context, receipt.clone(), transport).await;
+        Ok(ack)
+    }
+    .await;
+    record_runtime_latency(context, RuntimeOperation::ClosePosition, started_at);
     result
 }
 
@@ -815,164 +2948,369 @@ pub(crate) async fn set_leverage(
     context: &LiveContext,
     request: &SetLeverageRequest,
 ) -> Result<CommandReceipt> {
-    let spec = require_spec(context, &request.instrument_id)?;
-    context.command_limiter.acquire().await;
-    let leverage = request.leverage.value().normalize().to_string();
-    let receipt = match &context.adapter {
-        #[cfg(feature = "binance")]
-        AdapterHandle::Binance(adapter) => {
-            let pairs = [
-                ("symbol", spec.native_symbol.as_ref()),
-                ("leverage", leverage.as_str()),
-            ];
-            match binance_signed_request_text(
-                context,
-                Method::POST,
-                "/fapi/v1/leverage",
-                &pairs,
-                "binance.set_leverage",
-            )
-            .await
-            {
-                Ok(payload) => adapter.classify_command(
-                    CommandOperation::SetLeverage,
-                    Some(&payload),
-                    request.request_id.clone(),
-                )?,
-                Err(error) if is_uncertain_command_error(&error) => adapter.classify_command(
-                    CommandOperation::SetLeverage,
-                    None,
-                    request.request_id.clone(),
-                )?,
-                Err(error) => return Err(error),
-            }
-        }
-        #[cfg(feature = "bybit")]
-        AdapterHandle::Bybit(adapter) => {
-            let body = json!({
-                "category": "linear",
-                "symbol": spec.native_symbol,
-                "buyLeverage": leverage,
-                "sellLeverage": leverage,
-            });
-            let body = serde_json::to_string(&body).map_err(|error| {
-                MarketError::new(
-                    ErrorKind::ConfigError,
-                    format!("failed to serialize bybit set-leverage body: {error}"),
+    let started_at = Instant::now();
+    let result = async {
+        let spec = require_spec(context, &request.instrument_id)?;
+        context.command_limiter.acquire().await;
+        let leverage = request.leverage.value().normalize().to_string();
+        let receipt = match &context.adapter {
+            #[cfg(feature = "binance")]
+            AdapterHandle::Binance(adapter) => {
+                let pairs = [
+                    ("symbol", spec.native_symbol.as_ref()),
+                    ("leverage", leverage.as_str()),
+                ];
+                match binance_signed_request_text(
+                    context,
+                    Method::POST,
+                    "/fapi/v1/leverage",
+                    &pairs,
+                    "binance.set_leverage",
                 )
-            })?;
-            match bybit_signed_post_text(
-                context,
-                "/v5/position/set-leverage",
-                &body,
-                "bybit.set_leverage",
-            )
-            .await
-            {
-                Ok(payload) => adapter.classify_command(
-                    CommandOperation::SetLeverage,
-                    Some(&payload),
-                    request.request_id.clone(),
-                )?,
-                Err(error) if is_uncertain_command_error(&error) => adapter.classify_command(
-                    CommandOperation::SetLeverage,
-                    None,
-                    request.request_id.clone(),
-                )?,
-                Err(error) => return Err(error),
+                .await
+                {
+                    Ok(payload) => adapter.classify_command(
+                        CommandOperation::SetLeverage,
+                        Some(&payload),
+                        request.request_id.clone(),
+                    )?,
+                    Err(error) if is_uncertain_command_error(&error) => adapter.classify_command(
+                        CommandOperation::SetLeverage,
+                        None,
+                        request.request_id.clone(),
+                    )?,
+                    Err(error) => return Err(error),
+                }
             }
-        }
-    };
-    apply_command_receipt(context, receipt.clone()).await;
-    Ok(receipt)
+            #[cfg(feature = "bybit")]
+            AdapterHandle::Bybit(adapter) => {
+                let body = json!({
+                    "category": "linear",
+                    "symbol": spec.native_symbol,
+                    "buyLeverage": leverage,
+                    "sellLeverage": leverage,
+                });
+                let body = serde_json::to_string(&body).map_err(|error| {
+                    MarketError::new(
+                        ErrorKind::ConfigError,
+                        format!("failed to serialize bybit set-leverage body: {error}"),
+                    )
+                })?;
+                match bybit_signed_post_text(
+                    context,
+                    "/v5/position/set-leverage",
+                    &body,
+                    "bybit.set_leverage",
+                )
+                .await
+                {
+                    Ok(payload) => adapter.classify_command(
+                        CommandOperation::SetLeverage,
+                        Some(&payload),
+                        request.request_id.clone(),
+                    )?,
+                    Err(error) if is_uncertain_command_error(&error) => adapter.classify_command(
+                        CommandOperation::SetLeverage,
+                        None,
+                        request.request_id.clone(),
+                    )?,
+                    Err(error) => return Err(error),
+                }
+            }
+        };
+        apply_command_receipt(context, receipt.clone(), CommandTransport::Rest).await;
+        Ok(receipt)
+    }
+    .await;
+    record_runtime_latency(context, RuntimeOperation::SetLeverage, started_at);
+    result
 }
 
 pub(crate) async fn set_margin_mode(
     context: &LiveContext,
     request: &SetMarginModeRequest,
 ) -> Result<CommandReceipt> {
+    let started_at = Instant::now();
+    let result = async {
+        context.command_limiter.acquire().await;
+        let receipt = match &context.adapter {
+            #[cfg(feature = "binance")]
+            AdapterHandle::Binance(adapter) => {
+                let spec = require_spec(context, &request.instrument_id)?;
+                let margin_type = match request.margin_mode {
+                    MarginMode::Cross => "CROSSED",
+                    MarginMode::Isolated => "ISOLATED",
+                };
+                let pairs = [
+                    ("symbol", spec.native_symbol.as_ref()),
+                    ("marginType", margin_type),
+                ];
+                match binance_signed_request_text(
+                    context,
+                    Method::POST,
+                    "/fapi/v1/marginType",
+                    &pairs,
+                    "binance.set_margin_mode",
+                )
+                .await
+                {
+                    Ok(payload) => adapter.classify_command(
+                        CommandOperation::SetMarginMode,
+                        Some(&payload),
+                        request.request_id.clone(),
+                    )?,
+                    Err(error) if is_uncertain_command_error(&error) => adapter.classify_command(
+                        CommandOperation::SetMarginMode,
+                        None,
+                        request.request_id.clone(),
+                    )?,
+                    Err(error) => return Err(error),
+                }
+            }
+            #[cfg(feature = "bybit")]
+            AdapterHandle::Bybit(adapter) => {
+                let set_margin_mode = match request.margin_mode {
+                    MarginMode::Cross => "REGULAR_MARGIN",
+                    MarginMode::Isolated => "ISOLATED_MARGIN",
+                };
+                let body = serde_json::to_string(&json!({
+                    "setMarginMode": set_margin_mode,
+                }))
+                .map_err(|error| {
+                    MarketError::new(
+                        ErrorKind::ConfigError,
+                        format!("failed to serialize bybit set-margin-mode body: {error}"),
+                    )
+                })?;
+                match bybit_signed_post_text(
+                    context,
+                    "/v5/account/set-margin-mode",
+                    &body,
+                    "bybit.set_margin_mode",
+                )
+                .await
+                {
+                    Ok(payload) => adapter.classify_command(
+                        CommandOperation::SetMarginMode,
+                        Some(&payload),
+                        request.request_id.clone(),
+                    )?,
+                    Err(error) if is_uncertain_command_error(&error) => adapter.classify_command(
+                        CommandOperation::SetMarginMode,
+                        None,
+                        request.request_id.clone(),
+                    )?,
+                    Err(error) => return Err(error),
+                }
+            }
+        };
+
+        #[cfg(feature = "bybit")]
+        if matches!(context.adapter, AdapterHandle::Bybit(_)) {
+            context
+                .runtime_state
+                .invalidate_bybit_account_context()
+                .await;
+        }
+        apply_command_receipt(context, receipt.clone(), CommandTransport::Rest).await;
+        Ok(receipt)
+    }
+    .await;
+    record_runtime_latency(context, RuntimeOperation::SetMarginMode, started_at);
+    result
+}
+
+pub(crate) async fn validate_order(
+    context: &LiveContext,
+    request: &ValidateOrderRequest,
+) -> Result<CommandReceipt> {
+    let started_at = Instant::now();
+    let result = async {
+    validate_create_order(context, &request.order)?;
     context.command_limiter.acquire().await;
-    let receipt = match &context.adapter {
+    let spec = require_spec(context, &request.order.instrument_id)?;
+
+    match &context.adapter {
         #[cfg(feature = "binance")]
-        AdapterHandle::Binance(adapter) => {
-            let spec = require_spec(context, &request.instrument_id)?;
-            let margin_type = match request.margin_mode {
-                MarginMode::Cross => "CROSSED",
-                MarginMode::Isolated => "ISOLATED",
-            };
-            let pairs = [
-                ("symbol", spec.native_symbol.as_ref()),
-                ("marginType", margin_type),
+        AdapterHandle::Binance(_) => {
+            let mut owned = vec![
+                ("symbol".to_owned(), spec.native_symbol.to_string()),
+                (
+                    "side".to_owned(),
+                    binance_side(request.order.side).to_owned(),
+                ),
+                (
+                    "type".to_owned(),
+                    binance_order_type(request.order.order_type).to_owned(),
+                ),
+                (
+                    "quantity".to_owned(),
+                    format_quantity(request.order.quantity),
+                ),
             ];
-            match binance_signed_request_text(
+            if let Some(client_order_id) = &request.order.client_order_id {
+                owned.push(("newClientOrderId".to_owned(), client_order_id.to_string()));
+            }
+            if let Some(price) = request.order.price {
+                owned.push(("price".to_owned(), format_price(price)));
+            }
+            if let Some(trigger_price) = request.order.trigger_price {
+                owned.push(("stopPrice".to_owned(), format_price(trigger_price)));
+            }
+            if let Some(trigger_type) = request.order.trigger_type {
+                owned.push((
+                    "workingType".to_owned(),
+                    binance_trigger_type(trigger_type).to_owned(),
+                ));
+            }
+            if let Some(time_in_force) = request.order.time_in_force {
+                owned.push((
+                    "timeInForce".to_owned(),
+                    binance_time_in_force(time_in_force, request.order.post_only).to_owned(),
+                ));
+            }
+            if request.order.reduce_only {
+                owned.push(("reduceOnly".to_owned(), "true".to_owned()));
+            }
+            let pairs = owned
+                .iter()
+                .map(|(key, value)| (key.as_str(), value.as_str()))
+                .collect::<Vec<_>>();
+            binance_signed_request_text(
                 context,
                 Method::POST,
-                "/fapi/v1/marginType",
+                "/fapi/v1/order/test",
                 &pairs,
-                "binance.set_margin_mode",
+                "binance.validate_order",
             )
-            .await
-            {
-                Ok(payload) => adapter.classify_command(
-                    CommandOperation::SetMarginMode,
-                    Some(&payload),
-                    request.request_id.clone(),
-                )?,
-                Err(error) if is_uncertain_command_error(&error) => adapter.classify_command(
-                    CommandOperation::SetMarginMode,
-                    None,
-                    request.request_id.clone(),
-                )?,
-                Err(error) => return Err(error),
-            }
+            .await?;
         }
         #[cfg(feature = "bybit")]
-        AdapterHandle::Bybit(adapter) => {
-            let set_margin_mode = match request.margin_mode {
-                MarginMode::Cross => "REGULAR_MARGIN",
-                MarginMode::Isolated => "ISOLATED_MARGIN",
-            };
-            let body = serde_json::to_string(&json!({
-                "setMarginMode": set_margin_mode,
-            }))
-            .map_err(|error| {
+        AdapterHandle::Bybit(_) => {
+            let body = json!({
+                "category": "linear",
+                "symbol": spec.native_symbol,
+                "side": bybit_side(request.order.side),
+                "orderType": bybit_order_type(request.order.order_type),
+                "qty": format_quantity(request.order.quantity),
+                "price": request.order.price.map(format_price),
+                "triggerPrice": request.order.trigger_price.map(format_price),
+                "triggerBy": request.order.trigger_type.map(bybit_trigger_type),
+                "timeInForce": request.order.time_in_force.map(|value| bybit_time_in_force(value, request.order.post_only)),
+                "orderLinkId": request.order.client_order_id.as_ref().map(ToString::to_string),
+                "reduceOnly": request.order.reduce_only,
+            });
+            let body = serde_json::to_string(&body).map_err(|error| {
                 MarketError::new(
                     ErrorKind::ConfigError,
-                    format!("failed to serialize bybit set-margin-mode body: {error}"),
+                    format!("failed to serialize bybit validate order body: {error}"),
                 )
             })?;
-            match bybit_signed_post_text(
+            bybit_signed_post_text(
                 context,
-                "/v5/account/set-margin-mode",
+                "/v5/order/pre-check",
                 &body,
-                "bybit.set_margin_mode",
+                "bybit.validate_order",
             )
-            .await
-            {
-                Ok(payload) => adapter.classify_command(
-                    CommandOperation::SetMarginMode,
+            .await?;
+        }
+    }
+
+    let receipt = CommandReceipt {
+        operation: CommandOperation::ValidateOrder,
+        status: CommandStatus::Accepted,
+        venue: context.config.venue,
+        product: context.config.product,
+        instrument_id: Some(spec.instrument_id.clone()),
+        order_id: None,
+        client_order_id: request.order.client_order_id.clone(),
+        request_id: request
+            .request_id
+            .clone()
+            .or(request.order.request_id.clone()),
+        message: Some("validated".into()),
+        native_code: None,
+        retriable: false,
+    };
+    apply_command_receipt(context, receipt.clone(), CommandTransport::Rest).await;
+    Ok(receipt)
+    }
+    .await;
+    record_runtime_latency(context, RuntimeOperation::ValidateOrder, started_at);
+    result
+}
+
+pub(crate) async fn set_position_mode(
+    context: &LiveContext,
+    request: &SetPositionModeRequest,
+) -> Result<CommandReceipt> {
+    let started_at = Instant::now();
+    let result = async {
+        context.command_limiter.acquire().await;
+        let receipt = match &context.adapter {
+            #[cfg(feature = "binance")]
+            AdapterHandle::Binance(adapter) => {
+                let dual_side_position = match request.position_mode {
+                    bat_markets_core::PositionMode::OneWay => "false",
+                    bat_markets_core::PositionMode::Hedge => "true",
+                };
+                let pairs = [("dualSidePosition", dual_side_position)];
+                let payload = binance_signed_request_text(
+                    context,
+                    Method::POST,
+                    "/fapi/v1/positionSide/dual",
+                    &pairs,
+                    "binance.set_position_mode",
+                )
+                .await?;
+                adapter.classify_command(
+                    CommandOperation::SetPositionMode,
                     Some(&payload),
                     request.request_id.clone(),
-                )?,
-                Err(error) if is_uncertain_command_error(&error) => adapter.classify_command(
-                    CommandOperation::SetMarginMode,
-                    None,
-                    request.request_id.clone(),
-                )?,
-                Err(error) => return Err(error),
+                )?
             }
-        }
-    };
+            #[cfg(feature = "bybit")]
+            AdapterHandle::Bybit(adapter) => {
+                let mut body = json!({
+                    "category": "linear",
+                    "mode": match request.position_mode {
+                        bat_markets_core::PositionMode::OneWay => 0,
+                        bat_markets_core::PositionMode::Hedge => 3,
+                    },
+                });
+                if let Some(instrument_id) = &request.instrument_id {
+                    let spec = require_spec(context, instrument_id)?;
+                    body["symbol"] = Value::String(spec.native_symbol.to_string());
+                } else {
+                    body["coin"] = Value::String("USDT".to_owned());
+                }
+                let body = serde_json::to_string(&body).map_err(|error| {
+                    MarketError::new(
+                        ErrorKind::ConfigError,
+                        format!("failed to serialize bybit set-position-mode body: {error}"),
+                    )
+                })?;
+                let payload = bybit_signed_post_text(
+                    context,
+                    "/v5/position/switch-mode",
+                    &body,
+                    "bybit.set_position_mode",
+                )
+                .await?;
+                adapter.classify_command(
+                    CommandOperation::SetPositionMode,
+                    Some(&payload),
+                    request.request_id.clone(),
+                )?
+            }
+        };
 
-    #[cfg(feature = "bybit")]
-    if matches!(context.adapter, AdapterHandle::Bybit(_)) {
-        context
-            .runtime_state
-            .invalidate_bybit_account_context()
-            .await;
+        apply_command_receipt(context, receipt.clone(), CommandTransport::Rest).await;
+        Ok(receipt)
     }
-    apply_command_receipt(context, receipt.clone()).await;
-    Ok(receipt)
+    .await;
+    record_runtime_latency(context, RuntimeOperation::SetPositionMode, started_at);
+    result
 }
 
 pub(crate) async fn refresh_open_interest(
@@ -1128,6 +3466,285 @@ pub(crate) async fn fetch_ticker(
     result
 }
 
+pub(crate) async fn fetch_tickers(
+    context: &LiveContext,
+    request: &FetchTickersRequest,
+) -> Result<Vec<Ticker>> {
+    let instrument_ids = request.instrument_ids()?.to_vec();
+    let mut tickers = Vec::with_capacity(instrument_ids.len());
+    for instrument_id in instrument_ids {
+        tickers.push(fetch_ticker(context, &instrument_id).await?);
+    }
+    Ok(tickers)
+}
+
+pub(crate) async fn fetch_mark_price(
+    context: &LiveContext,
+    instrument_id: &InstrumentId,
+) -> Result<MarkPrice> {
+    let started_at = Instant::now();
+    let result = async {
+        let spec = require_spec(context, instrument_id)?;
+        let mark_price = match &context.adapter {
+            #[cfg(feature = "binance")]
+            AdapterHandle::Binance(_) => {
+                let payload = public_get_with_retry(
+                    context,
+                    "/fapi/v1/premiumIndex",
+                    &[("symbol", spec.native_symbol.as_ref())],
+                    "binance.fetch_mark_price",
+                )
+                .await?;
+                let snapshot = serde_json::from_str::<Value>(&payload).map_err(|error| {
+                    MarketError::new(
+                        ErrorKind::DecodeError,
+                        format!("failed to parse binance premium index snapshot: {error}"),
+                    )
+                })?;
+                let mark_price = snapshot
+                    .get("markPrice")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| {
+                        MarketError::new(
+                            ErrorKind::DecodeError,
+                            "missing markPrice in binance premium index snapshot",
+                        )
+                    })?;
+                let funding_rate = snapshot
+                    .get("lastFundingRate")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| {
+                        MarketError::new(
+                            ErrorKind::DecodeError,
+                            "missing lastFundingRate in binance premium index snapshot",
+                        )
+                    })?;
+                let time = snapshot
+                    .get("time")
+                    .and_then(Value::as_i64)
+                    .ok_or_else(|| {
+                        MarketError::new(
+                            ErrorKind::DecodeError,
+                            "missing time in binance premium index snapshot",
+                        )
+                    })?;
+                MarkPrice {
+                    instrument_id: spec.instrument_id.clone(),
+                    price: Price::new(mark_price.parse::<rust_decimal::Decimal>().map_err(
+                        |error| {
+                            MarketError::new(
+                                ErrorKind::DecodeError,
+                                format!("invalid decimal '{mark_price}': {error}"),
+                            )
+                        },
+                    )?),
+                    funding_rate: Some(bat_markets_core::Rate::new(
+                        funding_rate
+                            .parse::<rust_decimal::Decimal>()
+                            .map_err(|error| {
+                                MarketError::new(
+                                    ErrorKind::DecodeError,
+                                    format!("invalid decimal '{funding_rate}': {error}"),
+                                )
+                            })?,
+                    )),
+                    event_time: TimestampMs::new(time),
+                }
+            }
+            #[cfg(feature = "bybit")]
+            AdapterHandle::Bybit(_) => {
+                let payload = public_get_with_retry(
+                    context,
+                    "/v5/market/tickers",
+                    &[
+                        ("category", "linear"),
+                        ("symbol", spec.native_symbol.as_ref()),
+                    ],
+                    "bybit.fetch_mark_price",
+                )
+                .await?;
+                let response = serde_json::from_str::<bybit_native::MarketTickersResponse>(
+                    &payload,
+                )
+                .map_err(|error| {
+                    MarketError::new(
+                        ErrorKind::DecodeError,
+                        format!("failed to parse bybit tickers response: {error}"),
+                    )
+                })?;
+                if response.ret_code != 0 {
+                    return Err(MarketError::new(
+                        ErrorKind::ExchangeReject,
+                        response.ret_msg,
+                    ));
+                }
+                let ticker = response.result.list.into_iter().next().ok_or_else(|| {
+                    MarketError::new(
+                        ErrorKind::DecodeError,
+                        "missing bybit ticker entry in market/tickers response",
+                    )
+                })?;
+                MarkPrice {
+                    instrument_id: spec.instrument_id.clone(),
+                    price: Price::new(parse_decimal(&ticker.mark_price, Venue::Bybit)?),
+                    funding_rate: Some(bat_markets_core::Rate::new(parse_decimal(
+                        &ticker.funding_rate,
+                        Venue::Bybit,
+                    )?)),
+                    event_time: timestamp_now_ms(),
+                }
+            }
+        };
+
+        context
+            .shared
+            .apply_public_event(PublicLaneEvent::MarkPrice(
+                bat_markets_core::FastMarkPrice {
+                    instrument_id: mark_price.instrument_id.clone(),
+                    price: mark_price.price.quantize(spec.price_scale)?,
+                    funding_rate: mark_price.funding_rate,
+                    event_time: mark_price.event_time,
+                },
+            ));
+        context.shared.write(|state| state.mark_rest_success(None));
+        Ok(mark_price)
+    }
+    .await;
+    record_runtime_latency(context, RuntimeOperation::FetchMarkPrice, started_at);
+    result
+}
+
+pub(crate) async fn fetch_funding_rate(
+    context: &LiveContext,
+    instrument_id: &InstrumentId,
+) -> Result<bat_markets_core::FundingRate> {
+    let started_at = Instant::now();
+    let result = async {
+        let spec = require_spec(context, instrument_id)?;
+        let funding_rate = match &context.adapter {
+            #[cfg(feature = "binance")]
+            AdapterHandle::Binance(_) => {
+                let payload = public_get_with_retry(
+                    context,
+                    "/fapi/v1/premiumIndex",
+                    &[("symbol", spec.native_symbol.as_ref())],
+                    "binance.fetch_funding_rate",
+                )
+                .await?;
+                let snapshot = serde_json::from_str::<Value>(&payload).map_err(|error| {
+                    MarketError::new(
+                        ErrorKind::DecodeError,
+                        format!("failed to parse binance premium index snapshot: {error}"),
+                    )
+                })?;
+                let mark_price = snapshot
+                    .get("markPrice")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| {
+                        MarketError::new(
+                            ErrorKind::DecodeError,
+                            "missing markPrice in binance premium index snapshot",
+                        )
+                    })?;
+                let funding_rate = snapshot
+                    .get("lastFundingRate")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| {
+                        MarketError::new(
+                            ErrorKind::DecodeError,
+                            "missing lastFundingRate in binance premium index snapshot",
+                        )
+                    })?;
+                let time = snapshot
+                    .get("time")
+                    .and_then(Value::as_i64)
+                    .ok_or_else(|| {
+                        MarketError::new(
+                            ErrorKind::DecodeError,
+                            "missing time in binance premium index snapshot",
+                        )
+                    })?;
+                bat_markets_core::FundingRate {
+                    instrument_id: spec.instrument_id.clone(),
+                    value: bat_markets_core::Rate::new(
+                        funding_rate
+                            .parse::<rust_decimal::Decimal>()
+                            .map_err(|error| {
+                                MarketError::new(
+                                    ErrorKind::DecodeError,
+                                    format!("invalid decimal '{funding_rate}': {error}"),
+                                )
+                            })?,
+                    ),
+                    mark_price: Some(Price::new(
+                        mark_price
+                            .parse::<rust_decimal::Decimal>()
+                            .map_err(|error| {
+                                MarketError::new(
+                                    ErrorKind::DecodeError,
+                                    format!("invalid decimal '{mark_price}': {error}"),
+                                )
+                            })?,
+                    )),
+                    event_time: TimestampMs::new(time),
+                }
+            }
+            #[cfg(feature = "bybit")]
+            AdapterHandle::Bybit(_) => {
+                let payload = public_get_with_retry(
+                    context,
+                    "/v5/market/tickers",
+                    &[
+                        ("category", "linear"),
+                        ("symbol", spec.native_symbol.as_ref()),
+                    ],
+                    "bybit.fetch_funding_rate",
+                )
+                .await?;
+                let response = serde_json::from_str::<bybit_native::MarketTickersResponse>(
+                    &payload,
+                )
+                .map_err(|error| {
+                    MarketError::new(
+                        ErrorKind::DecodeError,
+                        format!("failed to parse bybit tickers response: {error}"),
+                    )
+                })?;
+                if response.ret_code != 0 {
+                    return Err(MarketError::new(
+                        ErrorKind::ExchangeReject,
+                        response.ret_msg,
+                    ));
+                }
+                let ticker = response.result.list.into_iter().next().ok_or_else(|| {
+                    MarketError::new(
+                        ErrorKind::DecodeError,
+                        "missing bybit ticker entry in market/tickers response",
+                    )
+                })?;
+                bat_markets_core::FundingRate {
+                    instrument_id: spec.instrument_id.clone(),
+                    value: bat_markets_core::Rate::new(parse_decimal(
+                        &ticker.funding_rate,
+                        Venue::Bybit,
+                    )?),
+                    mark_price: Some(Price::new(parse_decimal(&ticker.mark_price, Venue::Bybit)?)),
+                    event_time: timestamp_now_ms(),
+                }
+            }
+        };
+
+        context
+            .shared
+            .apply_public_event(PublicLaneEvent::FundingRate(funding_rate.clone()));
+        context.shared.write(|state| state.mark_rest_success(None));
+        Ok(funding_rate)
+    }
+    .await;
+    record_runtime_latency(context, RuntimeOperation::FetchFundingRate, started_at);
+    result
+}
+
 pub(crate) async fn fetch_trades(
     context: &LiveContext,
     request: &FetchTradesRequest,
@@ -1223,6 +3840,256 @@ pub(crate) async fn fetch_book_top(
     }
     .await;
     record_runtime_latency(context, RuntimeOperation::FetchBookTop, started_at);
+    result
+}
+
+pub(crate) async fn fetch_order_book(
+    context: &LiveContext,
+    request: &FetchOrderBookRequest,
+) -> Result<OrderBookSnapshot> {
+    let started_at = Instant::now();
+    let result = async {
+        let spec = require_spec(context, &request.instrument_id)?;
+        let limit = request.validated_limit()?;
+        let limit_string = limit.map(|value| value.to_string());
+        let snapshot = match &context.adapter {
+            #[cfg(feature = "binance")]
+            AdapterHandle::Binance(_) => {
+                let mut query = vec![("symbol", spec.native_symbol.as_ref())];
+                if let Some(limit) = &limit_string {
+                    query.push(("limit", limit.as_str()));
+                }
+                let payload = public_get_with_retry(
+                    context,
+                    "/fapi/v1/depth",
+                    &query,
+                    "binance.fetch_order_book",
+                )
+                .await?;
+                let snapshot = serde_json::from_str::<Value>(&payload).map_err(|error| {
+                    MarketError::new(
+                        ErrorKind::DecodeError,
+                        format!("failed to parse binance order book snapshot: {error}"),
+                    )
+                })?;
+                let bids = snapshot
+                    .get("bids")
+                    .and_then(Value::as_array)
+                    .ok_or_else(|| {
+                        MarketError::new(
+                            ErrorKind::DecodeError,
+                            "missing bids in binance order book snapshot",
+                        )
+                    })?;
+                let asks = snapshot
+                    .get("asks")
+                    .and_then(Value::as_array)
+                    .ok_or_else(|| {
+                        MarketError::new(
+                            ErrorKind::DecodeError,
+                            "missing asks in binance order book snapshot",
+                        )
+                    })?;
+                OrderBookSnapshot {
+                    instrument_id: spec.instrument_id.clone(),
+                    bids: bids
+                        .iter()
+                        .map(|level| {
+                            let level = level.as_array().ok_or_else(|| {
+                                MarketError::new(
+                                    ErrorKind::DecodeError,
+                                    "invalid bid level in binance order book snapshot",
+                                )
+                            })?;
+                            Ok(OrderBookLevel {
+                            price: Price::new(
+                                level[0]
+                                    .as_str()
+                                    .ok_or_else(|| {
+                                        MarketError::new(
+                                            ErrorKind::DecodeError,
+                                            "invalid bid price in binance order book snapshot",
+                                        )
+                                    })?
+                                    .parse::<rust_decimal::Decimal>()
+                                    .map_err(|error| {
+                                        MarketError::new(
+                                            ErrorKind::DecodeError,
+                                            format!("invalid bid price decimal: {error}"),
+                                        )
+                                    })?,
+                            ),
+                            quantity: Quantity::new(
+                                level[1]
+                                    .as_str()
+                                    .ok_or_else(|| {
+                                        MarketError::new(
+                                            ErrorKind::DecodeError,
+                                            "invalid bid quantity in binance order book snapshot",
+                                        )
+                                    })?
+                                    .parse::<rust_decimal::Decimal>()
+                                    .map_err(|error| {
+                                        MarketError::new(
+                                            ErrorKind::DecodeError,
+                                            format!("invalid bid quantity decimal: {error}"),
+                                        )
+                                    })?,
+                            ),
+                        })
+                        })
+                        .collect::<Result<Vec<_>>>()?,
+                    asks: asks
+                        .iter()
+                        .map(|level| {
+                            let level = level.as_array().ok_or_else(|| {
+                                MarketError::new(
+                                    ErrorKind::DecodeError,
+                                    "invalid ask level in binance order book snapshot",
+                                )
+                            })?;
+                            Ok(OrderBookLevel {
+                            price: Price::new(
+                                level[0]
+                                    .as_str()
+                                    .ok_or_else(|| {
+                                        MarketError::new(
+                                            ErrorKind::DecodeError,
+                                            "invalid ask price in binance order book snapshot",
+                                        )
+                                    })?
+                                    .parse::<rust_decimal::Decimal>()
+                                    .map_err(|error| {
+                                        MarketError::new(
+                                            ErrorKind::DecodeError,
+                                            format!("invalid ask price decimal: {error}"),
+                                        )
+                                    })?,
+                            ),
+                            quantity: Quantity::new(
+                                level[1]
+                                    .as_str()
+                                    .ok_or_else(|| {
+                                        MarketError::new(
+                                            ErrorKind::DecodeError,
+                                            "invalid ask quantity in binance order book snapshot",
+                                        )
+                                    })?
+                                    .parse::<rust_decimal::Decimal>()
+                                    .map_err(|error| {
+                                        MarketError::new(
+                                            ErrorKind::DecodeError,
+                                            format!("invalid ask quantity decimal: {error}"),
+                                        )
+                                    })?,
+                            ),
+                        })
+                        })
+                        .collect::<Result<Vec<_>>>()?,
+                    event_time: TimestampMs::new(
+                        snapshot
+                            .get("E")
+                            .and_then(Value::as_i64)
+                            .unwrap_or_else(|| timestamp_now_ms().value()),
+                    ),
+                }
+            }
+            #[cfg(feature = "bybit")]
+            AdapterHandle::Bybit(_) => {
+                let mut query = vec![
+                    ("category", "linear"),
+                    ("symbol", spec.native_symbol.as_ref()),
+                ];
+                if let Some(limit) = &limit_string {
+                    query.push(("limit", limit.as_str()));
+                }
+                let payload = public_get_with_retry(
+                    context,
+                    "/v5/market/orderbook",
+                    &query,
+                    "bybit.fetch_order_book",
+                )
+                .await?;
+                let response = serde_json::from_str::<bybit_native::OrderBookResponse>(&payload)
+                    .map_err(|error| {
+                        MarketError::new(
+                            ErrorKind::DecodeError,
+                            format!("failed to parse bybit order book snapshot: {error}"),
+                        )
+                    })?;
+                if response.ret_code != 0 {
+                    return Err(MarketError::new(
+                        ErrorKind::ExchangeReject,
+                        response.ret_msg,
+                    ));
+                }
+                OrderBookSnapshot {
+                    instrument_id: spec.instrument_id.clone(),
+                    bids: response
+                        .result
+                        .bids
+                        .iter()
+                        .map(|level| {
+                            Ok(OrderBookLevel {
+                                price: Price::new(parse_decimal(&level[0], Venue::Bybit)?),
+                                quantity: Quantity::new(parse_decimal(&level[1], Venue::Bybit)?),
+                            })
+                        })
+                        .collect::<Result<Vec<_>>>()?,
+                    asks: response
+                        .result
+                        .asks
+                        .iter()
+                        .map(|level| {
+                            Ok(OrderBookLevel {
+                                price: Price::new(parse_decimal(&level[0], Venue::Bybit)?),
+                                quantity: Quantity::new(parse_decimal(&level[1], Venue::Bybit)?),
+                            })
+                        })
+                        .collect::<Result<Vec<_>>>()?,
+                    event_time: TimestampMs::new(
+                        response
+                            .result
+                            .cts
+                            .or(response.result.ts)
+                            .unwrap_or_else(|| timestamp_now_ms().value()),
+                    ),
+                }
+            }
+        };
+        Ok(snapshot)
+    }
+    .await;
+    record_runtime_latency(context, RuntimeOperation::FetchOrderBook, started_at);
+    result
+}
+
+pub(crate) async fn fetch_liquidations(
+    context: &LiveContext,
+    instrument_id: &InstrumentId,
+    limit: Option<usize>,
+) -> Result<Vec<Liquidation>> {
+    let started_at = Instant::now();
+    let result = async {
+        let liquidations = context
+            .shared
+            .read(|state| state.liquidations(instrument_id))
+            .ok_or_else(|| {
+                MarketError::new(
+                    ErrorKind::TemporaryUnavailable,
+                    format!(
+                        "no cached liquidation events for {}; subscribe to watch_liquidations() first",
+                        instrument_id
+                    ),
+                )
+            })?;
+        let limit = limit.unwrap_or(liquidations.len());
+        let mut recent = liquidations.into_iter().rev().take(limit).collect::<Vec<_>>();
+        recent.reverse();
+        Ok(recent)
+    }
+    .await;
+    record_runtime_latency(context, RuntimeOperation::FetchLiquidations, started_at);
     result
 }
 
@@ -1463,14 +4330,52 @@ pub(crate) async fn spawn_private_stream(context: LiveContext) -> Result<LiveStr
     })
 }
 
-async fn apply_command_receipt(context: &LiveContext, receipt: CommandReceipt) {
+async fn apply_command_receipt(
+    context: &LiveContext,
+    receipt: CommandReceipt,
+    transport: CommandTransport,
+) -> CommandAck {
     let needs_reconcile = matches!(receipt.status, CommandStatus::UnknownExecution);
+    let ack = CommandAck {
+        receipt: receipt.clone(),
+        transport,
+        acknowledged_at: timestamp_now_ms(),
+    };
     context
         .shared
         .write(|state| state.apply_command_receipt(&receipt));
+    context
+        .shared
+        .emit_command_event(CommandLaneEvent::Lifecycle(CommandLifecycleEvent::Ack(
+            ack.clone(),
+        )));
+    context
+        .shared
+        .emit_command_event(CommandLaneEvent::Receipt(receipt));
     if needs_reconcile {
-        let _ = reconcile_private(context, ReconcileTrigger::UnknownExecution).await;
+        context
+            .shared
+            .emit_command_event(CommandLaneEvent::Lifecycle(
+                CommandLifecycleEvent::RecoveryScheduled(ack.clone()),
+            ));
+        let reconcile_context = context.clone();
+        let recovery_ack = ack.clone();
+        tokio::spawn(async move {
+            if let Ok(report) =
+                reconcile_private(&reconcile_context, ReconcileTrigger::UnknownExecution).await
+            {
+                reconcile_context
+                    .shared
+                    .emit_command_event(CommandLaneEvent::Lifecycle(
+                        CommandLifecycleEvent::RecoveryCompleted {
+                            ack: recovery_ack,
+                            report,
+                        },
+                    ));
+            }
+        });
     }
+    ack
 }
 
 async fn sync_server_time(context: &LiveContext) -> Result<()> {
@@ -1590,10 +4495,16 @@ async fn run_binance_public_stream(
         if subscription.book_top {
             streams.push(format!("{symbol}@bookTicker"));
         }
-        if subscription.funding_rate {
+        if subscription.order_book {
+            streams.push(format!("{symbol}@depth20@100ms"));
+        }
+        if subscription.liquidations {
+            streams.push(format!("{symbol}@forceOrder"));
+        }
+        if subscription.mark_price || subscription.funding_rate {
             streams.push(format!("{symbol}@markPrice@1s"));
         }
-        if let Some(interval_value) = &subscription.kline_interval {
+        for interval_value in &subscription.kline_intervals {
             let interval = parse_kline_interval(
                 interval_value.as_ref(),
                 context.config.venue,
@@ -1687,8 +4598,9 @@ async fn run_binance_public_stream(
                             return Err(sequence_gap_error(context.config.venue, "binance.public_ws.sequence", Some(at)));
                         }
                     }
-                    let events = context.adapter.as_adapter().parse_public(&payload)?;
-                    context.shared.apply_public_events(&events);
+                        let mut events = context.adapter.as_adapter().parse_public(&payload)?;
+                        retain_public_events_for_subscription(&mut events, subscription);
+                        context.shared.apply_public_events(&events);
                     last_frame_at = Instant::now();
                 }
             }
@@ -1739,11 +4651,9 @@ async fn run_binance_private_stream(
             }
             _ = maintenance.tick() => {
                 if last_frame_at.elapsed() >= Duration::from_millis(context.config.timeouts.ws_idle_ms.max(1)) {
-                    context.shared.write(|state| {
-                        state.apply_private_event(PrivateLaneEvent::Divergence(
-                            bat_markets_core::DivergenceEvent::SequenceGap { at: None },
-                        ));
-                    });
+                    context.shared.apply_private_event(PrivateLaneEvent::Divergence(
+                        bat_markets_core::DivergenceEvent::SequenceGap { at: None },
+                    ));
                     return Err(sequence_gap_error(
                         context.config.venue,
                         "binance.private_ws.idle",
@@ -1769,24 +4679,33 @@ async fn run_binance_private_stream(
                 };
                 let message = message.map_err(|error| transport_error(context.config.venue, "binance.private_ws.read", error))?;
                 if let Message::Text(payload) = message {
+                    if ws_frame_debug_enabled() && context.config.venue == Venue::Binance {
+                        eprintln!("binance private frame: {payload}");
+                    }
                     for observation in binance_private_sequence_observations(context, &payload)? {
                         if let Err(at) = sequence.observe(observation) {
-                            context.shared.write(|state| {
-                                state.apply_private_event(PrivateLaneEvent::Divergence(
-                                    bat_markets_core::DivergenceEvent::SequenceGap {
-                                        at: Some(SequenceNumber::new(at.max(0) as u64)),
-                                    },
-                                ));
-                            });
+                            context.shared.apply_private_event(PrivateLaneEvent::Divergence(
+                                bat_markets_core::DivergenceEvent::SequenceGap {
+                                    at: Some(SequenceNumber::new(at.max(0) as u64)),
+                                },
+                            ));
                             return Err(sequence_gap_error(context.config.venue, "binance.private_ws.sequence", Some(at)));
                         }
                     }
-                    let events = context.adapter.as_adapter().parse_private(&payload)?;
-                    context.shared.write(|state| {
-                        for event in events {
-                            state.apply_private_event(event);
-                        }
-                    });
+                    let events = context
+                        .adapter
+                        .as_adapter()
+                        .parse_private(&payload)
+                        .inspect_err(|error| {
+                            if ws_frame_debug_enabled() && context.config.venue == Venue::Binance
+                            {
+                                eprintln!("binance private parse error: {error}");
+                            }
+                        })?;
+                    if ws_frame_debug_enabled() && context.config.venue == Venue::Binance {
+                        eprintln!("binance private events: {}", events.len());
+                    }
+                    context.shared.apply_private_events(&events);
                     last_frame_at = Instant::now();
                 }
             }
@@ -1803,7 +4722,11 @@ async fn run_bybit_public_stream(
     let mut args = Vec::new();
     for instrument_id in &subscription.instrument_ids {
         let spec = require_spec(context, instrument_id)?;
-        if subscription.ticker || subscription.funding_rate || subscription.open_interest {
+        if subscription.ticker
+            || subscription.mark_price
+            || subscription.funding_rate
+            || subscription.open_interest
+        {
             args.push(format!("tickers.{}", spec.native_symbol));
         }
         if subscription.trades {
@@ -1812,7 +4735,13 @@ async fn run_bybit_public_stream(
         if subscription.book_top {
             args.push(format!("orderbook.1.{}", spec.native_symbol));
         }
-        if let Some(interval_value) = &subscription.kline_interval {
+        if subscription.order_book {
+            args.push(format!("orderbook.50.{}", spec.native_symbol));
+        }
+        if subscription.liquidations {
+            args.push(format!("allLiquidation.{}", spec.native_symbol));
+        }
+        for interval_value in &subscription.kline_intervals {
             let interval = parse_kline_interval(
                 interval_value.as_ref(),
                 context.config.venue,
@@ -1895,6 +4824,9 @@ async fn run_bybit_public_stream(
                 match message {
                     Message::Text(payload) => {
                         last_frame_at = Instant::now();
+                        if ws_frame_debug_enabled() && context.config.venue == Venue::Bybit {
+                            eprintln!("bybit public frame: {payload}");
+                        }
                         if is_bybit_control_message(&payload) {
                             continue;
                         }
@@ -1908,7 +4840,17 @@ async fn run_bybit_public_stream(
                                 return Err(sequence_gap_error(context.config.venue, "bybit.public_ws.sequence", Some(at)));
                             }
                         }
-                        let events = context.adapter.as_adapter().parse_public(&payload)?;
+                        let mut events = match context.adapter.as_adapter().parse_public(&payload) {
+                            Ok(events) => events,
+                            Err(error) => {
+                                if ws_frame_debug_enabled() && context.config.venue == Venue::Bybit
+                                {
+                                    eprintln!("bybit public parse error: {error}");
+                                }
+                                return Err(error);
+                            }
+                        };
+                        retain_public_events_for_subscription(&mut events, subscription);
                         context.shared.apply_public_events(&events);
                     }
                     Message::Ping(_) | Message::Pong(_) | Message::Binary(_) => {
@@ -1985,11 +4927,9 @@ async fn run_bybit_private_stream(
             }
             _ = maintenance.tick() => {
                 if last_frame_at.elapsed() >= Duration::from_millis(context.config.timeouts.ws_idle_ms.max(1)) {
-                    context.shared.write(|state| {
-                        state.apply_private_event(PrivateLaneEvent::Divergence(
-                            bat_markets_core::DivergenceEvent::SequenceGap { at: None },
-                        ));
-                    });
+                    context.shared.apply_private_event(PrivateLaneEvent::Divergence(
+                        bat_markets_core::DivergenceEvent::SequenceGap { at: None },
+                    ));
                     return Err(sequence_gap_error(
                         context.config.venue,
                         "bybit.private_ws.idle",
@@ -2022,22 +4962,16 @@ async fn run_bybit_private_stream(
                         }
                         for observation in bybit_private_sequence_observations(context, &payload)? {
                             if let Err(at) = sequence.observe(observation) {
-                                context.shared.write(|state| {
-                                    state.apply_private_event(PrivateLaneEvent::Divergence(
-                                        bat_markets_core::DivergenceEvent::SequenceGap {
-                                            at: Some(SequenceNumber::new(at.max(0) as u64)),
-                                        },
-                                    ));
-                                });
+                                context.shared.apply_private_event(PrivateLaneEvent::Divergence(
+                                    bat_markets_core::DivergenceEvent::SequenceGap {
+                                        at: Some(SequenceNumber::new(at.max(0) as u64)),
+                                    },
+                                ));
                                 return Err(sequence_gap_error(context.config.venue, "bybit.private_ws.sequence", Some(at)));
                             }
                         }
                         let events = context.adapter.as_adapter().parse_private(&payload)?;
-                        context.shared.write(|state| {
-                            for event in events {
-                                state.apply_private_event(event);
-                            }
-                        });
+                        context.shared.apply_private_events(&events);
                     }
                     Message::Ping(_) | Message::Pong(_) | Message::Binary(_) => {
                         last_frame_at = Instant::now();
@@ -2102,6 +5036,103 @@ fn require_credentials(
         .with_venue(context.config.venue, context.config.product)
     })?;
     Ok((api_key, signer))
+}
+
+#[cfg(feature = "binance")]
+async fn binance_signed_ws_request_text(
+    context: &LiveContext,
+    method: &str,
+    params: Vec<(String, String)>,
+    operation: &str,
+) -> std::result::Result<String, CommandWsRequestError> {
+    let (api_key, signer) =
+        require_credentials(context).map_err(CommandWsRequestError::Unavailable)?;
+    let timestamp = timestamp_now_ms().value();
+    let mut signable = BTreeMap::new();
+    for (key, value) in params {
+        signable.insert(key, value);
+    }
+    signable.insert("apiKey".to_owned(), api_key.to_string());
+    signable.insert("recvWindow".to_owned(), "5000".to_owned());
+    signable.insert("timestamp".to_owned(), timestamp.to_string());
+    let query = {
+        let mut serializer = Serializer::new(String::new());
+        for (key, value) in &signable {
+            serializer.append_pair(key, value);
+        }
+        serializer.finish()
+    };
+    let signature = signer
+        .sign_hex(query.as_bytes())
+        .map_err(CommandWsRequestError::Unavailable)?;
+
+    let mut payload = serde_json::Map::new();
+    for (key, value) in signable {
+        match key.as_str() {
+            "timestamp" | "recvWindow" => {
+                let parsed = value.parse::<i64>().map_err(|error| {
+                    CommandWsRequestError::Unavailable(MarketError::new(
+                        ErrorKind::ConfigError,
+                        format!(
+                            "failed to encode binance websocket numeric parameter '{key}': {error}"
+                        ),
+                    ))
+                })?;
+                payload.insert(key, Value::from(parsed));
+            }
+            _ => {
+                payload.insert(key, Value::String(value));
+            }
+        }
+    }
+    payload.insert("signature".to_owned(), Value::String(signature));
+
+    let request_id = context.command_transport.next_request_id("binance");
+    let frame = serde_json::to_string(&json!({
+        "id": request_id,
+        "method": method,
+        "params": payload,
+    }))
+    .map_err(|error| {
+        CommandWsRequestError::Unavailable(MarketError::new(
+            ErrorKind::ConfigError,
+            format!("failed to serialize binance websocket command frame: {error}"),
+        ))
+    })?;
+    context
+        .command_transport
+        .request_text(request_id, operation.to_owned(), frame)
+        .await
+}
+
+#[cfg(feature = "bybit")]
+async fn bybit_trade_ws_request_text(
+    context: &LiveContext,
+    op: &str,
+    args: Vec<Value>,
+    operation: &str,
+) -> std::result::Result<String, CommandWsRequestError> {
+    require_credentials(context).map_err(CommandWsRequestError::Unavailable)?;
+    let request_id = context.command_transport.next_request_id("bybit");
+    let frame = serde_json::to_string(&json!({
+        "reqId": request_id,
+        "header": {
+            "X-BAPI-TIMESTAMP": timestamp_now_ms().value().to_string(),
+            "X-BAPI-RECV-WINDOW": "5000",
+        },
+        "op": op,
+        "args": args,
+    }))
+    .map_err(|error| {
+        CommandWsRequestError::Unavailable(MarketError::new(
+            ErrorKind::ConfigError,
+            format!("failed to serialize bybit websocket command frame: {error}"),
+        ))
+    })?;
+    context
+        .command_transport
+        .request_text(request_id, operation.to_owned(), frame)
+        .await
 }
 
 async fn public_get_with_retry(
@@ -2373,6 +5404,653 @@ fn hydrate_cancel_receipt(
         receipt.client_order_id = request.client_order_id.clone();
     }
     receipt
+}
+
+fn hydrate_amend_receipt(
+    mut receipt: CommandReceipt,
+    request: &AmendOrderRequest,
+) -> CommandReceipt {
+    if receipt.instrument_id.is_none() {
+        receipt.instrument_id = Some(request.instrument_id.clone());
+    }
+    if receipt.order_id.is_none() {
+        receipt.order_id = request.order_id.clone();
+    }
+    if receipt.client_order_id.is_none() {
+        receipt.client_order_id = request.client_order_id.clone();
+    }
+    receipt
+}
+
+async fn validate_amend_order(context: &LiveContext, request: &AmendOrderRequest) -> Result<()> {
+    require_spec(context, &request.instrument_id)?;
+    append_order_identity(
+        &mut Vec::new(),
+        request.order_id.as_ref(),
+        request.client_order_id.as_ref(),
+    )?;
+    if request.quantity.is_none() && request.price.is_none() && request.trigger_price.is_none() {
+        return Err(MarketError::new(
+            ErrorKind::ConfigError,
+            "amend_order requires at least one of quantity, price, or trigger_price",
+        ));
+    }
+    Ok(())
+}
+
+async fn resolve_order_for_amend(
+    context: &LiveContext,
+    request: &AmendOrderRequest,
+) -> Result<Order> {
+    if let Some(order) = context.shared.read(|state| {
+        state.orders().into_iter().find(|order| {
+            order.instrument_id == request.instrument_id
+                && match (&request.order_id, &request.client_order_id) {
+                    (Some(order_id), _) => &order.order_id == order_id,
+                    (None, Some(client_order_id)) => {
+                        order.client_order_id.as_ref() == Some(client_order_id)
+                    }
+                    (None, None) => false,
+                }
+        })
+    }) {
+        return Ok(order);
+    }
+
+    get_order(
+        context,
+        &GetOrderRequest {
+            request_id: request.request_id.clone(),
+            instrument_id: request.instrument_id.clone(),
+            order_id: request.order_id.clone(),
+            client_order_id: request.client_order_id.clone(),
+        },
+    )
+    .await
+}
+
+#[derive(Clone, Debug)]
+struct BatchIdentity {
+    instrument_id: Option<InstrumentId>,
+    order_id: Option<OrderId>,
+    client_order_id: Option<ClientOrderId>,
+    request_id: Option<RequestId>,
+}
+
+fn hydrate_create_request_with_batch_id(
+    mut request: CreateOrderRequest,
+    batch_request_id: Option<RequestId>,
+) -> CreateOrderRequest {
+    if request.request_id.is_none() {
+        request.request_id = batch_request_id;
+    }
+    request
+}
+
+fn hydrate_amend_request_with_batch_id(
+    mut request: AmendOrderRequest,
+    batch_request_id: Option<RequestId>,
+) -> AmendOrderRequest {
+    if request.request_id.is_none() {
+        request.request_id = batch_request_id;
+    }
+    request
+}
+
+fn validate_create_orders(context: &LiveContext, request: &CreateOrdersRequest) -> Result<()> {
+    if request.orders.is_empty() {
+        return Err(MarketError::new(
+            ErrorKind::ConfigError,
+            "create_orders requires at least one order",
+        ));
+    }
+    let mut client_order_ids = BTreeMap::<ClientOrderId, usize>::new();
+    for (index, order) in request.orders.iter().enumerate() {
+        validate_create_order(context, order)?;
+        if request.orders.len() > 1 {
+            let client_order_id = order.client_order_id.clone().ok_or_else(|| {
+                MarketError::new(
+                    ErrorKind::ConfigError,
+                    "batch create requires client_order_id on every order for deterministic tracking",
+                )
+            })?;
+            if let Some(previous) = client_order_ids.insert(client_order_id.clone(), index) {
+                return Err(MarketError::new(
+                    ErrorKind::ConfigError,
+                    format!(
+                        "duplicate client_order_id '{}' in batch create at indexes {} and {}",
+                        client_order_id, previous, index
+                    ),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn validate_amend_orders(context: &LiveContext, request: &AmendOrdersRequest) -> Result<()> {
+    if request.orders.is_empty() {
+        return Err(MarketError::new(
+            ErrorKind::ConfigError,
+            "amend_orders requires at least one order",
+        ));
+    }
+    for order in &request.orders {
+        validate_amend_order(context, order).await?;
+    }
+    Ok(())
+}
+
+fn validate_cancel_orders(request: &CancelOrdersRequest) -> Result<()> {
+    if request.orders.is_empty() {
+        return Err(MarketError::new(
+            ErrorKind::ConfigError,
+            "cancel_orders requires at least one target",
+        ));
+    }
+    for target in &request.orders {
+        match (&target.order_id, &target.client_order_id) {
+            (Some(_), _) | (None, Some(_)) => {}
+            (None, None) => {
+                return Err(MarketError::new(
+                    ErrorKind::ConfigError,
+                    "cancel_orders requires order_id or client_order_id on every target",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn collect_batch_acks(acks: Vec<Option<CommandAck>>, operation: &str) -> Result<Vec<CommandAck>> {
+    acks.into_iter()
+        .enumerate()
+        .map(|(index, ack)| {
+            ack.ok_or_else(|| {
+                MarketError::new(
+                    ErrorKind::DecodeError,
+                    format!("missing ack {index} while finalizing {operation}"),
+                )
+            })
+        })
+        .collect()
+}
+
+async fn cache_and_emit_create_receipts(
+    context: &LiveContext,
+    receipts: &[CommandReceipt],
+    requests: &[CreateOrderRequest],
+    transport: CommandTransport,
+) -> Vec<CommandAck> {
+    let identities = requests
+        .iter()
+        .map(|order| BatchIdentity {
+            instrument_id: Some(order.instrument_id.clone()),
+            order_id: None,
+            client_order_id: order.client_order_id.clone(),
+            request_id: order.request_id.clone(),
+        })
+        .collect::<Vec<_>>();
+    cache_and_emit_batch_receipts(
+        context,
+        receipts,
+        &identities,
+        CommandOperation::CreateOrder,
+        transport,
+    )
+    .await
+}
+
+async fn cache_and_emit_amend_receipts(
+    context: &LiveContext,
+    receipts: &[CommandReceipt],
+    requests: &[AmendOrderRequest],
+    transport: CommandTransport,
+) -> Vec<CommandAck> {
+    let identities = requests
+        .iter()
+        .map(|order| BatchIdentity {
+            instrument_id: Some(order.instrument_id.clone()),
+            order_id: order.order_id.clone(),
+            client_order_id: order.client_order_id.clone(),
+            request_id: order.request_id.clone(),
+        })
+        .collect::<Vec<_>>();
+    cache_and_emit_batch_receipts(
+        context,
+        receipts,
+        &identities,
+        CommandOperation::AmendOrder,
+        transport,
+    )
+    .await
+}
+
+async fn cache_and_emit_cancel_receipts(
+    context: &LiveContext,
+    receipts: &[CommandReceipt],
+    targets: &[OrderTarget],
+    transport: CommandTransport,
+) -> Vec<CommandAck> {
+    let identities = targets
+        .iter()
+        .map(|target| BatchIdentity {
+            instrument_id: Some(target.instrument_id.clone()),
+            order_id: target.order_id.clone(),
+            client_order_id: target.client_order_id.clone(),
+            request_id: None,
+        })
+        .collect::<Vec<_>>();
+    cache_and_emit_batch_receipts(
+        context,
+        receipts,
+        &identities,
+        CommandOperation::CancelOrder,
+        transport,
+    )
+    .await
+}
+
+async fn cache_and_emit_batch_receipts(
+    context: &LiveContext,
+    receipts: &[CommandReceipt],
+    identities: &[BatchIdentity],
+    operation: CommandOperation,
+    transport: CommandTransport,
+) -> Vec<CommandAck> {
+    let mut acks = Vec::with_capacity(receipts.len());
+    for (receipt, identity) in receipts.iter().zip(identities) {
+        if receipt.status == CommandStatus::UnknownExecution
+            && let Some(instrument_id) = &identity.instrument_id
+        {
+            context
+                .runtime_state
+                .cache_pending_unknown(PendingUnknownCommand {
+                    operation,
+                    instrument_id: instrument_id.clone(),
+                    order_id: identity.order_id.clone(),
+                    client_order_id: identity.client_order_id.clone(),
+                    recorded_at: timestamp_now_ms(),
+                })
+                .await;
+        }
+        acks.push(apply_command_receipt(context, receipt.clone(), transport).await);
+    }
+    acks
+}
+
+fn unknown_command_receipt(
+    context: &LiveContext,
+    operation: CommandOperation,
+    instrument_id: Option<InstrumentId>,
+    order_id: Option<OrderId>,
+    client_order_id: Option<ClientOrderId>,
+    request_id: Option<RequestId>,
+) -> CommandReceipt {
+    CommandReceipt {
+        operation,
+        status: CommandStatus::UnknownExecution,
+        venue: context.config.venue,
+        product: context.config.product,
+        instrument_id,
+        order_id,
+        client_order_id,
+        request_id,
+        message: Some("command outcome requires reconcile".into()),
+        native_code: None,
+        retriable: true,
+    }
+}
+
+#[cfg(feature = "binance")]
+fn build_binance_batch_create_object(
+    context: &LiveContext,
+    request: &CreateOrderRequest,
+) -> Result<Value> {
+    let spec = require_spec(context, &request.instrument_id)?;
+    let mut order = serde_json::Map::new();
+    order.insert(
+        "symbol".to_owned(),
+        Value::String(spec.native_symbol.to_string()),
+    );
+    order.insert(
+        "side".to_owned(),
+        Value::String(binance_side(request.side).to_owned()),
+    );
+    order.insert(
+        "type".to_owned(),
+        Value::String(binance_order_type(request.order_type).to_owned()),
+    );
+    order.insert(
+        "quantity".to_owned(),
+        Value::String(format_quantity(request.quantity)),
+    );
+    if let Some(client_order_id) = &request.client_order_id {
+        order.insert(
+            "newClientOrderId".to_owned(),
+            Value::String(client_order_id.to_string()),
+        );
+    }
+    if let Some(price) = request.price {
+        order.insert("price".to_owned(), Value::String(format_price(price)));
+    }
+    if let Some(trigger_price) = request.trigger_price {
+        order.insert(
+            "stopPrice".to_owned(),
+            Value::String(format_price(trigger_price)),
+        );
+    }
+    if let Some(trigger_type) = request.trigger_type {
+        order.insert(
+            "workingType".to_owned(),
+            Value::String(binance_trigger_type(trigger_type).to_owned()),
+        );
+    }
+    if let Some(time_in_force) = request.time_in_force {
+        order.insert(
+            "timeInForce".to_owned(),
+            Value::String(binance_time_in_force(time_in_force, request.post_only).to_owned()),
+        );
+    }
+    if request.reduce_only {
+        order.insert("reduceOnly".to_owned(), Value::String("true".to_owned()));
+    }
+    Ok(Value::Object(order))
+}
+
+#[cfg(feature = "bybit")]
+fn build_bybit_batch_create_object(
+    context: &LiveContext,
+    request: &CreateOrderRequest,
+) -> Result<Value> {
+    let spec = require_spec(context, &request.instrument_id)?;
+    Ok(json!({
+        "symbol": spec.native_symbol,
+        "side": bybit_side(request.side),
+        "orderType": bybit_order_type(request.order_type),
+        "qty": format_quantity(request.quantity),
+        "price": request.price.map(format_price),
+        "triggerPrice": request.trigger_price.map(format_price),
+        "triggerBy": request.trigger_type.map(bybit_trigger_type),
+        "timeInForce": request.time_in_force.map(|value| bybit_time_in_force(value, request.post_only)),
+        "orderLinkId": request.client_order_id.as_ref().map(ToString::to_string),
+        "reduceOnly": request.reduce_only,
+    }))
+}
+
+#[cfg(feature = "binance")]
+fn build_binance_batch_amend_object(
+    context: &LiveContext,
+    request: &AmendOrderRequest,
+) -> Result<Value> {
+    let spec = require_spec(context, &request.instrument_id)?;
+    let current_order = resolve_cached_order_for_amend(context, request)?;
+    if current_order.order_type != OrderType::Limit {
+        return Err(MarketError::new(
+            ErrorKind::Unsupported,
+            "binance batch amend currently supports only cached LIMIT orders",
+        ));
+    }
+    if request.trigger_price.is_some() {
+        return Err(MarketError::new(
+            ErrorKind::Unsupported,
+            "binance batch amend does not support modifying trigger_price on linear futures",
+        ));
+    }
+    let price = request.price.or(current_order.price).ok_or_else(|| {
+        MarketError::new(
+            ErrorKind::ConfigError,
+            "binance batch amend requires a limit price or a cached order price",
+        )
+    })?;
+    let quantity = request.quantity.unwrap_or(current_order.quantity);
+
+    let mut order = serde_json::Map::new();
+    order.insert(
+        "symbol".to_owned(),
+        Value::String(spec.native_symbol.to_string()),
+    );
+    order.insert(
+        "side".to_owned(),
+        Value::String(binance_side(current_order.side).to_owned()),
+    );
+    order.insert(
+        "quantity".to_owned(),
+        Value::String(format_quantity(quantity)),
+    );
+    order.insert("price".to_owned(), Value::String(format_price(price)));
+    append_binance_order_identity_json(
+        &mut order,
+        request.order_id.as_ref(),
+        request.client_order_id.as_ref(),
+    )?;
+    Ok(Value::Object(order))
+}
+
+#[cfg(feature = "bybit")]
+fn build_bybit_batch_amend_object(
+    context: &LiveContext,
+    request: &AmendOrderRequest,
+) -> Result<Value> {
+    let spec = require_spec(context, &request.instrument_id)?;
+    let mut order = serde_json::Map::new();
+    order.insert(
+        "symbol".to_owned(),
+        Value::String(spec.native_symbol.to_string()),
+    );
+    append_bybit_order_identity_json(
+        &mut order,
+        request.order_id.as_ref(),
+        request.client_order_id.as_ref(),
+    )?;
+    if let Some(quantity) = request.quantity {
+        order.insert("qty".to_owned(), Value::String(format_quantity(quantity)));
+    }
+    if let Some(price) = request.price {
+        order.insert("price".to_owned(), Value::String(format_price(price)));
+    }
+    if let Some(trigger_price) = request.trigger_price {
+        order.insert(
+            "triggerPrice".to_owned(),
+            Value::String(format_price(trigger_price)),
+        );
+    }
+    Ok(Value::Object(order))
+}
+
+#[cfg(feature = "bybit")]
+fn build_bybit_batch_cancel_object(context: &LiveContext, request: &OrderTarget) -> Result<Value> {
+    let spec = require_spec(context, &request.instrument_id)?;
+    let mut order = serde_json::Map::new();
+    order.insert(
+        "symbol".to_owned(),
+        Value::String(spec.native_symbol.to_string()),
+    );
+    append_bybit_order_identity_json(
+        &mut order,
+        request.order_id.as_ref(),
+        request.client_order_id.as_ref(),
+    )?;
+    Ok(Value::Object(order))
+}
+
+fn resolve_cached_order_for_amend(
+    context: &LiveContext,
+    request: &AmendOrderRequest,
+) -> Result<Order> {
+    context
+        .shared
+        .read(|state| {
+            state.orders().into_iter().find(|order| {
+                order.instrument_id == request.instrument_id
+                    && match (&request.order_id, &request.client_order_id) {
+                        (Some(order_id), _) => &order.order_id == order_id,
+                        (None, Some(client_order_id)) => {
+                            order.client_order_id.as_ref() == Some(client_order_id)
+                        }
+                        (None, None) => false,
+                    }
+            })
+        })
+        .ok_or_else(|| {
+            MarketError::new(
+                ErrorKind::ConfigError,
+                format!(
+                    "binance batch amend requires cached order state for {}",
+                    request.instrument_id
+                ),
+            )
+        })
+}
+
+#[cfg(feature = "binance")]
+fn classify_binance_batch_payload(
+    adapter: &bat_markets_binance::BinanceLinearFuturesAdapter,
+    operation: CommandOperation,
+    payload: &str,
+    request_ids: &[Option<RequestId>],
+) -> Result<Vec<CommandReceipt>> {
+    let items = serde_json::from_str::<Vec<Value>>(payload).map_err(|error| {
+        MarketError::new(
+            ErrorKind::DecodeError,
+            format!("failed to parse binance batch payload: {error}"),
+        )
+    })?;
+    if items.len() != request_ids.len() {
+        return Err(MarketError::new(
+            ErrorKind::DecodeError,
+            format!(
+                "binance batch payload item count {} does not match request count {}",
+                items.len(),
+                request_ids.len()
+            ),
+        ));
+    }
+    items
+        .into_iter()
+        .zip(request_ids.iter().cloned())
+        .map(|(item, request_id)| {
+            let item_payload = serde_json::to_string(&item).map_err(|error| {
+                MarketError::new(
+                    ErrorKind::DecodeError,
+                    format!("failed to reserialize binance batch item: {error}"),
+                )
+            })?;
+            adapter.classify_command(operation, Some(&item_payload), request_id)
+        })
+        .collect()
+}
+
+#[cfg(feature = "bybit")]
+fn classify_bybit_batch_payload(
+    context: &LiveContext,
+    operation: CommandOperation,
+    payload: &str,
+    identities: &[BatchIdentity],
+) -> Result<Vec<CommandReceipt>> {
+    let value = serde_json::from_str::<Value>(payload).map_err(|error| {
+        MarketError::new(
+            ErrorKind::DecodeError,
+            format!("failed to parse bybit batch payload: {error}"),
+        )
+    })?;
+    let ret_code = value
+        .get("retCode")
+        .and_then(value_as_i64)
+        .unwrap_or_default();
+    if ret_code != 0 {
+        let message = value
+            .get("retMsg")
+            .and_then(Value::as_str)
+            .unwrap_or("bybit batch request rejected");
+        return Err(MarketError::new(ErrorKind::ExchangeReject, message));
+    }
+    let results = value
+        .get("result")
+        .and_then(|result| result.get("list"))
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let ext = value
+        .get("retExtInfo")
+        .and_then(|result| result.get("list"))
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+
+    if !results.is_empty() && results.len() != identities.len() {
+        return Err(MarketError::new(
+            ErrorKind::DecodeError,
+            format!(
+                "bybit batch result count {} does not match request count {}",
+                results.len(),
+                identities.len()
+            ),
+        ));
+    }
+
+    let mut receipts = Vec::with_capacity(identities.len());
+    for (index, identity) in identities.iter().enumerate() {
+        let result = results.get(index);
+        let ext_item = ext.get(index);
+        let native_code = ext_item
+            .and_then(|item| item.get("code"))
+            .and_then(value_as_i64)
+            .unwrap_or_default();
+        let message = ext_item
+            .and_then(|item| item.get("msg"))
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .or_else(|| {
+                value
+                    .get("retMsg")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+            })
+            .unwrap_or_else(|| "accepted".to_owned());
+        let instrument_id = result
+            .and_then(|item| item.get("symbol"))
+            .and_then(Value::as_str)
+            .and_then(|symbol| context.adapter.as_adapter().resolve_native_symbol(symbol))
+            .map(|spec| spec.instrument_id.clone())
+            .or_else(|| identity.instrument_id.clone());
+        let order_id = result
+            .and_then(|item| item.get("orderId"))
+            .and_then(Value::as_str)
+            .map(OrderId::from)
+            .or_else(|| identity.order_id.clone());
+        let client_order_id = result
+            .and_then(|item| item.get("orderLinkId"))
+            .and_then(Value::as_str)
+            .map(ClientOrderId::from)
+            .or_else(|| identity.client_order_id.clone());
+        receipts.push(CommandReceipt {
+            operation,
+            status: if native_code == 0 {
+                CommandStatus::Accepted
+            } else {
+                CommandStatus::Rejected
+            },
+            venue: context.config.venue,
+            product: context.config.product,
+            instrument_id,
+            order_id,
+            client_order_id,
+            request_id: identity.request_id.clone(),
+            message: Some(message.into_boxed_str()),
+            native_code: (native_code != 0).then(|| native_code.to_string().into_boxed_str()),
+            retriable: false,
+        });
+    }
+    Ok(receipts)
+}
+
+fn value_as_i64(value: &Value) -> Option<i64> {
+    match value {
+        Value::Number(number) => number.as_i64(),
+        Value::String(raw) => raw.parse::<i64>().ok(),
+        _ => None,
+    }
 }
 
 #[cfg(feature = "binance")]
@@ -2876,6 +6554,12 @@ fn binance_public_sequence_observations(
             strict_gap: true,
             reset: false,
         }]),
+        binance_native::PublicMessage::Depth(event) => Ok(vec![SequenceObservation {
+            topic: topic_key(format!("binance.public.depth.{}", event.symbol)),
+            value: event.final_update_id,
+            strict_gap: false,
+            reset: false,
+        }]),
         _ => Ok(Vec::new()),
     }
 }
@@ -2902,6 +6586,13 @@ fn binance_private_sequence_observations(
             })
             .into_iter()
             .collect()),
+        binance_native::PrivateMessage::TradeLite(event) => Ok(vec![SequenceObservation {
+            topic: topic_key(format!("binance.private.trade.{}", event.symbol)),
+            value: event.trade_id,
+            strict_gap: false,
+            reset: false,
+        }]),
+        binance_native::PrivateMessage::AlgoUpdate(_) => Ok(Vec::new()),
         binance_native::PrivateMessage::AccountUpdate(_) => Ok(Vec::new()),
     }
 }
@@ -3117,6 +6808,28 @@ fn is_bybit_control_message(payload: &str) -> bool {
     value.get("op").is_some() && value.get("topic").is_none()
 }
 
+fn retain_public_events_for_subscription(
+    events: &mut Vec<PublicLaneEvent>,
+    subscription: &PublicSubscription,
+) {
+    events.retain(|event| match event {
+        PublicLaneEvent::Ticker(_) => subscription.ticker,
+        PublicLaneEvent::Trade(_) => subscription.trades,
+        PublicLaneEvent::BookTop(_) => subscription.book_top,
+        PublicLaneEvent::OrderBookDelta(_) => subscription.order_book,
+        PublicLaneEvent::MarkPrice(_) => subscription.mark_price,
+        PublicLaneEvent::FundingRate(_) => subscription.funding_rate,
+        PublicLaneEvent::OpenInterest(_) => subscription.open_interest,
+        PublicLaneEvent::Liquidation(_) => subscription.liquidations,
+        PublicLaneEvent::Kline(_) => !subscription.kline_intervals.is_empty(),
+        PublicLaneEvent::Divergence(_) => true,
+    });
+}
+
+fn ws_frame_debug_enabled() -> bool {
+    std::env::var_os("BAT_MARKETS_DEBUG_WS_FRAMES").is_some()
+}
+
 fn timestamp_now_ms() -> TimestampMs {
     let since_epoch = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -3190,6 +6903,69 @@ fn validate_create_order(context: &LiveContext, request: &CreateOrderRequest) ->
         }
     }
 
+    match request.order_type {
+        bat_markets_core::OrderType::Market => {
+            if request.price.is_some() {
+                return Err(MarketError::new(
+                    ErrorKind::ConfigError,
+                    "market orders must not include a limit price",
+                ));
+            }
+        }
+        bat_markets_core::OrderType::Limit => {
+            if request.price.is_none() {
+                return Err(MarketError::new(
+                    ErrorKind::ConfigError,
+                    "limit orders require price",
+                ));
+            }
+        }
+        bat_markets_core::OrderType::StopMarket => {
+            if request.trigger_price.is_none() {
+                return Err(MarketError::new(
+                    ErrorKind::ConfigError,
+                    "stop_market orders require trigger_price",
+                ));
+            }
+            if request.price.is_some() {
+                return Err(MarketError::new(
+                    ErrorKind::ConfigError,
+                    "stop_market orders must not include a limit price",
+                ));
+            }
+        }
+        bat_markets_core::OrderType::StopLimit => {
+            if request.price.is_none() || request.trigger_price.is_none() {
+                return Err(MarketError::new(
+                    ErrorKind::ConfigError,
+                    "stop_limit orders require both price and trigger_price",
+                ));
+            }
+        }
+        bat_markets_core::OrderType::TakeProfitMarket => {
+            if request.trigger_price.is_none() {
+                return Err(MarketError::new(
+                    ErrorKind::ConfigError,
+                    "take_profit_market orders require trigger_price",
+                ));
+            }
+            if request.price.is_some() {
+                return Err(MarketError::new(
+                    ErrorKind::ConfigError,
+                    "take_profit_market orders must not include a limit price",
+                ));
+            }
+        }
+        bat_markets_core::OrderType::TakeProfitLimit => {
+            if request.price.is_none() || request.trigger_price.is_none() {
+                return Err(MarketError::new(
+                    ErrorKind::ConfigError,
+                    "take_profit_limit orders require both price and trigger_price",
+                ));
+            }
+        }
+    }
+
     Ok(())
 }
 
@@ -3204,6 +6980,16 @@ fn order_identity_query(
     Ok(query)
 }
 
+#[cfg(feature = "binance")]
+fn binance_algo_identity_query(
+    order_id: Option<&bat_markets_core::OrderId>,
+    client_order_id: Option<&bat_markets_core::ClientOrderId>,
+) -> Result<Vec<(String, String)>> {
+    let mut query = Vec::new();
+    append_binance_algo_identity(&mut query, order_id, client_order_id)?;
+    Ok(query)
+}
+
 fn append_order_identity(
     query: &mut Vec<(String, String)>,
     order_id: Option<&bat_markets_core::OrderId>,
@@ -3213,6 +6999,118 @@ fn append_order_identity(
         (Some(order_id), _) => query.push(("orderId".to_owned(), order_id.to_string())),
         (None, Some(client_order_id)) => {
             query.push(("origClientOrderId".to_owned(), client_order_id.to_string()));
+        }
+        (None, None) => {
+            return Err(MarketError::new(
+                ErrorKind::ConfigError,
+                "either order_id or client_order_id is required",
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(feature = "binance")]
+fn append_binance_algo_identity(
+    query: &mut Vec<(String, String)>,
+    order_id: Option<&bat_markets_core::OrderId>,
+    client_order_id: Option<&bat_markets_core::ClientOrderId>,
+) -> Result<()> {
+    match (order_id, client_order_id) {
+        (Some(order_id), _) => {
+            let algo_id = binance_algo_order_id_value(order_id).ok_or_else(|| {
+                MarketError::new(
+                    ErrorKind::ConfigError,
+                    format!("expected binance algo order id, got '{order_id}'"),
+                )
+            })?;
+            query.push(("algoId".to_owned(), algo_id.to_owned()));
+        }
+        (None, Some(client_order_id)) => {
+            query.push(("clientAlgoId".to_owned(), client_order_id.to_string()));
+        }
+        (None, None) => {
+            return Err(MarketError::new(
+                ErrorKind::ConfigError,
+                "either order_id or client_order_id is required",
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(feature = "binance")]
+fn is_binance_algo_order_id(order_id: Option<&bat_markets_core::OrderId>) -> bool {
+    order_id.and_then(binance_algo_order_id_value).is_some()
+}
+
+#[cfg(feature = "binance")]
+fn binance_algo_order_id_value(order_id: &bat_markets_core::OrderId) -> Option<&str> {
+    order_id.as_str().strip_prefix("binance-algo:")
+}
+
+#[cfg(feature = "binance")]
+fn append_binance_order_identity_json(
+    query: &mut serde_json::Map<String, Value>,
+    order_id: Option<&bat_markets_core::OrderId>,
+    client_order_id: Option<&bat_markets_core::ClientOrderId>,
+) -> Result<()> {
+    match (order_id, client_order_id) {
+        (Some(order_id), _) => {
+            query.insert("orderId".to_owned(), Value::String(order_id.to_string()));
+        }
+        (None, Some(client_order_id)) => {
+            query.insert(
+                "origClientOrderId".to_owned(),
+                Value::String(client_order_id.to_string()),
+            );
+        }
+        (None, None) => {
+            return Err(MarketError::new(
+                ErrorKind::ConfigError,
+                "either order_id or client_order_id is required",
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(feature = "bybit")]
+fn append_bybit_order_identity(
+    query: &mut Vec<(String, String)>,
+    order_id: Option<&bat_markets_core::OrderId>,
+    client_order_id: Option<&bat_markets_core::ClientOrderId>,
+) -> Result<()> {
+    match (order_id, client_order_id) {
+        (Some(order_id), _) => query.push(("orderId".to_owned(), order_id.to_string())),
+        (None, Some(client_order_id)) => {
+            query.push(("orderLinkId".to_owned(), client_order_id.to_string()));
+        }
+        (None, None) => {
+            return Err(MarketError::new(
+                ErrorKind::ConfigError,
+                "either order_id or client_order_id is required",
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(feature = "bybit")]
+fn append_bybit_order_identity_json(
+    query: &mut serde_json::Map<String, Value>,
+    order_id: Option<&bat_markets_core::OrderId>,
+    client_order_id: Option<&bat_markets_core::ClientOrderId>,
+) -> Result<()> {
+    match (order_id, client_order_id) {
+        (Some(order_id), _) => {
+            query.insert("orderId".to_owned(), Value::String(order_id.to_string()));
+        }
+        (None, Some(client_order_id)) => {
+            query.insert(
+                "orderLinkId".to_owned(),
+                Value::String(client_order_id.to_string()),
+            );
         }
         (None, None) => {
             return Err(MarketError::new(
@@ -3241,6 +7139,15 @@ fn format_quantity(quantity: Quantity) -> String {
 }
 
 #[cfg(feature = "binance")]
+fn binance_trigger_type(trigger_type: bat_markets_core::TriggerType) -> &'static str {
+    match trigger_type {
+        bat_markets_core::TriggerType::LastPrice => "CONTRACT_PRICE",
+        bat_markets_core::TriggerType::MarkPrice => "MARK_PRICE",
+        bat_markets_core::TriggerType::IndexPrice => "MARK_PRICE",
+    }
+}
+
+#[cfg(feature = "binance")]
 fn binance_side(side: bat_markets_core::Side) -> &'static str {
     match side {
         bat_markets_core::Side::Buy => "BUY",
@@ -3263,6 +7170,8 @@ fn binance_order_type(order_type: bat_markets_core::OrderType) -> &'static str {
         bat_markets_core::OrderType::Limit => "LIMIT",
         bat_markets_core::OrderType::StopMarket => "STOP_MARKET",
         bat_markets_core::OrderType::StopLimit => "STOP",
+        bat_markets_core::OrderType::TakeProfitMarket => "TAKE_PROFIT_MARKET",
+        bat_markets_core::OrderType::TakeProfitLimit => "TAKE_PROFIT",
     }
 }
 
@@ -3273,6 +7182,17 @@ fn bybit_order_type(order_type: bat_markets_core::OrderType) -> &'static str {
         bat_markets_core::OrderType::Limit => "Limit",
         bat_markets_core::OrderType::StopMarket => "StopMarket",
         bat_markets_core::OrderType::StopLimit => "Stop",
+        bat_markets_core::OrderType::TakeProfitMarket => "TakeProfitMarket",
+        bat_markets_core::OrderType::TakeProfitLimit => "TakeProfit",
+    }
+}
+
+#[cfg(feature = "bybit")]
+fn bybit_trigger_type(trigger_type: bat_markets_core::TriggerType) -> &'static str {
+    match trigger_type {
+        bat_markets_core::TriggerType::LastPrice => "LastPrice",
+        bat_markets_core::TriggerType::MarkPrice => "MarkPrice",
+        bat_markets_core::TriggerType::IndexPrice => "IndexPrice",
     }
 }
 
@@ -3322,20 +7242,29 @@ fn parse_decimal(raw: &str, venue: Venue) -> Result<Decimal> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ExecutionRepairScope, PendingUnknownCommand, SequenceTracker,
-        bybit_private_sequence_observations, bybit_public_sequence_observations,
-        execution_repair_scope, needs_recent_history_repair, pending_by_instrument,
-        repair_window_start_ms, unresolved_pending_after_executions,
-        unresolved_pending_after_orders, unresolved_pending_after_state,
+        BatchIdentity, CommandTransport, ExecutionRepairScope, PendingUnknownCommand,
+        SequenceTracker, bybit_private_sequence_observations, bybit_public_sequence_observations,
+        classify_binance_batch_payload, classify_bybit_batch_payload, execution_repair_scope,
+        needs_recent_history_repair, pending_by_instrument, repair_window_start_ms,
+        retain_public_events_for_subscription, unresolved_pending_after_executions,
+        unresolved_pending_after_orders, unresolved_pending_after_state, validate_create_orders,
     };
-    use crate::client::BatMarketsBuilder;
+    use crate::client::{AdapterHandle, BatMarketsBuilder};
+    use crate::stream::PublicSubscription;
     use bat_markets_core::{
-        ClientOrderId, CommandOperation, DegradedReason, Execution, HealthReport, InstrumentId,
-        Order, OrderId, Price, Product, Quantity, ReconcileTrigger, Side, TimestampMs, Venue,
+        ClientOrderId, CommandLifecycleEvent, CommandOperation, CommandReceipt, CommandStatus,
+        CreateOrderRequest, CreateOrdersRequest, DegradedReason, Execution, HealthReport,
+        InstrumentId, Order, OrderId, Price, Product, Quantity, ReconcileTrigger, RequestId, Side,
+        TimestampMs, Venue,
     };
-    use bat_markets_core::{OrderStatus, OrderType};
+    use bat_markets_core::{OrderStatus, OrderType, PublicLaneEvent};
     use rust_decimal::Decimal;
+    use tokio::time::{Duration, timeout};
 
+    const BINANCE_COMMAND_BATCH_CREATE_OK: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../fixtures/binance/command_batch_create_ok.json"
+    ));
     const BYBIT_PUBLIC_ORDERBOOK: &str = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/../../fixtures/bybit/public_orderbook.json"
@@ -3405,6 +7334,44 @@ mod tests {
         assert_eq!(execution[0].value, 301);
     }
 
+    #[cfg(feature = "bybit")]
+    #[test]
+    fn public_subscription_filter_drops_unrequested_orderbook_delta_events() {
+        let client = BatMarketsBuilder::default()
+            .venue(Venue::Bybit)
+            .product(Product::LinearUsdt)
+            .build()
+            .expect("fixture bybit client should build");
+        let instrument_id = InstrumentId::from("BTC/USDT:USDT");
+        let mut events = client
+            .stream()
+            .public()
+            .ingest_json(BYBIT_PUBLIC_ORDERBOOK)
+            .expect("fixture orderbook should parse");
+
+        retain_public_events_for_subscription(
+            &mut events,
+            &PublicSubscription {
+                instrument_ids: vec![instrument_id.clone()],
+                ticker: false,
+                trades: false,
+                book_top: true,
+                order_book: false,
+                mark_price: false,
+                funding_rate: false,
+                open_interest: false,
+                liquidations: false,
+                kline_intervals: Vec::new(),
+            },
+        );
+
+        assert_eq!(events.len(), 1);
+        assert!(matches!(
+            &events[0],
+            PublicLaneEvent::BookTop(event) if event.instrument_id == instrument_id
+        ));
+    }
+
     #[test]
     fn pending_unknown_commands_group_by_instrument() {
         let btc = InstrumentId::from("BTC/USDT:USDT");
@@ -3437,6 +7404,205 @@ mod tests {
             &[sample_execution(102, &instrument_id)],
         );
         assert!(after_executions.is_empty());
+    }
+
+    #[test]
+    fn batch_create_validation_requires_client_order_id_and_unique_identity() {
+        let client = BatMarketsBuilder::default()
+            .venue(Venue::Binance)
+            .product(Product::LinearUsdt)
+            .build()
+            .expect("fixture binance client should build");
+        let context = client.live_context();
+        let instrument_id = InstrumentId::from("BTC/USDT:USDT");
+        let quantity = Quantity::new(Decimal::new(1, 3));
+
+        let missing_client_ids = CreateOrdersRequest {
+            request_id: None,
+            orders: vec![
+                CreateOrderRequest {
+                    request_id: None,
+                    instrument_id: instrument_id.clone(),
+                    client_order_id: None,
+                    side: Side::Buy,
+                    order_type: OrderType::Limit,
+                    time_in_force: None,
+                    quantity,
+                    price: Some(Price::new(Decimal::new(70000, 0))),
+                    trigger_price: None,
+                    trigger_type: None,
+                    reduce_only: false,
+                    post_only: false,
+                },
+                CreateOrderRequest {
+                    request_id: None,
+                    instrument_id: instrument_id.clone(),
+                    client_order_id: None,
+                    side: Side::Sell,
+                    order_type: OrderType::Limit,
+                    time_in_force: None,
+                    quantity,
+                    price: Some(Price::new(Decimal::new(70010, 0))),
+                    trigger_price: None,
+                    trigger_type: None,
+                    reduce_only: false,
+                    post_only: false,
+                },
+            ],
+        };
+        let error = validate_create_orders(&context, &missing_client_ids)
+            .expect_err("batch create without client ids should be rejected");
+        assert!(error.to_string().contains("client_order_id"));
+
+        let duplicate_client_ids = CreateOrdersRequest {
+            request_id: None,
+            orders: vec![
+                CreateOrderRequest {
+                    request_id: None,
+                    instrument_id: instrument_id.clone(),
+                    client_order_id: Some(ClientOrderId::from("dup-id")),
+                    side: Side::Buy,
+                    order_type: OrderType::Limit,
+                    time_in_force: None,
+                    quantity,
+                    price: Some(Price::new(Decimal::new(70000, 0))),
+                    trigger_price: None,
+                    trigger_type: None,
+                    reduce_only: false,
+                    post_only: false,
+                },
+                CreateOrderRequest {
+                    request_id: None,
+                    instrument_id,
+                    client_order_id: Some(ClientOrderId::from("dup-id")),
+                    side: Side::Sell,
+                    order_type: OrderType::Limit,
+                    time_in_force: None,
+                    quantity,
+                    price: Some(Price::new(Decimal::new(70010, 0))),
+                    trigger_price: None,
+                    trigger_type: None,
+                    reduce_only: false,
+                    post_only: false,
+                },
+            ],
+        };
+        let error = validate_create_orders(&context, &duplicate_client_ids)
+            .expect_err("batch create with duplicate client ids should be rejected");
+        assert!(error.to_string().contains("duplicate client_order_id"));
+    }
+
+    #[cfg(feature = "binance")]
+    #[test]
+    fn binance_batch_classification_preserves_per_item_request_ids() {
+        let client = BatMarketsBuilder::default()
+            .venue(Venue::Binance)
+            .product(Product::LinearUsdt)
+            .build()
+            .expect("fixture binance client should build");
+        let context = client.live_context();
+        let AdapterHandle::Binance(adapter) = &context.adapter else {
+            panic!("binance adapter should be selected");
+        };
+
+        let receipts = classify_binance_batch_payload(
+            adapter,
+            CommandOperation::CreateOrder,
+            BINANCE_COMMAND_BATCH_CREATE_OK,
+            &[
+                Some(RequestId::from("req-binance-1")),
+                Some(RequestId::from("req-binance-2")),
+            ],
+        )
+        .expect("binance batch payload should classify");
+
+        assert_eq!(receipts.len(), 2);
+        assert_eq!(
+            receipts[0].instrument_id,
+            Some(InstrumentId::from("BTC/USDT:USDT"))
+        );
+        assert_eq!(
+            receipts[1].instrument_id,
+            Some(InstrumentId::from("ETH/USDT:USDT"))
+        );
+        assert_eq!(
+            receipts[0].request_id,
+            Some(RequestId::from("req-binance-1"))
+        );
+        assert_eq!(
+            receipts[1].request_id,
+            Some(RequestId::from("req-binance-2"))
+        );
+        assert_eq!(
+            receipts[1].client_order_id,
+            Some(ClientOrderId::from("cli-binance-2"))
+        );
+    }
+
+    #[cfg(feature = "bybit")]
+    #[test]
+    fn bybit_batch_classification_uses_identity_fallback_for_sparse_items() {
+        let client = BatMarketsBuilder::default()
+            .venue(Venue::Bybit)
+            .product(Product::LinearUsdt)
+            .build()
+            .expect("fixture bybit client should build");
+        let context = client.live_context();
+        let payload = r#"{
+            "retCode": 0,
+            "retMsg": "OK",
+            "result": {
+                "list": [
+                    {"symbol":"BTCUSDT","orderId":"bybit-order-1","orderLinkId":"cli-bybit-1"},
+                    {"symbol":"ETHUSDT","orderId":"bybit-order-2"}
+                ]
+            },
+            "retExtInfo": {
+                "list": [
+                    {"code":0,"msg":"OK"},
+                    {"code":0,"msg":"OK"}
+                ]
+            }
+        }"#;
+
+        let receipts = classify_bybit_batch_payload(
+            &context,
+            CommandOperation::CreateOrder,
+            payload,
+            &[
+                BatchIdentity {
+                    instrument_id: Some(InstrumentId::from("BTC/USDT:USDT")),
+                    order_id: None,
+                    client_order_id: Some(ClientOrderId::from("cli-bybit-1")),
+                    request_id: Some(RequestId::from("req-bybit-1")),
+                },
+                BatchIdentity {
+                    instrument_id: Some(InstrumentId::from("ETH/USDT:USDT")),
+                    order_id: None,
+                    client_order_id: Some(ClientOrderId::from("cli-bybit-2")),
+                    request_id: Some(RequestId::from("req-bybit-2")),
+                },
+            ],
+        )
+        .expect("bybit batch payload should classify");
+
+        assert_eq!(receipts.len(), 2);
+        assert_eq!(receipts[0].status, CommandStatus::Accepted);
+        assert_eq!(receipts[1].status, CommandStatus::Accepted);
+        assert_eq!(receipts[0].request_id, Some(RequestId::from("req-bybit-1")));
+        assert_eq!(receipts[1].request_id, Some(RequestId::from("req-bybit-2")));
+        assert_eq!(
+            receipts[0].client_order_id,
+            Some(ClientOrderId::from("cli-bybit-1"))
+        );
+        assert_eq!(
+            receipts[1].client_order_id,
+            Some(ClientOrderId::from("cli-bybit-2"))
+        );
+        assert_eq!(
+            receipts[1].instrument_id,
+            Some(InstrumentId::from("ETH/USDT:USDT"))
+        );
     }
 
     #[test]
@@ -3531,6 +7697,80 @@ mod tests {
             .expect("last private message should still anchor the window");
 
         assert_eq!(start_ms, now_ms - super::HISTORY_REPAIR_MAX_LOOKBACK_MS);
+    }
+
+    #[tokio::test]
+    async fn unknown_execution_emits_lifecycle_ack_and_recovery_scheduled() {
+        let client = BatMarketsBuilder::default()
+            .venue(Venue::Binance)
+            .product(Product::LinearUsdt)
+            .build()
+            .expect("fixture binance client should build");
+        let context = client.live_context();
+        let mut receiver = client.entry().subscribe();
+        let receipt = CommandReceipt {
+            operation: CommandOperation::CreateOrder,
+            status: CommandStatus::UnknownExecution,
+            venue: Venue::Binance,
+            product: Product::LinearUsdt,
+            instrument_id: Some(InstrumentId::from("BTC/USDT:USDT")),
+            order_id: None,
+            client_order_id: Some(ClientOrderId::from("cli-unknown")),
+            request_id: None,
+            message: Some("command outcome requires reconcile".into()),
+            native_code: None,
+            retriable: true,
+        };
+
+        super::apply_command_receipt(&context, receipt, CommandTransport::Rest).await;
+
+        let first = timeout(Duration::from_secs(1), receiver.recv())
+            .await
+            .expect("ack event should arrive")
+            .expect("ack event should parse");
+        assert!(matches!(
+            first,
+            bat_markets_core::CommandLaneEvent::Lifecycle(CommandLifecycleEvent::Ack(_))
+        ));
+
+        let second = timeout(Duration::from_secs(1), receiver.recv())
+            .await
+            .expect("receipt event should arrive")
+            .expect("receipt event should parse");
+        assert!(matches!(
+            second,
+            bat_markets_core::CommandLaneEvent::Receipt(CommandReceipt {
+                status: CommandStatus::UnknownExecution,
+                ..
+            })
+        ));
+
+        let third = timeout(Duration::from_secs(1), receiver.recv())
+            .await
+            .expect("recovery-scheduled event should arrive")
+            .expect("recovery-scheduled event should parse");
+        assert!(matches!(
+            third,
+            bat_markets_core::CommandLaneEvent::Lifecycle(
+                CommandLifecycleEvent::RecoveryScheduled(_)
+            )
+        ));
+    }
+
+    #[test]
+    fn bybit_order_identity_uses_order_link_id_for_client_order_id() {
+        let mut query = Vec::new();
+        super::append_bybit_order_identity(
+            &mut query,
+            None,
+            Some(&ClientOrderId::from("cli-bybit")),
+        )
+        .expect("client_order_id should be accepted");
+
+        assert_eq!(
+            query,
+            vec![("orderLinkId".to_owned(), "cli-bybit".to_owned())]
+        );
     }
 
     fn pending_unknown(

@@ -1,8 +1,9 @@
 use std::collections::BTreeMap;
 
 use bat_markets_core::{
-    ErrorKind, FetchOhlcvRequest, FetchTradesRequest, FundingRate, InstrumentId, InstrumentSpec,
-    Kline, KlineInterval, MarketError, OpenInterest, Result, Ticker, TimestampMs, TradeTick, Venue,
+    ErrorKind, FetchOhlcvRequest, FetchOrderBookRequest, FetchTickersRequest, FetchTradesRequest,
+    FundingRate, InstrumentId, InstrumentSpec, Kline, KlineInterval, Liquidation, MarkPrice,
+    MarketError, OpenInterest, OrderBookSnapshot, Result, Ticker, TimestampMs, TradeTick, Venue,
 };
 
 use crate::{client::BatMarkets, runtime};
@@ -47,9 +48,21 @@ impl<'a> MarketClient<'a> {
     }
 
     #[must_use]
+    pub fn mark_price(&self, instrument_id: &InstrumentId) -> Option<MarkPrice> {
+        self.inner
+            .read_state(|state| state.mark_price(instrument_id).cloned())
+    }
+
+    #[must_use]
     pub fn open_interest(&self, instrument_id: &InstrumentId) -> Option<OpenInterest> {
         self.inner
             .read_state(|state| state.open_interest(instrument_id).cloned())
+    }
+
+    #[must_use]
+    pub fn liquidations(&self, instrument_id: &InstrumentId) -> Option<Vec<Liquidation>> {
+        self.inner
+            .read_state(|state| state.liquidations(instrument_id))
     }
 
     pub fn require_instrument(&self, instrument_id: &InstrumentId) -> Result<InstrumentSpec> {
@@ -98,6 +111,21 @@ impl<'a> MarketClient<'a> {
         runtime::fetch_ticker(&self.inner.live_context(), instrument_id).await
     }
 
+    /// Fetch one or many ticker snapshots through venue REST APIs.
+    pub async fn fetch_tickers(&self, request: &FetchTickersRequest) -> Result<Vec<Ticker>> {
+        runtime::fetch_tickers(&self.inner.live_context(), request).await
+    }
+
+    /// Fetch the latest mark-price snapshot through the venue REST API.
+    pub async fn fetch_mark_price(&self, instrument_id: &InstrumentId) -> Result<MarkPrice> {
+        runtime::fetch_mark_price(&self.inner.live_context(), instrument_id).await
+    }
+
+    /// Fetch the latest funding-rate snapshot through the venue REST API.
+    pub async fn fetch_funding_rate(&self, instrument_id: &InstrumentId) -> Result<FundingRate> {
+        runtime::fetch_funding_rate(&self.inner.live_context(), instrument_id).await
+    }
+
     /// Fetch recent public trades through the venue REST API.
     pub async fn fetch_trades(&self, request: &FetchTradesRequest) -> Result<Vec<TradeTick>> {
         runtime::fetch_trades(&self.inner.live_context(), request).await
@@ -109,6 +137,23 @@ impl<'a> MarketClient<'a> {
         instrument_id: &InstrumentId,
     ) -> Result<bat_markets_core::BookTop> {
         runtime::fetch_book_top(&self.inner.live_context(), instrument_id).await
+    }
+
+    /// Fetch a focused-symbol order-book snapshot through the venue REST API.
+    pub async fn fetch_order_book(
+        &self,
+        request: &FetchOrderBookRequest,
+    ) -> Result<OrderBookSnapshot> {
+        runtime::fetch_order_book(&self.inner.live_context(), request).await
+    }
+
+    /// Fetch recent liquidation events from the live cache populated by public liquidation feeds.
+    pub async fn fetch_liquidations(
+        &self,
+        instrument_id: &InstrumentId,
+        limit: Option<usize>,
+    ) -> Result<Vec<Liquidation>> {
+        runtime::fetch_liquidations(&self.inner.live_context(), instrument_id, limit).await
     }
 
     /// Fetch historical OHLCV / kline candles through the venue REST API.

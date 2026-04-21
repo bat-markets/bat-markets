@@ -8,9 +8,9 @@ use parking_lot::RwLock;
 use tokio::sync::{broadcast, watch};
 
 use bat_markets_core::{
-    AuthConfig, BatMarketsConfig, CapabilitySet, EngineState, ErrorKind, HealthNotification,
-    HealthReport, InstrumentSpec, LaneSet, MarketError, Product, PublicLaneEvent, Result, Signer,
-    Venue, VenueAdapter,
+    AuthConfig, BatMarketsConfig, CapabilitySet, CommandLaneEvent, EngineState, ErrorKind,
+    HealthNotification, HealthReport, InstrumentSpec, LaneSet, MarketError, MemorySigner,
+    PrivateLaneEvent, Product, PublicLaneEvent, Result, Signer, Venue, VenueAdapter,
 };
 
 #[cfg(feature = "binance")]
@@ -21,13 +21,16 @@ use bat_markets_bybit::BybitLinearFuturesAdapter;
 use crate::{
     account::AccountClient,
     diagnostics::{DiagnosticsClient, SharedStateDiagnostics},
+    entry::EntryClient,
     health::HealthClient,
     market::MarketClient,
     native::NativeClient,
     position::PositionClient,
     runtime,
     stream::StreamClient,
+    subscriptions::SubscriptionHubs,
     trade::TradeClient,
+    transport::CommandTransportHub,
 };
 
 #[derive(Clone)]
@@ -77,6 +80,8 @@ pub(crate) struct SharedState {
     health_watch: watch::Sender<HealthReport>,
     health_notifications: broadcast::Sender<HealthNotification>,
     public_events: broadcast::Sender<PublicLaneEvent>,
+    private_events: broadcast::Sender<PrivateLaneEvent>,
+    command_events: broadcast::Sender<CommandLaneEvent>,
 }
 
 impl SharedState {
@@ -85,6 +90,8 @@ impl SharedState {
         let (health_watch, _) = watch::channel(snapshot);
         let (health_notifications, _) = broadcast::channel(64);
         let (public_events, _) = broadcast::channel(4_096);
+        let (private_events, _) = broadcast::channel(4_096);
+        let (command_events, _) = broadcast::channel(4_096);
 
         Self {
             state: RwLock::new(state),
@@ -92,6 +99,8 @@ impl SharedState {
             health_watch,
             health_notifications,
             public_events,
+            private_events,
+            command_events,
         }
     }
 
@@ -157,26 +166,61 @@ impl SharedState {
             return;
         }
 
+        for event in events.iter().cloned() {
+            let _ = self.public_events.send(event);
+        }
+
         self.write(|state| {
             for event in events.iter().cloned() {
                 let _ = state.apply_public_event(event);
             }
         });
-
-        for event in events.iter().cloned() {
-            let _ = self.public_events.send(event);
-        }
     }
 
     pub(crate) fn apply_public_event(&self, event: PublicLaneEvent) {
+        let _ = self.public_events.send(event.clone());
         self.write(|state| {
             let _ = state.apply_public_event(event.clone());
         });
-        let _ = self.public_events.send(event);
     }
 
     pub(crate) fn subscribe_public_events(&self) -> broadcast::Receiver<PublicLaneEvent> {
         self.public_events.subscribe()
+    }
+
+    pub(crate) fn apply_private_events(&self, events: &[PrivateLaneEvent]) {
+        if events.is_empty() {
+            return;
+        }
+
+        self.write(|state| {
+            for event in events.iter().cloned() {
+                state.apply_private_event(event);
+            }
+        });
+
+        for event in events.iter().cloned() {
+            let _ = self.private_events.send(event);
+        }
+    }
+
+    pub(crate) fn apply_private_event(&self, event: PrivateLaneEvent) {
+        self.write(|state| {
+            state.apply_private_event(event.clone());
+        });
+        let _ = self.private_events.send(event);
+    }
+
+    pub(crate) fn subscribe_private_events(&self) -> broadcast::Receiver<PrivateLaneEvent> {
+        self.private_events.subscribe()
+    }
+
+    pub(crate) fn emit_command_event(&self, event: CommandLaneEvent) {
+        let _ = self.command_events.send(event);
+    }
+
+    pub(crate) fn subscribe_command_events(&self) -> broadcast::Receiver<CommandLaneEvent> {
+        self.command_events.subscribe()
     }
 }
 
@@ -190,6 +234,7 @@ pub(crate) struct LiveContext {
     pub(crate) api_key: Option<Arc<str>>,
     pub(crate) signer: Option<Arc<dyn Signer>>,
     pub(crate) command_limiter: Arc<runtime::CommandRateLimiter>,
+    pub(crate) command_transport: Arc<CommandTransportHub>,
 }
 
 /// Public facade for a single venue/product engine instance.
@@ -213,11 +258,13 @@ pub struct BatMarkets {
     pub(crate) adapter: AdapterHandle,
     pub(crate) shared: Arc<SharedState>,
     pub(crate) runtime_state: Arc<runtime::LiveRuntimeState>,
+    pub(crate) subscription_hubs: Arc<SubscriptionHubs>,
     pub(crate) http: reqwest::Client,
     pub(crate) config: BatMarketsConfig,
     pub(crate) api_key: Option<Arc<str>>,
     pub(crate) signer: Option<Arc<dyn Signer>>,
     pub(crate) command_limiter: Arc<runtime::CommandRateLimiter>,
+    pub(crate) command_transport: Arc<CommandTransportHub>,
 }
 
 impl BatMarkets {
@@ -267,6 +314,11 @@ impl BatMarkets {
     }
 
     #[must_use]
+    pub fn entry(&self) -> EntryClient<'_> {
+        EntryClient::new(self)
+    }
+
+    #[must_use]
     pub fn position(&self) -> PositionClient<'_> {
         PositionClient::new(self)
     }
@@ -309,6 +361,7 @@ impl BatMarkets {
             api_key: self.api_key.clone(),
             signer: self.signer.clone(),
             command_limiter: Arc::clone(&self.command_limiter),
+            command_transport: Arc::clone(&self.command_transport),
         }
     }
 
@@ -325,6 +378,15 @@ impl BatMarkets {
         )));
         let runtime_state = Arc::new(runtime::LiveRuntimeState::default());
         let (api_key, signer) = resolve_auth(&config);
+        let command_limiter = Arc::new(runtime::CommandRateLimiter::new(
+            config.rate_limits.command_burst,
+            config.rate_limits.command_refill_per_second,
+        ));
+        let command_transport = Arc::new(CommandTransportHub::new(
+            config.clone(),
+            api_key.clone(),
+            signer.clone(),
+        ));
         let http = reqwest::Client::builder()
             .connect_timeout(Duration::from_millis(config.timeouts.connect_ms))
             .timeout(Duration::from_millis(config.timeouts.request_ms))
@@ -336,19 +398,29 @@ impl BatMarkets {
                 )
                 .with_venue(config.venue, config.product)
             })?;
+        let subscription_hubs = Arc::new(SubscriptionHubs::new(LiveContext {
+            adapter: adapter.clone(),
+            shared: Arc::clone(&shared),
+            runtime_state: Arc::clone(&runtime_state),
+            http: http.clone(),
+            config: config.clone(),
+            api_key: api_key.clone(),
+            signer: signer.clone(),
+            command_limiter: Arc::clone(&command_limiter),
+            command_transport: Arc::clone(&command_transport),
+        }));
 
         Ok(Self {
             adapter,
             shared,
             runtime_state,
+            subscription_hubs,
             http,
             config: config.clone(),
             api_key,
             signer,
-            command_limiter: Arc::new(runtime::CommandRateLimiter::new(
-                config.rate_limits.command_burst,
-                config.rate_limits.command_refill_per_second,
-            )),
+            command_limiter,
+            command_transport,
         })
     }
 }
@@ -482,6 +554,13 @@ fn resolve_auth(config: &BatMarketsConfig) -> (Option<Arc<str>>, Option<Arc<dyn 
                 Arc::new(bat_markets_core::EnvSigner::new(api_secret_var.clone()));
             (api_key, Some(signer))
         }
+        AuthConfig::Inline {
+            api_key,
+            api_secret,
+        } => {
+            let signer: Arc<dyn Signer> = Arc::new(MemorySigner::new(api_secret.as_ref()));
+            (Some(Arc::<str>::from(api_key.clone())), Some(signer))
+        }
     }
 }
 
@@ -494,4 +573,33 @@ fn should_publish_health_change(before: &HealthReport, after: &HealthReport) -> 
         || before.reconnect_count != after.reconnect_count
         || before.state_divergence != after.state_divergence
         || before.degraded_reason != after.degraded_reason
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_auth;
+    use bat_markets_core::{AuthConfig, BatMarketsConfig, MemorySigner, Product, Signer, Venue};
+
+    #[test]
+    fn resolve_auth_supports_inline_credentials() {
+        let config = BatMarketsConfig {
+            auth: AuthConfig::Inline {
+                api_key: "inline-key".into(),
+                api_secret: "inline-secret".into(),
+            },
+            ..BatMarketsConfig::new(Venue::Binance, Product::LinearUsdt)
+        };
+
+        let (api_key, signer) = resolve_auth(&config);
+        assert_eq!(api_key.as_deref(), Some("inline-key"));
+
+        let signature = signer
+            .expect("inline auth should provide a signer")
+            .sign_hex(b"payload")
+            .expect("inline signer should sign deterministically");
+        let expected = MemorySigner::new("inline-secret")
+            .sign_hex(b"payload")
+            .expect("memory signer should sign deterministically");
+        assert_eq!(signature, expected);
+    }
 }

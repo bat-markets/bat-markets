@@ -10,10 +10,14 @@ pub enum PublicMessage {
     AggTrade(AggTradeEvent),
     #[serde(rename = "bookTicker")]
     BookTicker(BookTickerEvent),
+    #[serde(rename = "depthUpdate")]
+    Depth(DepthEvent),
     #[serde(rename = "kline")]
     Kline(KlineEvent),
     #[serde(rename = "markPriceUpdate")]
     MarkPrice(MarkPriceEvent),
+    #[serde(rename = "forceOrder")]
+    ForceOrder(ForceOrderEvent),
 }
 
 /// Binance private user-data messages.
@@ -24,6 +28,10 @@ pub enum PrivateMessage {
     AccountUpdate(AccountUpdateEvent),
     #[serde(rename = "ORDER_TRADE_UPDATE")]
     OrderTradeUpdate(Box<OrderTradeUpdateEvent>),
+    #[serde(rename = "TRADE_LITE")]
+    TradeLite(TradeLiteEvent),
+    #[serde(rename = "ALGO_UPDATE")]
+    AlgoUpdate(Box<AlgoOrderUpdateEvent>),
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -75,6 +83,24 @@ pub struct BookTickerEvent {
 }
 
 #[derive(Clone, Debug, Deserialize)]
+pub struct DepthEvent {
+    #[serde(rename = "E")]
+    pub event_time: i64,
+    #[serde(rename = "s")]
+    pub symbol: String,
+    #[serde(rename = "U")]
+    pub first_update_id: i64,
+    #[serde(rename = "u")]
+    pub final_update_id: i64,
+    #[serde(default, rename = "pu")]
+    pub previous_final_update_id: Option<i64>,
+    #[serde(rename = "b")]
+    pub bids: Vec<[String; 2]>,
+    #[serde(rename = "a")]
+    pub asks: Vec<[String; 2]>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
 pub struct KlineEvent {
     #[serde(rename = "E")]
     pub event_time: i64,
@@ -116,6 +142,32 @@ pub struct MarkPriceEvent {
     pub mark_price: String,
     #[serde(rename = "r")]
     pub funding_rate: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct ForceOrderEvent {
+    #[serde(rename = "E")]
+    pub event_time: i64,
+    #[serde(rename = "o")]
+    pub order: ForceOrderData,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct ForceOrderData {
+    #[serde(rename = "s")]
+    pub symbol: String,
+    #[serde(rename = "S")]
+    pub side: String,
+    #[serde(rename = "q")]
+    pub quantity: String,
+    #[serde(rename = "p")]
+    pub price: String,
+    #[serde(rename = "ap")]
+    pub average_price: String,
+    #[serde(rename = "z")]
+    pub cumulative_filled_qty: String,
+    #[serde(rename = "T")]
+    pub trade_time: i64,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -347,6 +399,88 @@ pub struct OrderTradeData {
 }
 
 #[derive(Clone, Debug, Deserialize)]
+pub struct TradeLiteEvent {
+    #[serde(rename = "E")]
+    pub event_time: i64,
+    #[serde(rename = "T")]
+    pub trade_time: i64,
+    #[serde(rename = "s")]
+    pub symbol: String,
+    #[serde(rename = "q")]
+    pub original_quantity: String,
+    #[serde(rename = "p")]
+    pub price: String,
+    #[serde(rename = "m")]
+    pub is_maker: bool,
+    #[serde(rename = "c")]
+    pub client_order_id: String,
+    #[serde(rename = "S")]
+    pub side: String,
+    #[serde(rename = "L")]
+    pub last_filled_price: String,
+    #[serde(rename = "l")]
+    pub last_filled_qty: String,
+    #[serde(rename = "t")]
+    pub trade_id: i64,
+    #[serde(rename = "i")]
+    pub order_id: i64,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct AlgoOrderUpdateEvent {
+    #[serde(rename = "E")]
+    pub event_time: i64,
+    #[serde(rename = "T")]
+    pub transaction_time: i64,
+    #[serde(rename = "o")]
+    pub order: AlgoOrderUpdateData,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct AlgoOrderUpdateData {
+    #[serde(rename = "caid")]
+    pub client_algo_id: String,
+    #[serde(rename = "aid")]
+    pub algo_id: i64,
+    #[serde(rename = "o")]
+    pub order_type: String,
+    #[serde(rename = "s")]
+    pub symbol: String,
+    #[serde(rename = "S")]
+    pub side: String,
+    #[serde(rename = "ps")]
+    pub position_side: String,
+    #[serde(default, rename = "f")]
+    pub time_in_force: Option<String>,
+    #[serde(rename = "q")]
+    pub quantity: String,
+    #[serde(rename = "X")]
+    pub algo_status: String,
+    #[serde(default, rename = "ai")]
+    pub actual_order_id: Option<String>,
+    #[serde(default, rename = "ap")]
+    pub average_price: Option<String>,
+    #[serde(default, rename = "aq")]
+    pub executed_quantity: Option<String>,
+    #[serde(default, rename = "p")]
+    pub price: Option<String>,
+    #[serde(rename = "tp")]
+    pub trigger_price: String,
+    #[serde(default, rename = "wt")]
+    pub working_type: Option<String>,
+    #[serde(rename = "cp")]
+    pub close_position: bool,
+    #[serde(rename = "pP")]
+    pub price_protect: bool,
+    #[serde(rename = "R")]
+    pub reduce_only: bool,
+    #[serde(default, rename = "tt")]
+    pub trigger_time: Option<i64>,
+    #[serde(default, rename = "rm")]
+    pub reject_message: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
 pub struct ErrorResponse {
     pub code: i64,
     #[serde(rename = "msg")]
@@ -360,6 +494,59 @@ pub struct OrderResponse {
     pub order_id: i64,
     #[serde(rename = "clientOrderId")]
     pub client_order_id: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct AlgoOrderSnapshot {
+    #[serde(rename = "algoId")]
+    pub algo_id: i64,
+    #[serde(rename = "clientAlgoId")]
+    pub client_algo_id: String,
+    #[serde(rename = "orderType")]
+    pub order_type: String,
+    pub symbol: String,
+    pub side: String,
+    #[serde(default, rename = "positionSide")]
+    pub position_side: Option<String>,
+    #[serde(default, rename = "timeInForce")]
+    pub time_in_force: Option<String>,
+    pub quantity: String,
+    #[serde(rename = "algoStatus")]
+    pub algo_status: String,
+    #[serde(default, rename = "actualOrderId")]
+    pub actual_order_id: Option<String>,
+    #[serde(default, rename = "actualPrice")]
+    pub actual_price: Option<String>,
+    #[serde(default, rename = "triggerPrice")]
+    pub trigger_price: Option<String>,
+    #[serde(default)]
+    pub price: Option<String>,
+    #[serde(default, rename = "workingType")]
+    pub working_type: Option<String>,
+    #[serde(default, rename = "closePosition")]
+    pub close_position: Option<bool>,
+    #[serde(default, rename = "priceProtect")]
+    pub price_protect: Option<bool>,
+    #[serde(default, rename = "reduceOnly")]
+    pub reduce_only: Option<bool>,
+    #[serde(rename = "createTime")]
+    pub create_time: i64,
+    #[serde(rename = "updateTime")]
+    pub update_time: i64,
+    #[serde(default, rename = "triggerTime")]
+    pub trigger_time: Option<i64>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct CancelAlgoOrderResponse {
+    #[serde(rename = "algoId")]
+    pub algo_id: i64,
+    #[serde(rename = "clientAlgoId")]
+    pub client_algo_id: String,
+    #[serde(default)]
+    pub code: Option<serde_json::Value>,
+    #[serde(default)]
+    pub msg: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]

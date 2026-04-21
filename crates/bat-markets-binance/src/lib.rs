@@ -13,14 +13,14 @@ use rust_decimal::Decimal;
 use bat_markets_core::{
     AccountCapabilities, AccountSnapshot, AggressorSide, AssetCapabilities, AssetCode, Balance,
     BatMarketsConfig, CapabilitySet, CommandOperation, CommandReceipt, CommandStatus, ErrorKind,
-    Execution, FastBookTop, FastKline, FastTicker, FastTrade, FetchOhlcvRequest,
-    FetchTradesRequest, FundingRate, InstrumentCatalog, InstrumentId, InstrumentSpec,
-    InstrumentStatus, InstrumentSupport, Kline, KlineInterval, Leverage, MarginMode,
-    MarketCapabilities, MarketError, MarketType, NativeCapabilities, Notional, OpenInterest, Order,
-    OrderId, OrderStatus, OrderType, Position, PositionCapabilities, PositionDirection, PositionId,
-    PositionMode, Price, PrivateLaneEvent, Product, PublicLaneEvent, Quantity, Rate, RequestId,
-    Result, Side, Ticker, TimeInForce, TimestampMs, TradeCapabilities, TradeId, Venue,
-    VenueAdapter,
+    Execution, FastBookTop, FastKline, FastMarkPrice, FastOrderBookDelta, FastTicker, FastTrade,
+    FetchOhlcvRequest, FetchTradesRequest, FundingRate, InstrumentCatalog, InstrumentId,
+    InstrumentSpec, InstrumentStatus, InstrumentSupport, Kline, KlineInterval, Leverage, Liquidity,
+    MarginMode, MarketCapabilities, MarketError, MarketType, NativeCapabilities, Notional,
+    OpenInterest, Order, OrderId, OrderStatus, OrderType, Position, PositionCapabilities,
+    PositionDirection, PositionId, PositionMode, Price, PrivateLaneEvent, Product, PublicLaneEvent,
+    Quantity, Rate, RequestId, Result, Side, Ticker, TimeInForce, TimestampMs, TradeCapabilities,
+    TradeId, Venue, VenueAdapter,
 };
 
 /// Binance linear futures adapter with a handwritten, fixture-backed contract.
@@ -53,22 +53,32 @@ impl BinanceLinearFuturesAdapter {
                     ticker: true,
                     recent_trades: true,
                     book_top: true,
+                    order_book: true,
                     klines: true,
+                    mark_price: true,
                     funding_rate: true,
                     open_interest: true,
+                    liquidations: false,
                     public_streams: true,
+                    multi_symbol_streams: true,
                 },
                 trade: TradeCapabilities {
                     create: true,
+                    batch_create: true,
+                    amend: true,
                     cancel: true,
+                    batch_cancel: true,
+                    cancel_all: true,
                     get: true,
                     list_open: true,
                     history: true,
+                    validate: true,
                 },
                 position: PositionCapabilities {
                     read: true,
                     leverage_set: true,
                     margin_mode_set: true,
+                    position_mode_set: true,
                     hedge_mode: true,
                 },
                 account: AccountCapabilities {
@@ -80,6 +90,7 @@ impl BinanceLinearFuturesAdapter {
                 native: NativeCapabilities {
                     fast_stream: true,
                     special_orders: true,
+                    ws_order_entry: true,
                 },
             },
             lane_set: bat_markets_core::LaneSet {
@@ -301,16 +312,41 @@ impl BinanceLinearFuturesAdapter {
             .collect()
     }
 
+    pub fn parse_open_algo_orders_snapshot(
+        &self,
+        payload: &str,
+        _observed_at: TimestampMs,
+    ) -> Result<Vec<Order>> {
+        let snapshots =
+            serde_json::from_str::<Vec<native::AlgoOrderSnapshot>>(payload).map_err(|error| {
+                MarketError::new(
+                    ErrorKind::DecodeError,
+                    format!("failed to parse binance open-algo-orders snapshot: {error}"),
+                )
+                .with_venue(Venue::Binance, Product::LinearUsdt)
+                .with_operation("binance.parse_open_algo_orders_snapshot")
+            })?;
+
+        snapshots
+            .into_iter()
+            .map(|snapshot| self.algo_order_from_snapshot(snapshot))
+            .collect()
+    }
+
     pub fn parse_order_snapshot(&self, payload: &str, observed_at: TimestampMs) -> Result<Order> {
-        let snapshot = serde_json::from_str::<native::OrderSnapshot>(payload).map_err(|error| {
-            MarketError::new(
-                ErrorKind::DecodeError,
-                format!("failed to parse binance order snapshot: {error}"),
-            )
-            .with_venue(Venue::Binance, Product::LinearUsdt)
-            .with_operation("binance.parse_order_snapshot")
-        })?;
-        self.order_from_snapshot(snapshot, observed_at)
+        if let Ok(snapshot) = serde_json::from_str::<native::OrderSnapshot>(payload) {
+            return self.order_from_snapshot(snapshot, observed_at);
+        }
+        let snapshot =
+            serde_json::from_str::<native::AlgoOrderSnapshot>(payload).map_err(|error| {
+                MarketError::new(
+                    ErrorKind::DecodeError,
+                    format!("failed to parse binance order snapshot: {error}"),
+                )
+                .with_venue(Venue::Binance, Product::LinearUsdt)
+                .with_operation("binance.parse_order_snapshot")
+            })?;
+        self.algo_order_from_snapshot(snapshot)
     }
 
     pub fn parse_order_history_snapshot(
@@ -567,6 +603,60 @@ impl BinanceLinearFuturesAdapter {
         })
     }
 
+    fn algo_order_from_snapshot(&self, snapshot: native::AlgoOrderSnapshot) -> Result<Order> {
+        let spec = self.require_native_symbol(&snapshot.symbol)?;
+        Ok(Order {
+            order_id: binance_algo_order_id(snapshot.algo_id),
+            client_order_id: Some(snapshot.client_algo_id.into()),
+            instrument_id: spec.instrument_id.clone(),
+            side: parse_side(&snapshot.side)?,
+            order_type: parse_order_type(&snapshot.order_type)?,
+            time_in_force: parse_optional_time_in_force(snapshot.time_in_force.as_deref())?,
+            status: parse_algo_order_status(&snapshot.algo_status, Decimal::ZERO),
+            price: parse_optional_price_or_empty(snapshot.price.as_deref())?,
+            quantity: Quantity::new(parse_decimal(&snapshot.quantity)?),
+            filled_quantity: Quantity::new(Decimal::ZERO),
+            average_fill_price: parse_optional_price_or_empty(snapshot.actual_price.as_deref())?,
+            reduce_only: snapshot.reduce_only.unwrap_or(false),
+            post_only: matches!(snapshot.time_in_force.as_deref(), Some("GTX")),
+            created_at: TimestampMs::new(snapshot.create_time),
+            updated_at: TimestampMs::new(snapshot.update_time),
+            venue_status: Some(snapshot.algo_status.into()),
+        })
+    }
+
+    fn algo_order_from_update_event(&self, event: native::AlgoOrderUpdateEvent) -> Result<Order> {
+        let spec = self.require_native_symbol(&event.order.symbol)?;
+        let filled_quantity =
+            parse_optional_decimal_or_empty(event.order.executed_quantity.as_deref())?
+                .unwrap_or(Decimal::ZERO);
+        let created_at = event
+            .order
+            .trigger_time
+            .filter(|time| *time > 0)
+            .unwrap_or(event.transaction_time);
+        Ok(Order {
+            order_id: binance_algo_order_id(event.order.algo_id),
+            client_order_id: Some(event.order.client_algo_id.into()),
+            instrument_id: spec.instrument_id.clone(),
+            side: parse_side(&event.order.side)?,
+            order_type: parse_order_type(&event.order.order_type)?,
+            time_in_force: parse_optional_time_in_force(event.order.time_in_force.as_deref())?,
+            status: parse_algo_order_status(&event.order.algo_status, filled_quantity),
+            price: parse_optional_price_or_empty(event.order.price.as_deref())?,
+            quantity: Quantity::new(parse_decimal(&event.order.quantity)?),
+            filled_quantity: Quantity::new(filled_quantity),
+            average_fill_price: parse_optional_price_or_empty(
+                event.order.average_price.as_deref(),
+            )?,
+            reduce_only: event.order.reduce_only,
+            post_only: matches!(event.order.time_in_force.as_deref(), Some("GTX")),
+            created_at: TimestampMs::new(created_at),
+            updated_at: TimestampMs::new(event.event_time.max(event.transaction_time)),
+            venue_status: Some(event.order.algo_status.into()),
+        })
+    }
+
     fn execution_from_snapshot(&self, snapshot: native::UserTradeSnapshot) -> Result<Execution> {
         let spec = self.require_native_symbol(&snapshot.symbol)?;
         Ok(Execution {
@@ -695,6 +785,57 @@ impl VenueAdapter for BinanceLinearFuturesAdapter {
                     event_time: TimestampMs::new(event.transaction_time),
                 })])
             }
+            native::PublicMessage::Depth(event) => {
+                let spec = self.require_native_symbol(&event.symbol)?;
+                let best_bid = event.bids.first().ok_or_else(|| {
+                    MarketError::new(ErrorKind::DecodeError, "missing binance best bid")
+                })?;
+                let best_ask = event.asks.first().ok_or_else(|| {
+                    MarketError::new(ErrorKind::DecodeError, "missing binance best ask")
+                })?;
+                Ok(vec![
+                    PublicLaneEvent::BookTop(FastBookTop {
+                        instrument_id: spec.instrument_id.clone(),
+                        bid_price: Price::new(parse_decimal(&best_bid[0])?)
+                            .quantize(spec.price_scale)?,
+                        bid_quantity: Quantity::new(parse_decimal(&best_bid[1])?)
+                            .quantize(spec.qty_scale)?,
+                        ask_price: Price::new(parse_decimal(&best_ask[0])?)
+                            .quantize(spec.price_scale)?,
+                        ask_quantity: Quantity::new(parse_decimal(&best_ask[1])?)
+                            .quantize(spec.qty_scale)?,
+                        event_time: TimestampMs::new(event.event_time),
+                    }),
+                    PublicLaneEvent::OrderBookDelta(FastOrderBookDelta {
+                        instrument_id: spec.instrument_id.clone(),
+                        bids: event
+                            .bids
+                            .iter()
+                            .map(|level| {
+                                Ok((
+                                    Price::new(parse_decimal(&level[0])?)
+                                        .quantize(spec.price_scale)?,
+                                    Quantity::new(parse_decimal(&level[1])?)
+                                        .quantize(spec.qty_scale)?,
+                                ))
+                            })
+                            .collect::<Result<Vec<_>>>()?,
+                        asks: event
+                            .asks
+                            .iter()
+                            .map(|level| {
+                                Ok((
+                                    Price::new(parse_decimal(&level[0])?)
+                                        .quantize(spec.price_scale)?,
+                                    Quantity::new(parse_decimal(&level[1])?)
+                                        .quantize(spec.qty_scale)?,
+                                ))
+                            })
+                            .collect::<Result<Vec<_>>>()?,
+                        event_time: TimestampMs::new(event.event_time),
+                    }),
+                ])
+            }
             native::PublicMessage::Kline(event) => {
                 let spec = self.require_native_symbol(&event.symbol)?;
                 Ok(vec![PublicLaneEvent::Kline(FastKline {
@@ -716,12 +857,44 @@ impl VenueAdapter for BinanceLinearFuturesAdapter {
             }
             native::PublicMessage::MarkPrice(event) => {
                 let spec = self.require_native_symbol(&event.symbol)?;
-                Ok(vec![PublicLaneEvent::FundingRate(FundingRate {
-                    instrument_id: spec.instrument_id.clone(),
-                    value: Rate::new(parse_decimal(&event.funding_rate)?),
-                    mark_price: Some(Price::new(parse_decimal(&event.mark_price)?)),
-                    event_time: TimestampMs::new(event.event_time),
-                })])
+                Ok(vec![
+                    PublicLaneEvent::MarkPrice(FastMarkPrice {
+                        instrument_id: spec.instrument_id.clone(),
+                        price: Price::new(parse_decimal(&event.mark_price)?)
+                            .quantize(spec.price_scale)?,
+                        funding_rate: Some(Rate::new(parse_decimal(&event.funding_rate)?)),
+                        event_time: TimestampMs::new(event.event_time),
+                    }),
+                    PublicLaneEvent::FundingRate(FundingRate {
+                        instrument_id: spec.instrument_id.clone(),
+                        value: Rate::new(parse_decimal(&event.funding_rate)?),
+                        mark_price: Some(Price::new(parse_decimal(&event.mark_price)?)),
+                        event_time: TimestampMs::new(event.event_time),
+                    }),
+                ])
+            }
+            native::PublicMessage::ForceOrder(event) => {
+                let spec = self.require_native_symbol(&event.order.symbol)?;
+                let quantity_raw = if event.order.cumulative_filled_qty.is_empty() {
+                    &event.order.quantity
+                } else {
+                    &event.order.cumulative_filled_qty
+                };
+                let price_raw = if event.order.average_price == "0" {
+                    &event.order.price
+                } else {
+                    &event.order.average_price
+                };
+                Ok(vec![PublicLaneEvent::Liquidation(
+                    bat_markets_core::FastLiquidation {
+                        instrument_id: spec.instrument_id.clone(),
+                        side: parse_side(&event.order.side)?,
+                        price: Price::new(parse_decimal(price_raw)?).quantize(spec.price_scale)?,
+                        quantity: Quantity::new(parse_decimal(quantity_raw)?)
+                            .quantize(spec.qty_scale)?,
+                        event_time: TimestampMs::new(event.order.trade_time.max(event.event_time)),
+                    },
+                )])
             }
         }
     }
@@ -825,6 +998,29 @@ impl VenueAdapter for BinanceLinearFuturesAdapter {
 
                 Ok(events)
             }
+            native::PrivateMessage::TradeLite(event) => {
+                let spec = self.require_native_symbol(&event.symbol)?;
+                Ok(vec![PrivateLaneEvent::Execution(Execution {
+                    execution_id: TradeId::from(event.trade_id.to_string()),
+                    order_id: OrderId::from(event.order_id.to_string()),
+                    client_order_id: Some(event.client_order_id.into()),
+                    instrument_id: spec.instrument_id.clone(),
+                    side: parse_side(&event.side)?,
+                    quantity: Quantity::new(parse_decimal(&event.last_filled_qty)?),
+                    price: Price::new(parse_decimal(&event.last_filled_price)?),
+                    fee: None,
+                    fee_asset: None,
+                    liquidity: Some(if event.is_maker {
+                        Liquidity::Maker
+                    } else {
+                        Liquidity::Taker
+                    }),
+                    executed_at: TimestampMs::new(event.trade_time.max(event.event_time)),
+                })])
+            }
+            native::PrivateMessage::AlgoUpdate(event) => Ok(vec![PrivateLaneEvent::Order(
+                self.algo_order_from_update_event(*event)?,
+            )]),
         }
     }
 
@@ -850,6 +1046,25 @@ impl VenueAdapter for BinanceLinearFuturesAdapter {
             });
         };
 
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(payload)
+            && let Some(error) = value.get("error").cloned()
+            && let Ok(error) = serde_json::from_value::<native::ErrorResponse>(error)
+        {
+            return Ok(CommandReceipt {
+                operation,
+                status: CommandStatus::Rejected,
+                venue: Venue::Binance,
+                product: Product::LinearUsdt,
+                instrument_id: None,
+                order_id: None,
+                client_order_id: None,
+                request_id,
+                message: Some(error.message.into()),
+                native_code: Some(error.code.to_string().into()),
+                retriable: false,
+            });
+        }
+
         if let Ok(error) = serde_json::from_str::<native::ErrorResponse>(payload) {
             return Ok(CommandReceipt {
                 operation,
@@ -868,32 +1083,73 @@ impl VenueAdapter for BinanceLinearFuturesAdapter {
 
         match operation {
             CommandOperation::CreateOrder
+            | CommandOperation::AmendOrder
             | CommandOperation::CancelOrder
+            | CommandOperation::ClosePosition
             | CommandOperation::GetOrder => {
-                let response =
-                    serde_json::from_str::<native::OrderResponse>(payload).map_err(|error| {
-                        MarketError::new(
-                            ErrorKind::DecodeError,
-                            format!("failed to classify binance order response: {error}"),
-                        )
-                        .with_venue(Venue::Binance, Product::LinearUsdt)
-                        .with_operation("binance.classify_command")
-                    })?;
-                let spec = self.require_native_symbol(&response.symbol)?;
+                let response = parse_binance_command_identity(payload).map_err(|error| {
+                    MarketError::new(
+                        ErrorKind::DecodeError,
+                        format!("failed to classify binance order response: {error}"),
+                    )
+                    .with_venue(Venue::Binance, Product::LinearUsdt)
+                    .with_operation("binance.classify_command")
+                })?;
+                let (symbol, order_id, client_order_id) = match response {
+                    BinanceAcceptedCommand::Order(response) => (
+                        Some(response.symbol),
+                        Some(OrderId::from(response.order_id.to_string())),
+                        Some(response.client_order_id.into()),
+                    ),
+                    BinanceAcceptedCommand::AlgoOrder(response) => (
+                        Some(response.symbol),
+                        Some(binance_algo_order_id(response.algo_id)),
+                        Some(response.client_algo_id.into()),
+                    ),
+                    BinanceAcceptedCommand::CancelAlgo(response) => (
+                        None,
+                        Some(binance_algo_order_id(response.algo_id)),
+                        Some(response.client_algo_id.into()),
+                    ),
+                };
+                let instrument_id = match symbol {
+                    Some(symbol) => {
+                        Some(self.require_native_symbol(&symbol)?.instrument_id.clone())
+                    }
+                    None => None,
+                };
                 Ok(CommandReceipt {
                     operation,
                     status: CommandStatus::Accepted,
                     venue: Venue::Binance,
                     product: Product::LinearUsdt,
-                    instrument_id: Some(spec.instrument_id.clone()),
-                    order_id: Some(OrderId::from(response.order_id.to_string())),
-                    client_order_id: Some(response.client_order_id.into()),
+                    instrument_id,
+                    order_id,
+                    client_order_id,
                     request_id,
                     message: Some("accepted".into()),
                     native_code: None,
                     retriable: false,
                 })
             }
+            CommandOperation::CreateOrders
+            | CommandOperation::AmendOrders
+            | CommandOperation::CancelOrders
+            | CommandOperation::CancelAllOrders
+            | CommandOperation::ValidateOrder
+            | CommandOperation::SetPositionMode => Ok(CommandReceipt {
+                operation,
+                status: CommandStatus::Accepted,
+                venue: Venue::Binance,
+                product: Product::LinearUsdt,
+                instrument_id: None,
+                order_id: None,
+                client_order_id: None,
+                request_id,
+                message: Some("accepted".into()),
+                native_code: None,
+                retriable: false,
+            }),
             CommandOperation::SetLeverage => {
                 let response = serde_json::from_str::<native::SetLeverageResponse>(payload)
                     .map_err(|error| {
@@ -941,6 +1197,47 @@ impl VenueAdapter for BinanceLinearFuturesAdapter {
             }
         }
     }
+}
+
+enum BinanceAcceptedCommand {
+    Order(native::OrderResponse),
+    AlgoOrder(native::AlgoOrderSnapshot),
+    CancelAlgo(native::CancelAlgoOrderResponse),
+}
+
+fn parse_binance_command_identity(
+    payload: &str,
+) -> std::result::Result<BinanceAcceptedCommand, serde_json::Error> {
+    if let Ok(response) = parse_binance_order_response(payload) {
+        return Ok(BinanceAcceptedCommand::Order(response));
+    }
+    if let Ok(response) = parse_binance_algo_order_response(payload) {
+        return Ok(BinanceAcceptedCommand::AlgoOrder(response));
+    }
+    parse_binance_cancel_algo_order_response(payload).map(BinanceAcceptedCommand::CancelAlgo)
+}
+
+fn parse_binance_order_response(
+    payload: &str,
+) -> std::result::Result<native::OrderResponse, serde_json::Error> {
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(payload)
+        && let Some(result) = value.get("result").cloned()
+    {
+        return serde_json::from_value(result);
+    }
+    serde_json::from_str(payload)
+}
+
+fn parse_binance_algo_order_response(
+    payload: &str,
+) -> std::result::Result<native::AlgoOrderSnapshot, serde_json::Error> {
+    serde_json::from_str(payload)
+}
+
+fn parse_binance_cancel_algo_order_response(
+    payload: &str,
+) -> std::result::Result<native::CancelAlgoOrderResponse, serde_json::Error> {
+    serde_json::from_str(payload)
 }
 
 fn btc_spec() -> InstrumentSpec {
@@ -1009,6 +1306,24 @@ fn parse_optional_decimal(raw: Option<&str>) -> Result<Option<Decimal>> {
     raw.map(parse_decimal).transpose()
 }
 
+fn parse_optional_decimal_or_empty(raw: Option<&str>) -> Result<Option<Decimal>> {
+    raw.filter(|value| !value.is_empty())
+        .map(parse_decimal)
+        .transpose()
+}
+
+fn parse_optional_price_or_empty(raw: Option<&str>) -> Result<Option<Price>> {
+    parse_optional_decimal_or_empty(raw).map(|value| {
+        value.and_then(|price| {
+            if price.is_zero() {
+                None
+            } else {
+                Some(Price::new(price))
+            }
+        })
+    })
+}
+
 fn parse_side(raw: &str) -> Result<Side> {
     match raw {
         "BUY" => Ok(Side::Buy),
@@ -1026,6 +1341,8 @@ fn parse_order_type(raw: &str) -> Result<OrderType> {
         "LIMIT" => Ok(OrderType::Limit),
         "STOP_MARKET" => Ok(OrderType::StopMarket),
         "STOP" => Ok(OrderType::StopLimit),
+        "TAKE_PROFIT_MARKET" => Ok(OrderType::TakeProfitMarket),
+        "TAKE_PROFIT" => Ok(OrderType::TakeProfitLimit),
         other => Err(MarketError::new(
             ErrorKind::DecodeError,
             format!("unsupported binance order type '{other}'"),
@@ -1046,6 +1363,12 @@ fn parse_time_in_force(raw: &str) -> Result<TimeInForce> {
     }
 }
 
+fn parse_optional_time_in_force(raw: Option<&str>) -> Result<Option<TimeInForce>> {
+    raw.filter(|value| !value.is_empty())
+        .map(parse_time_in_force)
+        .transpose()
+}
+
 fn parse_order_status(raw: &str) -> Result<OrderStatus> {
     match raw {
         "NEW" => Ok(OrderStatus::New),
@@ -1060,6 +1383,34 @@ fn parse_order_status(raw: &str) -> Result<OrderStatus> {
             format!("unsupported binance order status '{other}'"),
         )),
     }
+}
+
+fn parse_algo_order_status(raw: &str, filled_quantity: Decimal) -> OrderStatus {
+    match raw {
+        "NEW" => OrderStatus::New,
+        "CANCELED" => OrderStatus::Canceled,
+        "TRIGGERING" | "TRIGGERED" => {
+            if filled_quantity > Decimal::ZERO {
+                OrderStatus::PartiallyFilled
+            } else {
+                OrderStatus::New
+            }
+        }
+        "FINISHED" => {
+            if filled_quantity > Decimal::ZERO {
+                OrderStatus::Filled
+            } else {
+                OrderStatus::Canceled
+            }
+        }
+        "REJECTED" => OrderStatus::Rejected,
+        "EXPIRED" => OrderStatus::Expired,
+        _ => OrderStatus::New,
+    }
+}
+
+fn binance_algo_order_id(algo_id: i64) -> OrderId {
+    OrderId::from(format!("binance-algo:{algo_id}"))
 }
 
 fn parse_margin_mode(raw: &str) -> Result<MarginMode> {
@@ -1407,6 +1758,46 @@ mod tests {
         };
         assert_eq!(order.created_at, TimestampMs::new(1710000001234));
         assert_eq!(order.updated_at, TimestampMs::new(1710000001234));
+    }
+
+    #[test]
+    fn parse_binance_private_trade_lite_execution() {
+        let adapter = BinanceLinearFuturesAdapter::new();
+        let events = adapter
+            .parse_private(
+                r#"{
+                    "e":"TRADE_LITE",
+                    "E":1776795392416,
+                    "T":1776795392415,
+                    "s":"BTCUSDT",
+                    "q":"0.001",
+                    "p":"0.000000",
+                    "m":false,
+                    "c":"bx-open-1776795391188",
+                    "S":"BUY",
+                    "L":"70050.10",
+                    "l":"0.001",
+                    "t":3317622935,
+                    "i":96593497380
+                }"#,
+            )
+            .expect("trade lite should parse");
+
+        assert_eq!(events.len(), 1);
+        let bat_markets_core::PrivateLaneEvent::Execution(execution) = &events[0] else {
+            panic!("expected execution event from TRADE_LITE");
+        };
+        assert_eq!(execution.instrument_id.as_ref(), "BTC/USDT:USDT");
+        assert_eq!(
+            execution.client_order_id.as_ref().map(ToString::to_string),
+            Some("bx-open-1776795391188".to_owned())
+        );
+        assert_eq!(execution.quantity.value().to_string(), "0.001");
+        assert_eq!(execution.price.value().to_string(), "70050.10");
+        assert_eq!(
+            execution.liquidity,
+            Some(bat_markets_core::Liquidity::Taker)
+        );
     }
 
     #[test]

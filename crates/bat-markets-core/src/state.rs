@@ -9,8 +9,8 @@ use crate::health::HealthReport;
 use crate::ids::{AssetCode, InstrumentId, OrderId};
 use crate::instrument::InstrumentSpec;
 use crate::market::{
-    BookTop, FastBookTop, FastKline, FastTicker, FastTrade, FundingRate, Kline, OpenInterest,
-    Ticker, TradeTick,
+    BookTop, FastBookTop, FastKline, FastLiquidation, FastMarkPrice, FastTicker, FastTrade,
+    FundingRate, Kline, Liquidation, MarkPrice, OpenInterest, Ticker, TradeTick,
 };
 use crate::position::Position;
 use crate::reconcile::{AccountSnapshot, PrivateSnapshot, ReconcileOutcome, ReconcileReport};
@@ -28,8 +28,10 @@ pub struct EngineState {
     recent_trades: BTreeMap<InstrumentId, VecDeque<TradeTick>>,
     book_tops: BTreeMap<InstrumentId, BookTop>,
     klines: BTreeMap<InstrumentId, Kline>,
+    mark_prices: BTreeMap<InstrumentId, MarkPrice>,
     funding_rates: BTreeMap<InstrumentId, FundingRate>,
     open_interest: BTreeMap<InstrumentId, OpenInterest>,
+    liquidations: BTreeMap<InstrumentId, VecDeque<Liquidation>>,
     balances: BTreeMap<AssetCode, Balance>,
     account_summary: Option<AccountSummary>,
     positions: BTreeMap<InstrumentId, Position>,
@@ -60,8 +62,10 @@ impl EngineState {
             recent_trades: BTreeMap::new(),
             book_tops: BTreeMap::new(),
             klines: BTreeMap::new(),
+            mark_prices: BTreeMap::new(),
             funding_rates: BTreeMap::new(),
             open_interest: BTreeMap::new(),
+            liquidations: BTreeMap::new(),
             balances: BTreeMap::new(),
             account_summary: None,
             positions: BTreeMap::new(),
@@ -76,7 +80,9 @@ impl EngineState {
             PublicLaneEvent::Ticker(ticker) => self.apply_fast_ticker(ticker)?,
             PublicLaneEvent::Trade(trade) => self.apply_fast_trade(trade)?,
             PublicLaneEvent::BookTop(book_top) => self.apply_fast_book_top(book_top)?,
+            PublicLaneEvent::OrderBookDelta(_) => {}
             PublicLaneEvent::Kline(kline) => self.apply_fast_kline(kline)?,
+            PublicLaneEvent::MarkPrice(mark_price) => self.apply_fast_mark_price(mark_price)?,
             PublicLaneEvent::FundingRate(funding_rate) => {
                 self.health.observe_public_message(funding_rate.event_time);
                 self.funding_rates
@@ -86,6 +92,9 @@ impl EngineState {
                 self.health.observe_public_message(open_interest.event_time);
                 self.open_interest
                     .insert(open_interest.instrument_id.clone(), open_interest);
+            }
+            PublicLaneEvent::Liquidation(liquidation) => {
+                self.apply_fast_liquidation(liquidation)?;
             }
             PublicLaneEvent::Divergence(divergence) => match divergence {
                 DivergenceEvent::ReconcileRequired | DivergenceEvent::SequenceGap { .. } => {
@@ -294,8 +303,20 @@ impl EngineState {
     }
 
     #[must_use]
+    pub fn mark_price(&self, instrument_id: &InstrumentId) -> Option<&MarkPrice> {
+        self.mark_prices.get(instrument_id)
+    }
+
+    #[must_use]
     pub fn open_interest(&self, instrument_id: &InstrumentId) -> Option<&OpenInterest> {
         self.open_interest.get(instrument_id)
+    }
+
+    #[must_use]
+    pub fn liquidations(&self, instrument_id: &InstrumentId) -> Option<Vec<Liquidation>> {
+        self.liquidations
+            .get(instrument_id)
+            .map(|events| events.iter().cloned().collect())
     }
 
     #[must_use]
@@ -460,6 +481,34 @@ impl EngineState {
         Ok(())
     }
 
+    fn apply_fast_mark_price(&mut self, mark_price: FastMarkPrice) -> Result<()> {
+        let unified = {
+            let spec = self.spec(&mark_price.instrument_id)?;
+            mark_price.to_unified(spec)
+        };
+        self.health.observe_public_message(mark_price.event_time);
+        self.mark_prices
+            .insert(mark_price.instrument_id.clone(), unified);
+        Ok(())
+    }
+
+    fn apply_fast_liquidation(&mut self, liquidation: FastLiquidation) -> Result<()> {
+        let unified = {
+            let spec = self.spec(&liquidation.instrument_id)?;
+            liquidation.to_unified(spec)
+        };
+        self.health.observe_public_message(liquidation.event_time);
+        let entry = self
+            .liquidations
+            .entry(liquidation.instrument_id.clone())
+            .or_default();
+        entry.push_back(unified);
+        while entry.len() > self.state_policy.recent_trade_capacity {
+            let _ = entry.pop_front();
+        }
+        Ok(())
+    }
+
     fn spec(&self, instrument_id: &InstrumentId) -> Result<&InstrumentSpec> {
         self.instruments.get(instrument_id).ok_or_else(|| {
             MarketError::new(
@@ -486,9 +535,13 @@ impl EngineState {
             .retain(|instrument_id, _| retain_instruments(instrument_id, &self.instruments));
         self.klines
             .retain(|instrument_id, _| retain_instruments(instrument_id, &self.instruments));
+        self.mark_prices
+            .retain(|instrument_id, _| retain_instruments(instrument_id, &self.instruments));
         self.funding_rates
             .retain(|instrument_id, _| retain_instruments(instrument_id, &self.instruments));
         self.open_interest
+            .retain(|instrument_id, _| retain_instruments(instrument_id, &self.instruments));
+        self.liquidations
             .retain(|instrument_id, _| retain_instruments(instrument_id, &self.instruments));
     }
 }

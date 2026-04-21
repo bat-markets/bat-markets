@@ -65,6 +65,8 @@ pub enum OrderType {
     Limit,
     StopMarket,
     StopLimit,
+    TakeProfitMarket,
+    TakeProfitLimit,
 }
 
 /// Unified time in force.

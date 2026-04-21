@@ -1,8 +1,9 @@
 use serde::{Deserialize, Serialize};
 
 use crate::account::Balance;
-use crate::command::CommandReceipt;
+use crate::command::{CommandLifecycleEvent, CommandReceipt};
 use crate::market::{FastBookTop, FastKline, FastTicker, FastTrade, FundingRate, OpenInterest};
+use crate::market::{FastLiquidation, FastMarkPrice, FastOrderBookDelta};
 use crate::position::Position;
 use crate::primitives::SequenceNumber;
 use crate::trade::{Execution, Order};
@@ -31,9 +32,12 @@ pub enum PublicLaneEvent {
     Ticker(FastTicker),
     Trade(FastTrade),
     BookTop(FastBookTop),
+    OrderBookDelta(FastOrderBookDelta),
     Kline(FastKline),
+    MarkPrice(FastMarkPrice),
     FundingRate(FundingRate),
     OpenInterest(OpenInterest),
+    Liquidation(FastLiquidation),
     Divergence(DivergenceEvent),
 }
 
@@ -59,4 +63,5 @@ pub enum PrivateLaneEvent {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CommandLaneEvent {
     Receipt(CommandReceipt),
+    Lifecycle(CommandLifecycleEvent),
 }

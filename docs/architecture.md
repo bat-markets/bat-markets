@@ -128,6 +128,36 @@ The live runtime follows these rules:
 - venue-specific transport details stay behind `AdapterHandle` dispatch rather than a public universal trait
 - reconnect and reconcile remain explicit engine concerns, not hidden transport behavior
 
+Internally the facade runtime is split into transport, subscription, feed, entry, reconcile, and diagnostics concerns even though they remain private modules inside `bat-markets`.
+
+### Subscription Hubs
+
+Live websocket usage is multiplexed through shared hubs rather than “one task per watcher”.
+
+- one public hub fans out typed market-data events
+- one private hub fans out order, execution, balance, position, and account events
+- typed `watch_*` methods hold lightweight leases over those shared hubs
+- duplicate watchers do not intentionally multiply exchange websocket subscriptions
+
+### Feed And Projection Flow
+
+The runtime publishes lane events before higher-level projections are queried by consumers.
+
+- public feed updates fan out through the shared public bus
+- private feed updates fan out through the shared private bus
+- synchronous snapshot readers stay cheap through cached state access
+- diagnostics and health remain operator-facing snapshots rather than a required external metrics stack
+
+### Command Plane
+
+The read-side `trade()` API is intentionally separated from the low-latency `entry()` API.
+
+- `entry()` returns fast acknowledgements through `PendingCommandHandle`
+- command lifecycle events are broadcast through the shared command lane
+- websocket order entry is used where the venue supports and the runtime validates it
+- REST remains the fallback path for venue-specific gaps and for settings/validation flows that are still REST-native
+- uncertain outcomes stay explicit and schedule reconcile in the background rather than blocking the hot path
+
 ### Metadata Bootstrap
 
 Instrument metadata is no longer treated as a hardcoded adapter constant in live mode.
@@ -166,6 +196,7 @@ Live mode also exposes a cheap diagnostics snapshot for:
 
 - shared-state read/write lock wait and hold costs,
 - key runtime REST and reconcile latencies,
+- command-lane acknowledgement and lifecycle latency tracking,
 - operator-facing live stress sanity checks without an external metrics backend.
 
 ## Testing Strategy
@@ -178,12 +209,15 @@ The current foundation relies on:
 - smoke tests for the facade,
 - benchmarks for decode, normalization, and state apply.
 
-## Intentional Deviation From The Illustrative Blueprint Tree
+## Examples And Benches
 
-The blueprint shows root-level `examples/` and `benches/`.
-This repository uses a virtual workspace root, so executable examples and benches live with their owning crates:
+The executable Rust examples and benches live with their owning crates:
 
-- examples: `crates/bat-markets/examples/`
+- Rust examples: `crates/bat-markets/examples/`
 - benches: `crates/bat-markets-testing/benches/`
 
-This keeps the workspace root clean without changing the architectural intent.
+The workspace root also contains an operator-facing Bun panel:
+
+- web demo: `examples/realtime-web/`
+
+The Bun panel does not reimplement exchange logic. It launches the real Rust examples and streams their output into a browser for quick manual validation.

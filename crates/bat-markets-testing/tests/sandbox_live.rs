@@ -1,20 +1,29 @@
 use std::{env, time::Duration};
 
 use rust_decimal::{Decimal, RoundingStrategy};
-use tokio::time::sleep;
+use tokio::time::{Instant, sleep};
 
 use bat_markets::{
     BatMarkets, BatMarketsBuilder, PublicSubscription,
     errors::Result,
     types::{
-        CancelOrderRequest, ClientOrderId, CreateOrderRequest, GetOrderRequest, InstrumentId,
-        OrderType, Price, Product, Quantity, Side, TimeInForce, Venue,
+        CancelOrderRequest, CancelOrdersRequest, ClientOrderId, CommandStatus, CreateOrderRequest,
+        CreateOrdersRequest, GetOrderRequest, InstrumentId, ListOpenOrdersRequest, OrderTarget,
+        OrderType, Price, Quantity, Side, TimeInForce, ValidateOrderRequest, Venue,
     },
 };
-use bat_markets_core::{InstrumentSpec, InstrumentStatus, VenueAdapter};
-use bat_markets_testing::{has_binance_live_env, has_bybit_live_env};
+use bat_markets_core::{CommandTransport, InstrumentSpec, InstrumentStatus, VenueAdapter};
+use bat_markets_testing::{
+    LiveTestEndpointMode, has_binance_live_env, has_bybit_live_env, live_test_config,
+    live_test_uses_sandbox,
+};
 
 const PREFERRED_SANDBOX_SYMBOLS: &[&str] = &["BTC/USDT:USDT", "ETH/USDT:USDT", "SOL/USDT:USDT"];
+
+fn live_writes_enabled() -> bool {
+    env::var_os("BAT_MARKETS_ENABLE_LIVE_WRITES").is_some()
+        || env::var_os("BAT_MARKETS_ENABLE_SANDBOX_WRITES").is_some()
+}
 
 #[tokio::test]
 async fn binance_sandbox_read_flows_are_env_gated() -> Result<()> {
@@ -22,13 +31,18 @@ async fn binance_sandbox_read_flows_are_env_gated() -> Result<()> {
         return Ok(());
     }
 
-    let client = BatMarkets::builder()
-        .venue(Venue::Binance)
-        .product(Product::LinearUsdt)
+    let client = BatMarketsBuilder::default()
+        .config(live_test_config(
+            Venue::Binance,
+            LiveTestEndpointMode::Sandbox,
+        ))
         .build_live()
         .await?;
 
-    assert!(client.native().binance()?.config().endpoints.sandbox);
+    assert_eq!(
+        client.native().binance()?.config().endpoints.sandbox,
+        live_test_uses_sandbox(Venue::Binance, LiveTestEndpointMode::Sandbox)
+    );
 
     let first = preferred_sandbox_instrument(&client);
 
@@ -39,7 +53,17 @@ async fn binance_sandbox_read_flows_are_env_gated() -> Result<()> {
         .await?;
     let private = client.stream().private().spawn_live().await?;
 
-    sleep(Duration::from_secs(2)).await;
+    wait_for_public_market_signal(
+        &client,
+        &first,
+        Duration::from_secs(8),
+        |client, instrument_id| {
+            client.market().ticker(instrument_id).is_some()
+                || client.market().book_top(instrument_id).is_some()
+                || client.market().recent_trades(instrument_id).is_some()
+        },
+    )
+    .await?;
 
     public.shutdown().await?;
     private.shutdown().await?;
@@ -50,7 +74,11 @@ async fn binance_sandbox_read_flows_are_env_gated() -> Result<()> {
     let _ = client.trade().refresh_executions(None).await?;
     let _ = client.stream().private().reconcile().await?;
 
-    assert!(client.market().ticker(&first).is_some() || client.market().book_top(&first).is_some());
+    assert!(
+        client.market().ticker(&first).is_some()
+            || client.market().book_top(&first).is_some()
+            || client.market().recent_trades(&first).is_some()
+    );
     Ok(())
 }
 
@@ -60,13 +88,18 @@ async fn bybit_sandbox_read_flows_are_env_gated() -> Result<()> {
         return Ok(());
     }
 
-    let client = BatMarkets::builder()
-        .venue(Venue::Bybit)
-        .product(Product::LinearUsdt)
+    let client = BatMarketsBuilder::default()
+        .config(live_test_config(
+            Venue::Bybit,
+            LiveTestEndpointMode::Sandbox,
+        ))
         .build_live()
         .await?;
 
-    assert!(client.native().bybit()?.config().endpoints.sandbox);
+    assert_eq!(
+        client.native().bybit()?.config().endpoints.sandbox,
+        live_test_uses_sandbox(Venue::Bybit, LiveTestEndpointMode::Sandbox)
+    );
 
     let first = preferred_sandbox_instrument(&client);
 
@@ -77,7 +110,17 @@ async fn bybit_sandbox_read_flows_are_env_gated() -> Result<()> {
         .await?;
     let private = client.stream().private().spawn_live().await?;
 
-    sleep(Duration::from_secs(2)).await;
+    wait_for_public_market_signal(
+        &client,
+        &first,
+        Duration::from_secs(8),
+        |client, instrument_id| {
+            client.market().ticker(instrument_id).is_some()
+                || client.market().book_top(instrument_id).is_some()
+                || client.market().open_interest(instrument_id).is_some()
+        },
+    )
+    .await?;
 
     public.shutdown().await?;
     private.shutdown().await?;
@@ -94,20 +137,25 @@ async fn bybit_sandbox_read_flows_are_env_gated() -> Result<()> {
 
 #[tokio::test]
 async fn binance_sandbox_create_cancel_is_manual_and_safe() -> Result<()> {
-    if !has_binance_live_env() || env::var_os("BAT_MARKETS_ENABLE_SANDBOX_WRITES").is_none() {
+    if !has_binance_live_env() || !live_writes_enabled() {
         return Ok(());
     }
 
     let client = BatMarketsBuilder::default()
-        .venue(Venue::Binance)
-        .product(Product::LinearUsdt)
+        .config(live_test_config(
+            Venue::Binance,
+            LiveTestEndpointMode::Sandbox,
+        ))
         .build_live()
         .await?;
     let Some((instrument_id, price, quantity)) = sandbox_order_parameters(&client).await? else {
         return Ok(());
     };
 
-    assert!(client.native().binance()?.config().endpoints.sandbox);
+    assert_eq!(
+        client.native().binance()?.config().endpoints.sandbox,
+        live_test_uses_sandbox(Venue::Binance, LiveTestEndpointMode::Sandbox)
+    );
 
     let private = client.stream().private().spawn_live().await?;
     let create = client
@@ -124,6 +172,8 @@ async fn binance_sandbox_create_cancel_is_manual_and_safe() -> Result<()> {
             time_in_force: Some(TimeInForce::Gtc),
             quantity,
             price: Some(price),
+            trigger_price: None,
+            trigger_type: None,
             reduce_only: false,
             post_only: true,
         })
@@ -167,20 +217,25 @@ async fn binance_sandbox_create_cancel_is_manual_and_safe() -> Result<()> {
 
 #[tokio::test]
 async fn bybit_sandbox_create_cancel_is_manual_and_safe() -> Result<()> {
-    if !has_bybit_live_env() || env::var_os("BAT_MARKETS_ENABLE_SANDBOX_WRITES").is_none() {
+    if !has_bybit_live_env() || !live_writes_enabled() {
         return Ok(());
     }
 
     let client = BatMarketsBuilder::default()
-        .venue(Venue::Bybit)
-        .product(Product::LinearUsdt)
+        .config(live_test_config(
+            Venue::Bybit,
+            LiveTestEndpointMode::Sandbox,
+        ))
         .build_live()
         .await?;
     let Some((instrument_id, price, quantity)) = sandbox_order_parameters(&client).await? else {
         return Ok(());
     };
 
-    assert!(client.native().bybit()?.config().endpoints.sandbox);
+    assert_eq!(
+        client.native().bybit()?.config().endpoints.sandbox,
+        live_test_uses_sandbox(Venue::Bybit, LiveTestEndpointMode::Sandbox)
+    );
 
     let private = client.stream().private().spawn_live().await?;
     let create = client
@@ -197,6 +252,8 @@ async fn bybit_sandbox_create_cancel_is_manual_and_safe() -> Result<()> {
             time_in_force: Some(TimeInForce::Gtc),
             quantity,
             price: Some(price),
+            trigger_price: None,
+            trigger_type: None,
             reduce_only: false,
             post_only: true,
         })
@@ -227,6 +284,146 @@ async fn bybit_sandbox_create_cancel_is_manual_and_safe() -> Result<()> {
             client_order_id,
         })
         .await?;
+    let _ = client.trade().refresh_executions(None).await?;
+    let _ = client.stream().private().reconcile().await?;
+
+    private.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn binance_sandbox_batch_validate_create_cancel_is_manual_and_safe() -> Result<()> {
+    if !has_binance_live_env() || !live_writes_enabled() {
+        return Ok(());
+    }
+
+    let client = BatMarketsBuilder::default()
+        .config(live_test_config(
+            Venue::Binance,
+            LiveTestEndpointMode::Sandbox,
+        ))
+        .build_live()
+        .await?;
+    let Some((instrument_id, prices, quantity)) = sandbox_batch_order_parameters(&client).await?
+    else {
+        return Ok(());
+    };
+
+    assert_eq!(
+        client.native().binance()?.config().endpoints.sandbox,
+        live_test_uses_sandbox(Venue::Binance, LiveTestEndpointMode::Sandbox)
+    );
+
+    let create_request = sandbox_batch_request(Venue::Binance, &instrument_id, prices, quantity);
+    let cancel_request = sandbox_batch_cancel_request(&create_request);
+    let client_order_ids = create_request
+        .orders
+        .iter()
+        .filter_map(|order| order.client_order_id.clone())
+        .collect::<Vec<_>>();
+
+    let private = client.stream().private().spawn_live().await?;
+    validate_batch_orders(&client, &create_request).await?;
+
+    let create = client.entry().create_orders(&create_request).await?;
+    assert_eq!(create.len(), 2);
+    assert!(
+        create
+            .iter()
+            .all(|handle| handle.ack().receipt.status == CommandStatus::Accepted)
+    );
+    assert!(
+        create
+            .iter()
+            .all(|handle| handle.ack().transport == CommandTransport::WebSocket)
+    );
+
+    await_open_order_state(&client, &instrument_id, &client_order_ids, true).await?;
+
+    let cancel = client.entry().cancel_orders(&cancel_request).await?;
+    assert_eq!(cancel.len(), 2);
+    assert!(
+        cancel
+            .iter()
+            .all(|handle| handle.ack().receipt.status == CommandStatus::Accepted)
+    );
+    assert!(
+        cancel
+            .iter()
+            .all(|handle| handle.ack().transport == CommandTransport::WebSocket)
+    );
+
+    await_open_order_state(&client, &instrument_id, &client_order_ids, false).await?;
+    let _ = client.trade().refresh_executions(None).await?;
+    let _ = client.stream().private().reconcile().await?;
+
+    private.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn bybit_sandbox_batch_validate_create_cancel_is_manual_and_safe() -> Result<()> {
+    if !has_bybit_live_env() || !live_writes_enabled() {
+        return Ok(());
+    }
+
+    let client = BatMarketsBuilder::default()
+        .config(live_test_config(
+            Venue::Bybit,
+            LiveTestEndpointMode::Sandbox,
+        ))
+        .build_live()
+        .await?;
+    let Some((instrument_id, prices, quantity)) = sandbox_batch_order_parameters(&client).await?
+    else {
+        return Ok(());
+    };
+
+    assert_eq!(
+        client.native().bybit()?.config().endpoints.sandbox,
+        live_test_uses_sandbox(Venue::Bybit, LiveTestEndpointMode::Sandbox)
+    );
+
+    let create_request = sandbox_batch_request(Venue::Bybit, &instrument_id, prices, quantity);
+    let cancel_request = sandbox_batch_cancel_request(&create_request);
+    let client_order_ids = create_request
+        .orders
+        .iter()
+        .filter_map(|order| order.client_order_id.clone())
+        .collect::<Vec<_>>();
+
+    let private = client.stream().private().spawn_live().await?;
+    validate_batch_orders(&client, &create_request).await?;
+
+    let create = client.entry().create_orders(&create_request).await?;
+    assert_eq!(create.len(), 2);
+    assert!(
+        create
+            .iter()
+            .all(|handle| handle.ack().receipt.status == CommandStatus::Accepted)
+    );
+    assert!(
+        create
+            .iter()
+            .all(|handle| handle.ack().transport == CommandTransport::WebSocket)
+    );
+
+    await_open_order_state(&client, &instrument_id, &client_order_ids, true).await?;
+
+    let cancel = client.entry().cancel_orders(&cancel_request).await?;
+    assert_eq!(cancel.len(), 2);
+    assert!(
+        cancel
+            .iter()
+            .all(|handle| handle.ack().receipt.status == CommandStatus::Accepted)
+    );
+    assert!(
+        cancel
+            .iter()
+            .all(|handle| handle.ack().transport == CommandTransport::WebSocket)
+    );
+
+    await_open_order_state(&client, &instrument_id, &client_order_ids, false).await?;
     let _ = client.trade().refresh_executions(None).await?;
     let _ = client.stream().private().reconcile().await?;
 
@@ -267,6 +464,40 @@ async fn sandbox_order_parameters(
     )))
 }
 
+async fn sandbox_batch_order_parameters(
+    client: &BatMarkets,
+) -> Result<Option<(InstrumentId, [Price; 2], Quantity)>> {
+    let Some((instrument_id, first_price, quantity)) = sandbox_order_parameters(client).await?
+    else {
+        return Ok(None);
+    };
+    let spec = client
+        .market()
+        .instrument_specs()
+        .into_iter()
+        .find(|spec| spec.instrument_id == instrument_id)
+        .ok_or_else(|| {
+            bat_markets_core::MarketError::new(
+                bat_markets_core::ErrorKind::ConfigError,
+                format!("missing spec for sandbox batch instrument {instrument_id}"),
+            )
+        })?;
+
+    let tick = spec.tick_size.value();
+    let fallback = quantize_down(
+        (first_price.value() - tick * Decimal::new(2, 0)).max(tick),
+        tick,
+        spec.price_scale,
+    );
+    let second_price = if fallback <= Decimal::ZERO || fallback == first_price.value() {
+        first_price
+    } else {
+        Price::new(fallback)
+    };
+
+    Ok(Some((instrument_id, [first_price, second_price], quantity)))
+}
+
 async fn autodiscover_sandbox_order_parameters(
     client: &BatMarkets,
 ) -> Result<Option<(InstrumentId, Price, Quantity)>> {
@@ -303,6 +534,26 @@ async fn autodiscover_sandbox_order_parameters(
     Ok(None)
 }
 
+async fn wait_for_public_market_signal(
+    client: &BatMarkets,
+    instrument_id: &InstrumentId,
+    timeout: Duration,
+    ready: impl Fn(&BatMarkets, &InstrumentId) -> bool,
+) -> Result<()> {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if ready(client, instrument_id) {
+            return Ok(());
+        }
+        sleep(Duration::from_millis(200)).await;
+    }
+
+    Err(bat_markets_core::MarketError::new(
+        bat_markets_core::ErrorKind::Timeout,
+        format!("timed out waiting for public market signal for {instrument_id}"),
+    ))
+}
+
 async fn discover_spec_order_parameters(
     client: &BatMarkets,
     spec: &InstrumentSpec,
@@ -316,9 +567,12 @@ async fn discover_spec_order_parameters(
             ticker: true,
             trades: false,
             book_top: true,
+            order_book: false,
+            mark_price: false,
             funding_rate: false,
             open_interest: false,
-            kline_interval: None,
+            liquidations: false,
+            kline_intervals: Vec::new(),
         })
         .await?;
     sleep(Duration::from_secs(2)).await;
@@ -379,6 +633,121 @@ fn quantize_down(value: Decimal, step: Decimal, scale: u32) -> Decimal {
 fn quantize_up(value: Decimal, step: Decimal, scale: u32) -> Decimal {
     let steps = (value / step).ceil();
     (steps * step).round_dp_with_strategy(scale, RoundingStrategy::AwayFromZero)
+}
+
+fn sandbox_batch_request(
+    venue: Venue,
+    instrument_id: &InstrumentId,
+    prices: [Price; 2],
+    quantity: Quantity,
+) -> CreateOrdersRequest {
+    let suffix = chrono_suffix();
+    let prefix = match venue {
+        Venue::Binance => "codex-binance-batch",
+        Venue::Bybit => "codex-bybit-batch",
+    };
+
+    CreateOrdersRequest {
+        request_id: None,
+        orders: vec![
+            CreateOrderRequest {
+                request_id: None,
+                instrument_id: instrument_id.clone(),
+                client_order_id: Some(ClientOrderId::from(format!("{prefix}-{suffix}-1"))),
+                side: Side::Buy,
+                order_type: OrderType::Limit,
+                time_in_force: Some(TimeInForce::Gtc),
+                quantity,
+                price: Some(prices[0]),
+                trigger_price: None,
+                trigger_type: None,
+                reduce_only: false,
+                post_only: true,
+            },
+            CreateOrderRequest {
+                request_id: None,
+                instrument_id: instrument_id.clone(),
+                client_order_id: Some(ClientOrderId::from(format!("{prefix}-{suffix}-2"))),
+                side: Side::Buy,
+                order_type: OrderType::Limit,
+                time_in_force: Some(TimeInForce::Gtc),
+                quantity,
+                price: Some(prices[1]),
+                trigger_price: None,
+                trigger_type: None,
+                reduce_only: false,
+                post_only: true,
+            },
+        ],
+    }
+}
+
+fn sandbox_batch_cancel_request(request: &CreateOrdersRequest) -> CancelOrdersRequest {
+    CancelOrdersRequest {
+        request_id: None,
+        orders: request
+            .orders
+            .iter()
+            .map(|order| OrderTarget {
+                instrument_id: order.instrument_id.clone(),
+                order_id: None,
+                client_order_id: order.client_order_id.clone(),
+            })
+            .collect(),
+    }
+}
+
+async fn validate_batch_orders(client: &BatMarkets, request: &CreateOrdersRequest) -> Result<()> {
+    for order in &request.orders {
+        let handle = client
+            .entry()
+            .validate_order(&ValidateOrderRequest {
+                request_id: None,
+                order: order.clone(),
+            })
+            .await?;
+        assert_eq!(handle.ack().receipt.status, CommandStatus::Accepted);
+    }
+    Ok(())
+}
+
+async fn await_open_order_state(
+    client: &BatMarkets,
+    instrument_id: &InstrumentId,
+    client_order_ids: &[ClientOrderId],
+    expected_present: bool,
+) -> Result<()> {
+    for _ in 0..20 {
+        let orders = client
+            .trade()
+            .refresh_open_orders(Some(&ListOpenOrdersRequest {
+                instrument_id: Some(instrument_id.clone()),
+            }))
+            .await?;
+        let all_present = client_order_ids.iter().all(|client_order_id| {
+            orders.iter().any(|order| {
+                order.client_order_id.as_ref() == Some(client_order_id)
+                    && order.instrument_id == *instrument_id
+            })
+        });
+        let any_present = client_order_ids.iter().any(|client_order_id| {
+            orders.iter().any(|order| {
+                order.client_order_id.as_ref() == Some(client_order_id)
+                    && order.instrument_id == *instrument_id
+            })
+        });
+        if (expected_present && all_present) || (!expected_present && !any_present) {
+            return Ok(());
+        }
+        sleep(Duration::from_millis(250)).await;
+    }
+
+    Err(bat_markets_core::MarketError::new(
+        bat_markets_core::ErrorKind::TransportError,
+        format!(
+            "timed out waiting for sandbox open-order state expected_present={expected_present}"
+        ),
+    ))
 }
 
 fn preferred_sandbox_instrument(client: &BatMarkets) -> InstrumentId {
