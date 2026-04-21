@@ -285,10 +285,11 @@ async fn run_command_ws_session(
                 match message {
                     Message::Text(payload) => {
                         let payload = payload.to_string();
-                        if let Some(response_id) = extract_response_id(venue, &payload) {
-                            if let Some(PendingResponse { response, .. }) = pending.remove(&response_id) {
-                                let _ = response.send(Ok(payload));
-                            }
+                        if let Some(response_id) = extract_response_id(venue, &payload)
+                            && let Some(PendingResponse { response, .. }) =
+                                pending.remove(&response_id)
+                        {
+                            let _ = response.send(Ok(payload));
                         }
                     }
                     Message::Ping(payload) => {

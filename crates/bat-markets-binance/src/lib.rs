@@ -1201,7 +1201,7 @@ impl VenueAdapter for BinanceLinearFuturesAdapter {
 
 enum BinanceAcceptedCommand {
     Order(native::OrderResponse),
-    AlgoOrder(native::AlgoOrderSnapshot),
+    AlgoOrder(Box<native::AlgoOrderSnapshot>),
     CancelAlgo(native::CancelAlgoOrderResponse),
 }
 
@@ -1212,7 +1212,7 @@ fn parse_binance_command_identity(
         return Ok(BinanceAcceptedCommand::Order(response));
     }
     if let Ok(response) = parse_binance_algo_order_response(payload) {
-        return Ok(BinanceAcceptedCommand::AlgoOrder(response));
+        return Ok(BinanceAcceptedCommand::AlgoOrder(Box::new(response)));
     }
     parse_binance_cancel_algo_order_response(payload).map(BinanceAcceptedCommand::CancelAlgo)
 }

@@ -162,7 +162,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             break;
         }
         tokio::select! {
-            result = async { ticker_watch.as_mut().unwrap().recv().await }, if ticker_watch.is_some() => {
+            result = async {
+                match ticker_watch.as_mut() {
+                    Some(watch) => Some(watch.recv().await),
+                    None => None,
+                }
+            }, if ticker_watch.is_some() => {
+                let Some(result) = result else {
+                    continue;
+                };
                 let ticker = result?;
                 println!(
                     "ticker instrument={} last={} mark={:?} index={:?} volume_24h={:?} event_time={:?}",
@@ -175,7 +183,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 );
                 events += 1;
             }
-            result = async { trades_watch.as_mut().unwrap().recv().await }, if trades_watch.is_some() => {
+            result = async {
+                match trades_watch.as_mut() {
+                    Some(watch) => Some(watch.recv().await),
+                    None => None,
+                }
+            }, if trades_watch.is_some() => {
+                let Some(result) = result else {
+                    continue;
+                };
                 let trade = result?;
                 println!(
                     "trade instrument={} price={} qty={} aggressor={:?} event_time={:?}",
@@ -187,7 +203,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 );
                 events += 1;
             }
-            result = async { book_top_watch.as_mut().unwrap().recv().await }, if book_top_watch.is_some() => {
+            result = async {
+                match book_top_watch.as_mut() {
+                    Some(watch) => Some(watch.recv().await),
+                    None => None,
+                }
+            }, if book_top_watch.is_some() => {
+                let Some(result) = result else {
+                    continue;
+                };
                 let book = result?;
                 println!(
                     "book_top instrument={} bid={} bid_qty={} ask={} ask_qty={} event_time={:?}",
@@ -200,7 +224,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 );
                 events += 1;
             }
-            result = async { mark_price_watch.as_mut().unwrap().recv().await }, if mark_price_watch.is_some() => {
+            result = async {
+                match mark_price_watch.as_mut() {
+                    Some(watch) => Some(watch.recv().await),
+                    None => None,
+                }
+            }, if mark_price_watch.is_some() => {
+                let Some(result) = result else {
+                    continue;
+                };
                 let mark = result?;
                 println!(
                     "mark_price instrument={} price={} funding_rate={:?} event_time={:?}",
@@ -211,7 +243,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 );
                 events += 1;
             }
-            result = async { orders_watch.as_mut().unwrap().recv().await }, if orders_watch.is_some() => {
+            result = async {
+                match orders_watch.as_mut() {
+                    Some(watch) => Some(watch.recv().await),
+                    None => None,
+                }
+            }, if orders_watch.is_some() => {
+                let Some(result) = result else {
+                    continue;
+                };
                 let order = result?;
                 println!(
                     "order instrument={} order_id={} client_id={:?} status={:?} type={:?} side={:?} qty={} filled={} updated_at={:?}",
@@ -227,7 +267,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 );
                 events += 1;
             }
-            result = async { executions_watch.as_mut().unwrap().recv().await }, if executions_watch.is_some() => {
+            result = async {
+                match executions_watch.as_mut() {
+                    Some(watch) => Some(watch.recv().await),
+                    None => None,
+                }
+            }, if executions_watch.is_some() => {
+                let Some(result) = result else {
+                    continue;
+                };
                 let execution = result?;
                 println!(
                     "execution instrument={} order_id={} client_id={:?} price={} qty={} side={:?} liquidity={:?} executed_at={:?}",
@@ -242,7 +290,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 );
                 events += 1;
             }
-            result = async { positions_watch.as_mut().unwrap().recv().await }, if positions_watch.is_some() => {
+            result = async {
+                match positions_watch.as_mut() {
+                    Some(watch) => Some(watch.recv().await),
+                    None => None,
+                }
+            }, if positions_watch.is_some() => {
+                let Some(result) = result else {
+                    continue;
+                };
                 let position = result?;
                 println!(
                     "position instrument={} direction={:?} size={} entry_price={:?} upnl={:?} updated_at={:?}",
@@ -255,7 +311,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 );
                 events += 1;
             }
-            result = async { balances_watch.as_mut().unwrap().recv().await }, if balances_watch.is_some() => {
+            result = async {
+                match balances_watch.as_mut() {
+                    Some(watch) => Some(watch.recv().await),
+                    None => None,
+                }
+            }, if balances_watch.is_some() => {
+                let Some(result) = result else {
+                    continue;
+                };
                 let balance = result?;
                 println!(
                     "balance asset={} wallet={} available={} updated_at={:?}",
@@ -266,7 +330,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 );
                 events += 1;
             }
-            result = async { account_watch.as_mut().unwrap().recv().await }, if account_watch.is_some() => {
+            result = async {
+                match account_watch.as_mut() {
+                    Some(watch) => Some(watch.recv().await),
+                    None => None,
+                }
+            }, if account_watch.is_some() => {
+                let Some(result) = result else {
+                    continue;
+                };
                 let account = result?;
                 println!(
                     "account wallet={} available={} upnl={} updated_at={:?}",

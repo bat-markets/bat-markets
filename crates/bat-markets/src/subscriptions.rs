@@ -268,10 +268,10 @@ async fn run_private_hub(
                 if !active.remove(&lease_id) {
                     continue;
                 }
-                if active.is_empty() {
-                    if let Some(stream) = current_stream.take() {
-                        stream.abort();
-                    }
+                if active.is_empty()
+                    && let Some(stream) = current_stream.take()
+                {
+                    stream.abort();
                 }
             }
         }
