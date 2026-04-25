@@ -102,7 +102,7 @@ impl<'a> MarketClient<'a> {
     ///     .build_live()
     ///     .await?;
     ///
-    /// let refreshed = client.market().refresh_metadata().await?;
+    /// let refreshed = client.load_markets().await?;
     /// println!("refreshed {} instruments", refreshed.len());
     /// # Ok(())
     /// # }
@@ -197,7 +197,6 @@ impl<'a> MarketClient<'a> {
     ///     .await?;
     ///
     /// let candles = client
-    ///     .market()
     ///     .fetch_ohlcv(&FetchOhlcvRequest::for_instruments(
     ///         vec![
     ///             InstrumentId::from("BTC/USDT:USDT"),
@@ -239,7 +238,6 @@ impl<'a> MarketClient<'a> {
     ///     .await?;
     ///
     /// let candles = client
-    ///     .market()
     ///     .fetch_ohlcv(&FetchOhlcvRequest::for_instruments(
     ///         vec![
     ///             InstrumentId::from("BTC/USDT:USDT"),

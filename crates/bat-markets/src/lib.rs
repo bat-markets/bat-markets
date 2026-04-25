@@ -65,7 +65,7 @@
 
 #![deny(missing_docs)]
 
-/// Account balances and account summary facade.
+#[doc(hidden)]
 pub mod account;
 /// Low-level advanced facade for custom transports and diagnostics.
 pub mod advanced;
@@ -75,48 +75,60 @@ pub mod capabilities;
 pub mod client;
 /// Re-exported runtime config contracts from `bat-markets-core`.
 pub mod config;
-/// Runtime and shared-state diagnostics facade.
+#[doc(hidden)]
 pub mod diagnostics;
-/// Order-entry and account-setting command facade.
+#[doc(hidden)]
 pub mod entry;
 /// Re-exported error contracts from `bat-markets-core`.
 pub mod errors;
 mod facade;
-/// Runtime health facade.
+#[doc(hidden)]
 pub mod health;
-/// Market-data snapshot and REST facade.
+#[doc(hidden)]
 pub mod market;
-/// Venue-specific native adapter access.
+#[doc(hidden)]
 pub mod native;
-/// Position snapshot and compatibility settings facade.
+#[doc(hidden)]
 pub mod position;
 mod runtime;
-/// Public, private, and command stream-lane facade.
+#[doc(hidden)]
 pub mod stream;
 mod subscriptions;
-/// Read-side order and execution facade.
+#[doc(hidden)]
 pub mod trade;
 mod transport;
 /// Re-exported domain and request/response types from `bat-markets-core`.
 pub mod types;
 
-pub use account::AccountClient;
 pub use advanced::AdvancedClient;
 pub use client::{BatMarkets, BatMarketsBuilder};
-pub use diagnostics::{DiagnosticsClient, LockDiagnosticsSnapshot, RuntimeDiagnosticsSnapshot};
-pub use entry::{EntryClient, PendingCommandHandle};
-pub use health::{HealthClient, StatusWatch};
-pub use market::MarketClient;
+pub use diagnostics::{LockDiagnosticsSnapshot, RuntimeDiagnosticsSnapshot};
+pub use entry::PendingCommandHandle;
+pub use health::StatusWatch;
 pub use native::NativeClient;
-pub use position::PositionClient;
 pub use stream::{
-    AccountUpdates, AccountWatch, BalanceUpdates, BalancesWatch, BookTopUpdates, BookTopWatch,
-    CommandLaneClient, ExecutionUpdates, ExecutionsWatch, FastFeedUpdates, FastFeedWatch,
-    FundingRateUpdates, FundingRateWatch, LiquidationUpdates, LiquidationWatch, LiveStreamHandle,
-    MarkPriceUpdates, MarkPriceWatch, OhlcvUpdates, OhlcvWatch, OpenInterestUpdates,
-    OpenInterestWatch, OrderBookUpdates, OrderBookWatch, OrderUpdates, OrdersWatch,
-    PositionUpdates, PositionsWatch, PrivateLaneClient, PublicLaneClient, PublicSubscription,
-    StreamClient, TickerUpdates, TickerWatch, TradeUpdates, TradesWatch, WatchInstrumentsRequest,
-    WatchOhlcvRequest,
+    BalancesWatch, ExecutionsWatch, FundingRateWatch, LiquidationWatch, MarkPriceWatch, OhlcvWatch,
+    OpenInterestWatch, OrderBookWatch, OrdersWatch, PositionsWatch, TickerWatch, TradesWatch,
 };
+
+#[doc(hidden)]
+pub use account::AccountClient;
+#[doc(hidden)]
+pub use diagnostics::DiagnosticsClient;
+#[doc(hidden)]
+pub use entry::EntryClient;
+#[doc(hidden)]
+pub use health::HealthClient;
+#[doc(hidden)]
+pub use market::MarketClient;
+#[doc(hidden)]
+pub use position::PositionClient;
+#[doc(hidden)]
+pub use stream::{
+    AccountUpdates, AccountWatch, BalanceUpdates, BookTopUpdates, BookTopWatch, CommandLaneClient,
+    ExecutionUpdates, FastFeedUpdates, FastFeedWatch, FundingRateUpdates, LiveStreamHandle,
+    OrderUpdates, PositionUpdates, PrivateLaneClient, PublicLaneClient, PublicSubscription,
+    StreamClient, TickerUpdates, TradeUpdates, WatchInstrumentsRequest, WatchOhlcvRequest,
+};
+#[doc(hidden)]
 pub use trade::TradeClient;

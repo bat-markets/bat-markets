@@ -87,7 +87,10 @@ impl<'a> AdvancedClient<'a> {
     /// Return local runtime and state-lock diagnostics.
     #[must_use]
     pub fn diagnostics(&self) -> RuntimeDiagnosticsSnapshot {
-        self.inner.diagnostics().snapshot()
+        let mut snapshot = self.inner.runtime_state.diagnostics.snapshot();
+        snapshot.state_reads = self.inner.shared.read_diagnostics();
+        snapshot.state_writes = self.inner.shared.write_diagnostics();
+        snapshot
     }
 
     /// Access venue-specific adapter functionality.

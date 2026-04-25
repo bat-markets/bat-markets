@@ -78,8 +78,9 @@ Public docs and root APIs use `edit_*` naming:
 | `AmendOrderRequest` | `EditOrderRequest` |
 | `AmendOrdersRequest` | `EditOrdersRequest` |
 
-`Amend*` remains as an internal-compatible alias path for now, but new user code
-should prefer `Edit*`.
+`bat_markets::types` re-exports the `Edit*` names only. The lower-level core
+crate may still use amend terminology internally while the facade keeps the
+public contract CCXT-style.
 
 ## Websocket-Only Commands
 

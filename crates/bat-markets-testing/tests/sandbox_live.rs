@@ -40,7 +40,13 @@ async fn binance_sandbox_read_flows_are_env_gated() -> Result<()> {
         .await?;
 
     assert_eq!(
-        client.native().binance()?.config().endpoints.sandbox,
+        client
+            .advanced()
+            .native()
+            .binance()?
+            .config()
+            .endpoints
+            .sandbox,
         live_test_uses_sandbox(Venue::Binance, LiveTestEndpointMode::Sandbox)
     );
 
@@ -68,11 +74,11 @@ async fn binance_sandbox_read_flows_are_env_gated() -> Result<()> {
     public.shutdown().await?;
     private.shutdown().await?;
 
-    let _ = client.account().refresh().await?;
-    let _ = client.position().refresh().await?;
-    let _ = client.trade().refresh_open_orders(None).await?;
-    let _ = client.trade().refresh_executions(None).await?;
-    let _ = client.stream().private().reconcile().await?;
+    let _ = client.fetch_balance().await?;
+    let _ = client.fetch_positions().await?;
+    let _ = client.fetch_open_orders(None).await?;
+    let _ = client.fetch_my_trades(None).await?;
+    let _ = client.advanced().reconcile().await?;
 
     assert!(
         client.market().ticker(&first).is_some()
@@ -97,7 +103,13 @@ async fn bybit_sandbox_read_flows_are_env_gated() -> Result<()> {
         .await?;
 
     assert_eq!(
-        client.native().bybit()?.config().endpoints.sandbox,
+        client
+            .advanced()
+            .native()
+            .bybit()?
+            .config()
+            .endpoints
+            .sandbox,
         live_test_uses_sandbox(Venue::Bybit, LiveTestEndpointMode::Sandbox)
     );
 
@@ -125,11 +137,11 @@ async fn bybit_sandbox_read_flows_are_env_gated() -> Result<()> {
     public.shutdown().await?;
     private.shutdown().await?;
 
-    let _ = client.account().refresh().await?;
-    let _ = client.position().refresh().await?;
-    let _ = client.trade().refresh_open_orders(None).await?;
-    let _ = client.trade().refresh_executions(None).await?;
-    let _ = client.stream().private().reconcile().await?;
+    let _ = client.fetch_balance().await?;
+    let _ = client.fetch_positions().await?;
+    let _ = client.fetch_open_orders(None).await?;
+    let _ = client.fetch_my_trades(None).await?;
+    let _ = client.advanced().reconcile().await?;
 
     assert!(client.market().open_interest(&first).is_some());
     Ok(())
@@ -153,13 +165,18 @@ async fn binance_sandbox_create_cancel_is_manual_and_safe() -> Result<()> {
     };
 
     assert_eq!(
-        client.native().binance()?.config().endpoints.sandbox,
+        client
+            .advanced()
+            .native()
+            .binance()?
+            .config()
+            .endpoints
+            .sandbox,
         live_test_uses_sandbox(Venue::Binance, LiveTestEndpointMode::Sandbox)
     );
 
     let private = client.stream().private().spawn_live().await?;
     let mut create_handle = client
-        .entry()
         .create_order(&CreateOrderRequest {
             request_id: None,
             instrument_id: instrument_id.clone(),
@@ -186,8 +203,7 @@ async fn binance_sandbox_create_cancel_is_manual_and_safe() -> Result<()> {
         .expect("binance create order should surface order_id on accepted response");
     let client_order_id = create.client_order_id.clone();
     let fetched = client
-        .trade()
-        .get_order(&GetOrderRequest {
+        .fetch_order(&GetOrderRequest {
             request_id: None,
             instrument_id: instrument_id.clone(),
             order_id: Some(order_id),
@@ -197,7 +213,6 @@ async fn binance_sandbox_create_cancel_is_manual_and_safe() -> Result<()> {
     assert_eq!(fetched.instrument_id, instrument_id);
 
     let mut cancel_handle = client
-        .entry()
         .cancel_order(&CancelOrderRequest {
             request_id: None,
             instrument_id,
@@ -210,8 +225,8 @@ async fn binance_sandbox_create_cancel_is_manual_and_safe() -> Result<()> {
         })
         .await?;
     let _ = cancel_handle.receipt().await?;
-    let _ = client.trade().refresh_executions(None).await?;
-    let _ = client.stream().private().reconcile().await?;
+    let _ = client.fetch_my_trades(None).await?;
+    let _ = client.advanced().reconcile().await?;
 
     private.shutdown().await?;
     Ok(())
@@ -235,13 +250,18 @@ async fn bybit_sandbox_create_cancel_is_manual_and_safe() -> Result<()> {
     };
 
     assert_eq!(
-        client.native().bybit()?.config().endpoints.sandbox,
+        client
+            .advanced()
+            .native()
+            .bybit()?
+            .config()
+            .endpoints
+            .sandbox,
         live_test_uses_sandbox(Venue::Bybit, LiveTestEndpointMode::Sandbox)
     );
 
     let private = client.stream().private().spawn_live().await?;
     let mut create_handle = client
-        .entry()
         .create_order(&CreateOrderRequest {
             request_id: None,
             instrument_id: instrument_id.clone(),
@@ -268,8 +288,7 @@ async fn bybit_sandbox_create_cancel_is_manual_and_safe() -> Result<()> {
         .expect("bybit create order should surface order_id on accepted response");
     let client_order_id = create.client_order_id.clone();
     let fetched = client
-        .trade()
-        .get_order(&GetOrderRequest {
+        .fetch_order(&GetOrderRequest {
             request_id: None,
             instrument_id: instrument_id.clone(),
             order_id: Some(order_id),
@@ -279,7 +298,6 @@ async fn bybit_sandbox_create_cancel_is_manual_and_safe() -> Result<()> {
     assert_eq!(fetched.instrument_id, instrument_id);
 
     let mut cancel_handle = client
-        .entry()
         .cancel_order(&CancelOrderRequest {
             request_id: None,
             instrument_id,
@@ -288,8 +306,8 @@ async fn bybit_sandbox_create_cancel_is_manual_and_safe() -> Result<()> {
         })
         .await?;
     let _ = cancel_handle.receipt().await?;
-    let _ = client.trade().refresh_executions(None).await?;
-    let _ = client.stream().private().reconcile().await?;
+    let _ = client.fetch_my_trades(None).await?;
+    let _ = client.advanced().reconcile().await?;
 
     private.shutdown().await?;
     Ok(())
@@ -314,7 +332,13 @@ async fn binance_sandbox_batch_validate_create_cancel_is_manual_and_safe() -> Re
     };
 
     assert_eq!(
-        client.native().binance()?.config().endpoints.sandbox,
+        client
+            .advanced()
+            .native()
+            .binance()?
+            .config()
+            .endpoints
+            .sandbox,
         live_test_uses_sandbox(Venue::Binance, LiveTestEndpointMode::Sandbox)
     );
 
@@ -329,7 +353,7 @@ async fn binance_sandbox_batch_validate_create_cancel_is_manual_and_safe() -> Re
     let private = client.stream().private().spawn_live().await?;
     validate_batch_orders(&client, &create_request).await?;
 
-    let create = client.entry().create_orders(&create_request).await?;
+    let create = client.create_orders(&create_request).await?;
     assert_eq!(create.len(), 2);
     assert!(
         create
@@ -344,7 +368,7 @@ async fn binance_sandbox_batch_validate_create_cancel_is_manual_and_safe() -> Re
 
     await_open_order_state(&client, &instrument_id, &client_order_ids, true).await?;
 
-    let cancel = client.entry().cancel_orders(&cancel_request).await?;
+    let cancel = client.cancel_orders(&cancel_request).await?;
     assert_eq!(cancel.len(), 2);
     assert!(
         cancel
@@ -358,8 +382,8 @@ async fn binance_sandbox_batch_validate_create_cancel_is_manual_and_safe() -> Re
     );
 
     await_open_order_state(&client, &instrument_id, &client_order_ids, false).await?;
-    let _ = client.trade().refresh_executions(None).await?;
-    let _ = client.stream().private().reconcile().await?;
+    let _ = client.fetch_my_trades(None).await?;
+    let _ = client.advanced().reconcile().await?;
 
     private.shutdown().await?;
     Ok(())
@@ -384,7 +408,13 @@ async fn bybit_sandbox_batch_validate_create_cancel_is_manual_and_safe() -> Resu
     };
 
     assert_eq!(
-        client.native().bybit()?.config().endpoints.sandbox,
+        client
+            .advanced()
+            .native()
+            .bybit()?
+            .config()
+            .endpoints
+            .sandbox,
         live_test_uses_sandbox(Venue::Bybit, LiveTestEndpointMode::Sandbox)
     );
 
@@ -399,7 +429,7 @@ async fn bybit_sandbox_batch_validate_create_cancel_is_manual_and_safe() -> Resu
     let private = client.stream().private().spawn_live().await?;
     validate_batch_orders(&client, &create_request).await?;
 
-    let create = client.entry().create_orders(&create_request).await?;
+    let create = client.create_orders(&create_request).await?;
     assert_eq!(create.len(), 2);
     assert!(
         create
@@ -414,7 +444,7 @@ async fn bybit_sandbox_batch_validate_create_cancel_is_manual_and_safe() -> Resu
 
     await_open_order_state(&client, &instrument_id, &client_order_ids, true).await?;
 
-    let cancel = client.entry().cancel_orders(&cancel_request).await?;
+    let cancel = client.cancel_orders(&cancel_request).await?;
     assert_eq!(cancel.len(), 2);
     assert!(
         cancel
@@ -428,8 +458,8 @@ async fn bybit_sandbox_batch_validate_create_cancel_is_manual_and_safe() -> Resu
     );
 
     await_open_order_state(&client, &instrument_id, &client_order_ids, false).await?;
-    let _ = client.trade().refresh_executions(None).await?;
-    let _ = client.stream().private().reconcile().await?;
+    let _ = client.fetch_my_trades(None).await?;
+    let _ = client.advanced().reconcile().await?;
 
     private.shutdown().await?;
     Ok(())
@@ -476,8 +506,7 @@ async fn sandbox_batch_order_parameters(
         return Ok(None);
     };
     let spec = client
-        .market()
-        .instrument_specs()
+        .markets()
         .into_iter()
         .find(|spec| spec.instrument_id == instrument_id)
         .ok_or_else(|| {
@@ -505,7 +534,7 @@ async fn sandbox_batch_order_parameters(
 async fn autodiscover_sandbox_order_parameters(
     client: &BatMarkets,
 ) -> Result<Option<(InstrumentId, Price, Quantity)>> {
-    let Some(account) = client.account().refresh().await? else {
+    let Some(account) = client.fetch_balance().await?.summary else {
         return Ok(None);
     };
     let available_balance = account.total_available_balance.value();
@@ -513,7 +542,7 @@ async fn autodiscover_sandbox_order_parameters(
         return Ok(None);
     }
 
-    let mut specs = client.market().instrument_specs();
+    let mut specs = client.markets();
     specs.sort_by(|left, right| {
         preferred_rank(left)
             .cmp(&preferred_rank(right))
@@ -704,7 +733,6 @@ fn sandbox_batch_cancel_request(request: &CreateOrdersRequest) -> CancelOrdersRe
 async fn validate_batch_orders(client: &BatMarkets, request: &CreateOrdersRequest) -> Result<()> {
     for order in &request.orders {
         let handle = client
-            .entry()
             .validate_order(&ValidateOrderRequest {
                 request_id: None,
                 order: order.clone(),
@@ -723,8 +751,7 @@ async fn await_open_order_state(
 ) -> Result<()> {
     for _ in 0..20 {
         let orders = client
-            .trade()
-            .refresh_open_orders(Some(&ListOpenOrdersRequest {
+            .fetch_open_orders(Some(&ListOpenOrdersRequest {
                 instrument_id: Some(instrument_id.clone()),
             }))
             .await?;
@@ -755,7 +782,7 @@ async fn await_open_order_state(
 }
 
 fn preferred_sandbox_instrument(client: &BatMarkets) -> InstrumentId {
-    let specs = client.market().instrument_specs();
+    let specs = client.markets();
     for symbol in PREFERRED_SANDBOX_SYMBOLS {
         if let Some(spec) = specs
             .iter()

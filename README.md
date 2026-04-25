@@ -184,8 +184,6 @@ Useful focused checks:
 cargo fmt --all --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace
-cargo audit
-cargo package --workspace --exclude bat-markets-testing --allow-dirty
 ./scripts/publish-crates.sh --dry-run
 ```
 

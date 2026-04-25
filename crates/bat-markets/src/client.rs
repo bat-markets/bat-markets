@@ -301,8 +301,7 @@ impl BatMarkets {
 
     /// Return the current cached instrument metadata.
     ///
-    /// This is a local snapshot read. In live mode use
-    /// [`MarketClient::refresh_metadata`](crate::MarketClient::refresh_metadata)
+    /// This is a local snapshot read. In live mode use [`Self::load_markets`]
     /// when fresh venue metadata is required.
     #[must_use]
     pub fn instrument_specs(&self) -> Vec<InstrumentSpec> {
@@ -310,48 +309,56 @@ impl BatMarkets {
     }
 
     /// Access market snapshots and public REST reads.
+    #[doc(hidden)]
     #[must_use]
     pub fn market(&self) -> MarketClient<'_> {
         MarketClient::new(self)
     }
 
     /// Access public, private, and command stream lanes.
+    #[doc(hidden)]
     #[must_use]
     pub fn stream(&self) -> StreamClient<'_> {
         StreamClient::new(self)
     }
 
     /// Access read-side order and execution state.
+    #[doc(hidden)]
     #[must_use]
     pub fn trade(&self) -> TradeClient<'_> {
         TradeClient::new(self)
     }
 
     /// Access write-side order-entry and account-setting commands.
+    #[doc(hidden)]
     #[must_use]
     pub fn entry(&self) -> EntryClient<'_> {
         EntryClient::new(self)
     }
 
     /// Access position snapshots and compatibility position settings methods.
+    #[doc(hidden)]
     #[must_use]
     pub fn position(&self) -> PositionClient<'_> {
         PositionClient::new(self)
     }
 
     /// Access account balances and summary state.
+    #[doc(hidden)]
     #[must_use]
     pub fn account(&self) -> AccountClient<'_> {
         AccountClient::new(self)
     }
 
     /// Access cheap health snapshots and health-change subscriptions.
+    #[doc(hidden)]
     #[must_use]
     pub fn health(&self) -> HealthClient<'_> {
         HealthClient::new(self)
     }
 
     /// Access local runtime and shared-state diagnostics.
+    #[doc(hidden)]
     #[must_use]
     pub fn diagnostics(&self) -> DiagnosticsClient<'_> {
         DiagnosticsClient::new(self)
@@ -361,6 +368,7 @@ impl BatMarkets {
     ///
     /// Use this only when unified facade methods would hide important
     /// exchange-specific behavior.
+    #[doc(hidden)]
     #[must_use]
     pub fn native(&self) -> NativeClient<'_> {
         NativeClient::new(&self.adapter)

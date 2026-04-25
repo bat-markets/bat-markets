@@ -19,6 +19,18 @@ use crate::{
     subscriptions::{PrivateSubscriptionLease, PublicSubscriptionLease},
 };
 
+pub(crate) const fn public_lane(inner: &BatMarkets) -> PublicLaneClient<'_> {
+    PublicLaneClient { inner }
+}
+
+pub(crate) const fn private_lane(inner: &BatMarkets) -> PrivateLaneClient<'_> {
+    PrivateLaneClient { inner }
+}
+
+pub(crate) const fn command_lane(inner: &BatMarkets) -> CommandLaneClient<'_> {
+    CommandLaneClient { inner }
+}
+
 /// Public market-data subscription plan for live websocket runners.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PublicSubscription {
@@ -1054,7 +1066,10 @@ impl<'a> AccountUpdates<'a> {
             if !matches!(event, PrivateLaneEvent::Balance(_)) {
                 continue;
             }
-            if let Some(summary) = self.inner.account().summary() {
+            if let Some(summary) = self
+                .inner
+                .read_state(bat_markets_core::EngineState::account_summary)
+            {
                 return Ok(summary);
             }
         }
@@ -1124,19 +1139,19 @@ impl<'a> StreamClient<'a> {
     /// Access the public market-data lane.
     #[must_use]
     pub fn public(&self) -> PublicLaneClient<'a> {
-        PublicLaneClient { inner: self.inner }
+        public_lane(self.inner)
     }
 
     /// Access the private account/order/position lane.
     #[must_use]
     pub fn private(&self) -> PrivateLaneClient<'a> {
-        PrivateLaneClient { inner: self.inner }
+        private_lane(self.inner)
     }
 
     /// Access command-lifecycle events and low-level command classification.
     #[must_use]
     pub fn command(&self) -> CommandLaneClient<'a> {
-        CommandLaneClient { inner: self.inner }
+        command_lane(self.inner)
     }
 }
 
@@ -1495,7 +1510,7 @@ impl<'a> PublicLaneClient<'a> {
     ///
     /// ```no_run
     /// use bat_markets::{
-    ///     BatMarkets, WatchOhlcvRequest,
+    ///     BatMarkets,
     ///     errors::Result,
     ///     types::{InstrumentId, Product, Venue},
     /// };
@@ -1509,15 +1524,13 @@ impl<'a> PublicLaneClient<'a> {
     ///     .await?;
     ///
     /// let mut watch = client
-    ///     .stream()
-    ///     .public()
-    ///     .watch_ohlcv(WatchOhlcvRequest::for_instruments(
+    ///     .watch_ohlcv_for_symbols(
     ///         vec![
     ///             InstrumentId::from("BTC/USDT:USDT"),
     ///             InstrumentId::from("ETH/USDT:USDT"),
     ///         ],
     ///         "1m",
-    ///     ))
+    ///     )
     ///     .await?;
     ///
     /// let candle = watch.recv().await?;
@@ -1673,7 +1686,7 @@ impl<'a> PrivateLaneClient<'a> {
     ///     .build_live()
     ///     .await?;
     ///
-    /// let report = client.stream().private().reconcile().await?;
+    /// let report = client.advanced().reconcile().await?;
     /// println!("reconcile outcome: {:?}", report.outcome);
     /// # Ok(())
     /// # }
@@ -1737,10 +1750,10 @@ mod tests {
 
     use bat_markets_core::{InstrumentId, Product, PublicLaneEvent, Venue};
 
-    use crate::{BatMarketsBuilder, WatchInstrumentsRequest, WatchOhlcvRequest};
+    use crate::BatMarketsBuilder;
     use bat_markets_core::{WatchFastFeedRequest, WatchOrderBookRequest};
 
-    use super::recv_public_event;
+    use super::{WatchInstrumentsRequest, WatchOhlcvRequest, recv_public_event};
 
     const BINANCE_PUBLIC_TRADE: &str = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),

@@ -1,13 +1,13 @@
 pub use bat_markets_core::{
-    AccountSnapshot, AccountSummary, AggressorSide, AmendOrderRequest, AmendOrdersRequest, Amount,
-    AssetCode, Balance, BookDelta, BookLevel, BookTop, CancelAllOrdersRequest, CancelOrderRequest,
-    CancelOrdersRequest, ClientOrderId, ClosePositionRequest, CommandAck, CommandLifecycleEvent,
-    CommandReceipt, CommandStatus, CommandTransport, CreateOrderRequest, CreateOrdersRequest,
-    EditOrderRequest, EditOrdersRequest, Execution, FETCH_OHLCV_MAX_INSTRUMENTS_PER_CALL,
-    FastBookTop, FastFundingRate, FastKline, FastLiquidation, FastMarkPrice, FastOrderBookDelta,
-    FastTicker, FastTrade, FetchOhlcvRequest, FetchOrderBookRequest, FetchTickersRequest,
-    FetchTradesRequest, FundingRate, GetOrderRequest, HealthReport, InstrumentId, InstrumentSpec,
-    InstrumentStatus, InstrumentSupport, Kline, KlineInterval, Leverage, Liquidation, Liquidity,
+    AccountSnapshot, AccountSummary, AggressorSide, Amount, AssetCode, Balance, BookDelta,
+    BookLevel, BookTop, CancelAllOrdersRequest, CancelOrderRequest, CancelOrdersRequest,
+    ClientOrderId, ClosePositionRequest, CommandAck, CommandLifecycleEvent, CommandReceipt,
+    CommandStatus, CommandTransport, CreateOrderRequest, CreateOrdersRequest, EditOrderRequest,
+    EditOrdersRequest, Execution, FETCH_OHLCV_MAX_INSTRUMENTS_PER_CALL, FastBookTop,
+    FastFundingRate, FastKline, FastLiquidation, FastMarkPrice, FastOrderBookDelta, FastTicker,
+    FastTrade, FetchOhlcvRequest, FetchOrderBookRequest, FetchTickersRequest, FetchTradesRequest,
+    FundingRate, GetOrderRequest, HealthReport, InstrumentId, InstrumentSpec, InstrumentStatus,
+    InstrumentSupport, Kline, KlineInterval, Leverage, Liquidation, Liquidity,
     ListExecutionsRequest, ListOpenOrdersRequest, MarginMode, MarkPrice, MarketType, Notional,
     OpenInterest, Order, OrderBookDelta, OrderBookLevel, OrderBookSnapshot, OrderId, OrderStatus,
     OrderTarget, OrderType, Position, PositionDirection, PositionId, PositionMode, Price, Product,
@@ -16,3 +16,6 @@ pub use bat_markets_core::{
     Side, Ticker, TimeInForce, TimestampMs, TradeId, TradeTick, TriggerType, ValidateOrderRequest,
     Venue, WatchFastFeedRequest, WatchOrderBookRequest,
 };
+
+#[doc(hidden)]
+pub use bat_markets_core::{AmendOrderRequest, AmendOrdersRequest};

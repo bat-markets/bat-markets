@@ -32,8 +32,8 @@ impl<'a> HealthClient<'a> {
     ///     .product(Product::LinearUsdt)
     ///     .build_live()
     ///     .await?;
-    /// let receiver = client.health().subscribe();
-    /// let _initial = receiver.borrow().clone();
+    /// let watch = client.watch_status();
+    /// let _initial = watch.current();
     /// # Ok(())
     /// # }
     /// ```

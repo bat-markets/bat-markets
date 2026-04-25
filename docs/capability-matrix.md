@@ -19,13 +19,11 @@ This matrix documents the current `0.2.x` CCXT-style root surface after live tra
 | mark price fetch | yes | yes | REST-backed mark price via `fetch_mark_price(...)` |
 | funding rate fetch | yes | yes | REST-backed funding rate via `fetch_funding_rate(...)` |
 | recent trades fetch | yes | yes | REST-backed recent public trades via `fetch_trades(...)` |
-| book top fetch | yes | yes | compatibility REST-backed best bid/ask snapshot remains available on `market().fetch_book_top(...)` |
 | focused order book fetch | yes | yes | REST-backed depth snapshot via `fetch_order_book(...)` |
 | liquidation fetch | yes | yes | cache-backed via `fetch_liquidations(...)` after live liquidation flow warms the cache |
 | OHLCV fetch | yes | yes | REST-backed unified candles via `fetch_ohlcv(...)`; intervals use ccxt-style strings such as `1m`, `5m`, `1h`, `1d`, and each call can batch `1..=30` instruments |
 | OHLCV full-window fetch | yes | yes | `fetch_ohlcv(...)` fully paginates a bounded `start_time..end_time` range across the requested symbol batch |
 | ticker watch | yes | yes | typed live ticker snapshots via `watch_ticker(...)` / `watch_tickers(...)` |
-| fast multi-topic feed | yes | yes | advanced compact shared-feed surface remains available on `stream().public().subscribe_fast(...)` / `watch_fast(...)` |
 | trades watch | yes | yes | typed live trades via `watch_trades(...)` / `watch_trades_for_symbols(...)` |
 | mark price watch | yes | yes | typed live mark price via `watch_mark_price(...)` |
 | funding rate watch | yes | yes | typed live funding-rate updates via `watch_funding_rate(...)` |
@@ -37,7 +35,6 @@ This matrix documents the current `0.2.x` CCXT-style root surface after live tra
 | executions watch | yes | yes | typed private execution updates via `watch_my_trades()` |
 | positions watch | yes | yes | typed private position updates via `watch_positions()` |
 | balances watch | yes | yes | typed private balance updates via `watch_balance()` |
-| account watch | yes | yes | advanced typed account-summary updates remain available on `stream().private().watch_account()` |
 | account fetch | yes | yes | REST snapshot-backed `fetch_balance()` returns balances and summary |
 | position fetch | yes | yes | REST snapshot-backed `fetch_positions()` |
 | open orders fetch | yes | yes | REST snapshot-backed `fetch_open_orders(...)` |
@@ -72,7 +69,7 @@ This matrix documents the current `0.2.x` CCXT-style root surface after live tra
 ## Honest Limits
 
 - Command writes do not pretend transport errors are harmless: they return `UnknownExecution` receipts and trigger reconcile attempts.
-- Root command methods are the hot-path command surface; nested clients remain for compatibility and low-level workflows.
+- Root command methods are the hot-path command surface; low-level lane access is intentionally kept behind `advanced()` or hidden repository-only helpers.
 - Reconcile now repairs balances, positions, open orders, and recent execution evidence; it first resolves pending `UnknownExecution` outcomes from local state, then recent-history repair batches the remaining checks per instrument instead of repeating identical REST calls.
 - Periodic private reconcile now stays snapshot-only for simple freshness maintenance and escalates to recent-history repair only when uncertainty or divergence signals are present.
 - Heavy reconcile prefetches recent execution history only for local active/recent instruments when the trigger or health state points to a private gap or divergence.

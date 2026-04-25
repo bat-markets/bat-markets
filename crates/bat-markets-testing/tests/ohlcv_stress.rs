@@ -239,11 +239,11 @@ async fn exercise_fetch_ohlcv_frontend_window(venue: Venue) -> Result<()> {
     let client = build_mainnet_client(venue).await?;
     let symbols = preferred_ohlcv_symbols(&client, plan.symbol_target);
 
-    let diagnostics_before = client.diagnostics().snapshot().fetch_ohlcv.operations;
+    let diagnostics_before = client.advanced().diagnostics().fetch_ohlcv.operations;
     let started_at = Instant::now();
     let reports = fetch_frontend_window(&client, symbols.clone(), plan).await?;
     let elapsed = started_at.elapsed();
-    let diagnostics_after = client.diagnostics().snapshot().fetch_ohlcv.operations;
+    let diagnostics_after = client.advanced().diagnostics().fetch_ohlcv.operations;
     let observed_requests = diagnostics_after.saturating_sub(diagnostics_before);
     let total_requests = observed_requests;
 
@@ -506,7 +506,7 @@ fn available_ohlcv_symbols(client: &BatMarkets, target: usize) -> Vec<Instrument
 }
 
 fn collect_ohlcv_symbols(client: &BatMarkets, target: usize) -> Vec<InstrumentId> {
-    let specs = client.market().instrument_specs();
+    let specs = client.markets();
     let mut selected = Vec::with_capacity(target);
     let mut used = BTreeSet::new();
 

@@ -1,14 +1,17 @@
+use std::collections::BTreeMap;
+
 use tokio::sync::broadcast;
 
 use bat_markets_core::{
     AccountSnapshot, CancelAllOrdersRequest, CancelOrderRequest, CancelOrdersRequest,
     ClosePositionRequest, CommandAck, CommandLaneEvent, CommandReceipt, CommandTransport,
-    CreateOrderRequest, CreateOrdersRequest, EditOrderRequest, EditOrdersRequest, Execution,
-    FetchOhlcvRequest, FetchOrderBookRequest, FetchTickersRequest, FetchTradesRequest, FundingRate,
-    GetOrderRequest, HealthReport, InstrumentId, InstrumentSpec, Kline, Liquidation,
-    ListExecutionsRequest, ListOpenOrdersRequest, MarkPrice, OpenInterest, Order,
-    OrderBookSnapshot, Position, Result, SetLeverageRequest, SetMarginModeRequest,
-    SetPositionModeRequest, Ticker, TradeTick, ValidateOrderRequest, WatchOrderBookRequest,
+    CreateOrderRequest, CreateOrdersRequest, EditOrderRequest, EditOrdersRequest, ErrorKind,
+    Execution, FetchOhlcvRequest, FetchOrderBookRequest, FetchTickersRequest, FetchTradesRequest,
+    FundingRate, GetOrderRequest, HealthReport, InstrumentId, InstrumentSpec, Kline, KlineInterval,
+    Liquidation, ListExecutionsRequest, ListOpenOrdersRequest, MarkPrice, MarketError,
+    OpenInterest, Order, OrderBookSnapshot, Position, Result, SetLeverageRequest,
+    SetMarginModeRequest, SetPositionModeRequest, Ticker, TimestampMs, TradeTick,
+    ValidateOrderRequest, Venue, WatchOrderBookRequest,
 };
 
 use crate::{
@@ -18,7 +21,7 @@ use crate::{
     health::StatusWatch,
     runtime::{self, CommandTransportMode},
     stream::{
-        BalancesWatch, ExecutionsWatch, FundingRateWatch, LiquidationWatch, MarkPriceWatch,
+        self, BalancesWatch, ExecutionsWatch, FundingRateWatch, LiquidationWatch, MarkPriceWatch,
         OhlcvWatch, OpenInterestWatch, OrderBookWatch, OrdersWatch, PositionsWatch, TickerWatch,
         TradesWatch, WatchInstrumentsRequest, WatchOhlcvRequest,
     },
@@ -72,7 +75,7 @@ impl BatMarkets {
     /// `FetchOhlcvRequest` keeps the time-window and multi-symbol parameters
     /// explicit while preserving the CCXT `fetch_ohlcv` method family.
     pub async fn fetch_ohlcv(&self, request: &FetchOhlcvRequest) -> Result<Vec<Kline>> {
-        self.market().fetch_ohlcv(request).await
+        fetch_ohlcv(self, request).await
     }
 
     /// Fetch recent public trades through REST.
@@ -145,8 +148,7 @@ impl BatMarkets {
 
     /// Watch live ticker updates for one instrument over the shared public WS hub.
     pub async fn watch_ticker(&self, instrument_id: InstrumentId) -> Result<TickerWatch<'_>> {
-        self.stream()
-            .public()
+        stream::public_lane(self)
             .watch_ticker(WatchInstrumentsRequest::for_instrument(instrument_id))
             .await
     }
@@ -156,16 +158,14 @@ impl BatMarkets {
         &self,
         instrument_ids: Vec<InstrumentId>,
     ) -> Result<TickerWatch<'_>> {
-        self.stream()
-            .public()
+        stream::public_lane(self)
             .watch_tickers(WatchInstrumentsRequest::for_instruments(instrument_ids))
             .await
     }
 
     /// Watch live public trades for one instrument over the shared public WS hub.
     pub async fn watch_trades(&self, instrument_id: InstrumentId) -> Result<TradesWatch<'_>> {
-        self.stream()
-            .public()
+        stream::public_lane(self)
             .watch_trades(WatchInstrumentsRequest::for_instrument(instrument_id))
             .await
     }
@@ -175,8 +175,7 @@ impl BatMarkets {
         &self,
         instrument_ids: Vec<InstrumentId>,
     ) -> Result<TradesWatch<'_>> {
-        self.stream()
-            .public()
+        stream::public_lane(self)
             .watch_trades(WatchInstrumentsRequest::for_instruments(instrument_ids))
             .await
     }
@@ -187,8 +186,7 @@ impl BatMarkets {
         instrument_id: InstrumentId,
         limit: Option<usize>,
     ) -> Result<OrderBookWatch<'_>> {
-        self.stream()
-            .public()
+        stream::public_lane(self)
             .watch_order_book(WatchOrderBookRequest::new(instrument_id, limit))
             .await
     }
@@ -199,8 +197,7 @@ impl BatMarkets {
         instrument_id: InstrumentId,
         interval: impl Into<Box<str>>,
     ) -> Result<OhlcvWatch<'_>> {
-        self.stream()
-            .public()
+        stream::public_lane(self)
             .watch_ohlcv(WatchOhlcvRequest::for_instrument(instrument_id, interval))
             .await
     }
@@ -211,8 +208,7 @@ impl BatMarkets {
         instrument_ids: Vec<InstrumentId>,
         interval: impl Into<Box<str>>,
     ) -> Result<OhlcvWatch<'_>> {
-        self.stream()
-            .public()
+        stream::public_lane(self)
             .watch_ohlcv(WatchOhlcvRequest::for_instruments(instrument_ids, interval))
             .await
     }
@@ -222,8 +218,7 @@ impl BatMarkets {
         &self,
         instrument_id: InstrumentId,
     ) -> Result<MarkPriceWatch<'_>> {
-        self.stream()
-            .public()
+        stream::public_lane(self)
             .watch_mark_prices(WatchInstrumentsRequest::for_instrument(instrument_id))
             .await
     }
@@ -233,8 +228,7 @@ impl BatMarkets {
         &self,
         instrument_id: InstrumentId,
     ) -> Result<FundingRateWatch<'_>> {
-        self.stream()
-            .public()
+        stream::public_lane(self)
             .watch_funding_rates(WatchInstrumentsRequest::for_instrument(instrument_id))
             .await
     }
@@ -244,8 +238,7 @@ impl BatMarkets {
         &self,
         instrument_id: InstrumentId,
     ) -> Result<OpenInterestWatch<'_>> {
-        self.stream()
-            .public()
+        stream::public_lane(self)
             .watch_open_interest(WatchInstrumentsRequest::for_instrument(instrument_id))
             .await
     }
@@ -255,8 +248,7 @@ impl BatMarkets {
         &self,
         instrument_id: InstrumentId,
     ) -> Result<LiquidationWatch<'_>> {
-        self.stream()
-            .public()
+        stream::public_lane(self)
             .watch_liquidations(WatchInstrumentsRequest::for_instrument(instrument_id))
             .await
     }
@@ -275,22 +267,22 @@ impl BatMarkets {
 
     /// Watch private balance updates over the shared private WS hub.
     pub async fn watch_balance(&self) -> Result<BalancesWatch<'_>> {
-        self.stream().private().watch_balances().await
+        stream::private_lane(self).watch_balances().await
     }
 
     /// Watch private order updates over the shared private WS hub.
     pub async fn watch_orders(&self) -> Result<OrdersWatch<'_>> {
-        self.stream().private().watch_orders().await
+        stream::private_lane(self).watch_orders().await
     }
 
     /// Watch private execution updates over the shared private WS hub.
     pub async fn watch_my_trades(&self) -> Result<ExecutionsWatch<'_>> {
-        self.stream().private().watch_executions().await
+        stream::private_lane(self).watch_executions().await
     }
 
     /// Watch private position updates over the shared private WS hub.
     pub async fn watch_positions(&self) -> Result<PositionsWatch<'_>> {
-        self.stream().private().watch_positions().await
+        stream::private_lane(self).watch_positions().await
     }
 
     /// Submit a create-order command and return a lifecycle-aware handle.
@@ -506,6 +498,128 @@ impl BatMarkets {
     pub fn advanced(&self) -> AdvancedClient<'_> {
         AdvancedClient::new(self)
     }
+}
+
+async fn fetch_ohlcv(client: &BatMarkets, request: &FetchOhlcvRequest) -> Result<Vec<Kline>> {
+    match (request.start_time, request.end_time) {
+        (Some(_), Some(_)) => fetch_ohlcv_window(client, request).await,
+        _ => runtime::fetch_ohlcv(&client.live_context(), request).await,
+    }
+}
+
+async fn fetch_ohlcv_window(
+    client: &BatMarkets,
+    request: &FetchOhlcvRequest,
+) -> Result<Vec<Kline>> {
+    let instrument_ids = request.instrument_ids()?.to_vec();
+    let start_time = request.start_time.ok_or_else(|| {
+        MarketError::new(
+            ErrorKind::ConfigError,
+            "fetch_ohlcv requires request.start_time",
+        )
+    })?;
+    let end_time = request.end_time.ok_or_else(|| {
+        MarketError::new(
+            ErrorKind::ConfigError,
+            "fetch_ohlcv requires request.end_time",
+        )
+    })?;
+    if end_time.value() < start_time.value() {
+        return Err(MarketError::new(
+            ErrorKind::ConfigError,
+            "fetch_ohlcv requires end_time >= start_time",
+        ));
+    }
+
+    let interval = KlineInterval::parse(request.interval.as_ref()).ok_or_else(|| {
+        MarketError::new(
+            ErrorKind::Unsupported,
+            format!("unsupported OHLCV interval '{}'", request.interval),
+        )
+    })?;
+    let mut candles_by_instrument = instrument_ids
+        .iter()
+        .cloned()
+        .map(|instrument_id| (instrument_id, Vec::<Kline>::new()))
+        .collect::<BTreeMap<_, _>>();
+    let mut next_start = start_time.value();
+    let mut next_end = end_time.value();
+
+    loop {
+        let page = runtime::fetch_ohlcv(
+            &client.live_context(),
+            &FetchOhlcvRequest::for_instruments(
+                instrument_ids.clone(),
+                request.interval.clone(),
+                Some(TimestampMs::new(next_start)),
+                Some(TimestampMs::new(next_end)),
+                request.limit,
+            ),
+        )
+        .await?;
+        if page.is_empty() {
+            break;
+        }
+
+        let mut max_open_time = next_start;
+        let mut min_open_time = i64::MAX;
+        for candle in page {
+            if candle.open_time.value() < start_time.value()
+                || candle.open_time.value() > end_time.value()
+            {
+                continue;
+            }
+
+            let Some(candles) = candles_by_instrument.get_mut(&candle.instrument_id) else {
+                return Err(MarketError::new(
+                    ErrorKind::TransportError,
+                    format!(
+                        "fetch_ohlcv returned unexpected instrument {}",
+                        candle.instrument_id
+                    ),
+                ));
+            };
+
+            max_open_time = max_open_time.max(candle.open_time.value());
+            min_open_time = min_open_time.min(candle.open_time.value());
+            candles.push(candle);
+        }
+
+        match client.venue() {
+            Venue::Binance => {
+                let Some(max_close_time) = interval.close_time_ms(max_open_time) else {
+                    return Err(MarketError::new(
+                        ErrorKind::DecodeError,
+                        format!(
+                            "failed to derive OHLCV close time for interval '{}'",
+                            request.interval
+                        ),
+                    ));
+                };
+                if max_close_time >= end_time.value() {
+                    break;
+                }
+                next_start = max_close_time + 1;
+            }
+            Venue::Bybit => {
+                if min_open_time <= start_time.value() || min_open_time == i64::MAX {
+                    break;
+                }
+                next_end = min_open_time - 1;
+            }
+        }
+    }
+
+    let mut flattened = Vec::new();
+    for instrument_id in instrument_ids {
+        let mut candles = candles_by_instrument
+            .remove(&instrument_id)
+            .expect("window fetch should keep every requested instrument");
+        candles.sort_by_key(|candle| candle.open_time.value());
+        candles.dedup_by_key(|candle| candle.open_time);
+        flattened.extend(candles);
+    }
+    Ok(flattened)
 }
 
 fn command_handle_from_ack(

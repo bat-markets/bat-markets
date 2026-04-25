@@ -45,7 +45,6 @@ boundary should be reconsidered before it is added.
 | --- | --- | --- |
 | `BatMarkets` root methods | metadata, public/private REST, public/private WS, commands, and status | raw payload classification or adapter-specific protocol details |
 | `advanced()` | raw lane ingest/subscriptions, command classification, manual reconcile, diagnostics, and native adapter access | common user workflows that fit root `fetch_*`, `watch_*`, or command methods |
-| compatibility clients (`market()`, `stream()`, `entry()`, `trade()`, `position()`, `account()`, `health()`, `diagnostics()`, `native()`) | transitional and internal-lane-oriented access | primary documentation or new high-level examples |
 
 ## Method Contract Rules
 
@@ -187,8 +186,8 @@ The root command API is intentionally separated from read-side `fetch_*` methods
 - REST remains the fallback path for venue-specific gaps and for settings/validation flows that are still REST-native
 - explicit `*_ws` command methods disable REST fallback
 - uncertain outcomes stay explicit and schedule reconcile in the background rather than blocking the hot path
-- compatibility write methods on nested clients are deprecated or transitional; new integrations should route order-entry and account-setting commands through root methods
-- manual `spawn_live()` runners are low-level escape hatches; normal application code should use `watch_*` leases so shared hub subscriptions are preserved and accidental duplicate sockets are avoided
+- command and account-setting flows route through root methods; nested lane clients are internal implementation details
+- manual stream runners are internal test and transport primitives; normal application code should use `watch_*` leases so shared hub subscriptions are preserved and accidental duplicate sockets are avoided
 
 ### Metadata Bootstrap
 

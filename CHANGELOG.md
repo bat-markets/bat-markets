@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- hide legacy lane-client modules, nested facade accessors, and amend request aliases from the documented facade surface while retaining doc-hidden compatibility shims for `0.2.x`
+- route root facade methods directly through runtime/subscription helpers instead of depending on nested compatibility clients
+- replace the stale draft blueprint with the current CCXT-style API, architecture, workspace, and release contract
+- move repository harness command, fetch, diagnostics, private-watch, and native-access paths toward the root API and `advanced()`
+
 ## 0.2.0 - 2026-04-25
 
 - redesign the primary facade around CCXT-style root methods: `fetch_*`, `watch_*`, command verbs, and `advanced()`

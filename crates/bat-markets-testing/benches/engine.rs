@@ -193,7 +193,6 @@ fn runtime_batch_entry_paths(c: &mut Criterion) {
                 for request in &harness.binance_validate {
                     let handle = harness
                         .binance
-                        .entry()
                         .validate_order(request)
                         .await
                         .expect("binance runtime validate should succeed");
@@ -202,7 +201,6 @@ fn runtime_batch_entry_paths(c: &mut Criterion) {
 
                 let create = harness
                     .binance
-                    .entry()
                     .create_orders(&harness.binance_create)
                     .await
                     .expect("binance runtime batch create should succeed");
@@ -210,7 +208,6 @@ fn runtime_batch_entry_paths(c: &mut Criterion) {
 
                 let cancel = harness
                     .binance
-                    .entry()
                     .cancel_orders(&harness.binance_cancel)
                     .await
                     .expect("binance runtime batch cancel should succeed");
@@ -225,7 +222,6 @@ fn runtime_batch_entry_paths(c: &mut Criterion) {
                 for request in &harness.bybit_validate {
                     let handle = harness
                         .bybit
-                        .entry()
                         .validate_order(request)
                         .await
                         .expect("bybit runtime validate should succeed");
@@ -234,7 +230,6 @@ fn runtime_batch_entry_paths(c: &mut Criterion) {
 
                 let create = harness
                     .bybit
-                    .entry()
                     .create_orders(&harness.bybit_create)
                     .await
                     .expect("bybit runtime batch create should succeed");
@@ -242,7 +237,6 @@ fn runtime_batch_entry_paths(c: &mut Criterion) {
 
                 let cancel = harness
                     .bybit
-                    .entry()
                     .cancel_orders(&harness.bybit_cancel)
                     .await
                     .expect("bybit runtime batch cancel should succeed");

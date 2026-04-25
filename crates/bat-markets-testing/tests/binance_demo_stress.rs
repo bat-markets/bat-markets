@@ -34,7 +34,15 @@ async fn binance_demo_create_cancel_stress_is_stable() -> Result<()> {
         .build_live()
         .await?;
 
-    assert!(client.native().binance()?.config().endpoints.sandbox);
+    assert!(
+        client
+            .advanced()
+            .native()
+            .binance()?
+            .config()
+            .endpoints
+            .sandbox
+    );
 
     let spec = preferred_stress_spec(&client)?;
     let public = client
@@ -70,7 +78,6 @@ async fn binance_demo_create_cancel_stress_is_stable() -> Result<()> {
 
         let create_started = Instant::now();
         let create = client
-            .entry()
             .create_order(&CreateOrderRequest {
                 request_id: None,
                 instrument_id: spec.instrument_id.clone(),
@@ -115,8 +122,7 @@ async fn binance_demo_create_cancel_stress_is_stable() -> Result<()> {
 
         let get_started = Instant::now();
         let order = client
-            .trade()
-            .get_order(&GetOrderRequest {
+            .fetch_order(&GetOrderRequest {
                 request_id: None,
                 instrument_id: spec.instrument_id.clone(),
                 order_id: Some(order_id.clone()),
@@ -132,7 +138,6 @@ async fn binance_demo_create_cancel_stress_is_stable() -> Result<()> {
 
         let cancel_started = Instant::now();
         let cancel = client
-            .entry()
             .cancel_order(&CancelOrderRequest {
                 request_id: None,
                 instrument_id: spec.instrument_id.clone(),
@@ -158,14 +163,13 @@ async fn binance_demo_create_cancel_stress_is_stable() -> Result<()> {
         }
 
         let reconcile_started = Instant::now();
-        let _ = client.trade().refresh_open_orders(None).await?;
-        let _ = client.trade().refresh_executions(None).await?;
-        let report = client.stream().private().reconcile().await?;
+        let _ = client.fetch_open_orders(None).await?;
+        let _ = client.fetch_my_trades(None).await?;
+        let report = client.advanced().reconcile().await?;
         reconcile_latencies.push(reconcile_started.elapsed());
 
         let terminal = client
-            .trade()
-            .get_order(&GetOrderRequest {
+            .fetch_order(&GetOrderRequest {
                 request_id: None,
                 instrument_id: spec.instrument_id.clone(),
                 order_id: Some(order_id),
@@ -196,15 +200,15 @@ async fn binance_demo_create_cancel_stress_is_stable() -> Result<()> {
         );
     }
 
-    let _ = client.trade().refresh_open_orders(None).await?;
-    let _ = client.trade().refresh_executions(None).await?;
-    let _ = client.stream().private().reconcile().await?;
+    let _ = client.fetch_open_orders(None).await?;
+    let _ = client.fetch_my_trades(None).await?;
+    let _ = client.advanced().reconcile().await?;
     let final_open_orders = client.trade().open_orders();
 
     public.shutdown().await?;
     private.shutdown().await?;
 
-    let diagnostics = client.diagnostics().snapshot();
+    let diagnostics = client.advanced().diagnostics();
 
     println!(
         "summary instrument={} iterations={} final_open_orders={} create_p95_ms={} cancel_p95_ms={} reconcile_p95_ms={}",
@@ -241,7 +245,7 @@ async fn binance_demo_create_cancel_stress_is_stable() -> Result<()> {
 }
 
 fn preferred_stress_spec(client: &BatMarkets) -> Result<InstrumentSpec> {
-    let specs = client.market().instrument_specs();
+    let specs = client.markets();
     for symbol in PREFERRED_SYMBOLS {
         if let Some(spec) = specs
             .iter()
@@ -273,7 +277,7 @@ async fn stress_order_parameters(
         ));
     }
 
-    let _ = client.account().refresh().await?;
+    let _ = client.fetch_balance().await?;
     let reference_price = client
         .market()
         .book_top(&spec.instrument_id)

@@ -8,8 +8,9 @@ use rust_decimal::{Decimal, RoundingStrategy};
 use tokio::time::{Instant, sleep, timeout};
 
 use bat_markets::{
-    BatMarkets, OrdersWatch, RuntimeDiagnosticsSnapshot, WatchInstrumentsRequest,
+    BatMarkets, OrdersWatch, RuntimeDiagnosticsSnapshot,
     errors::Result,
+    stream::{AccountWatch, WatchInstrumentsRequest},
     types::{
         AccountSummary, Balance, CancelOrderRequest, CancelOrdersRequest, ClientOrderId,
         ClosePositionRequest, CommandStatus, CommandTransport, CreateOrderRequest,
@@ -183,11 +184,11 @@ pub fn binance_mainnet_extended_stress_enabled() -> bool {
 pub async fn prepare_binance_trade_cycle(
     client: &BatMarkets,
 ) -> Result<Option<LiveTradeCyclePlan>> {
-    let Some(account) = client.account().refresh().await? else {
+    let Some(account) = client.fetch_balance().await?.summary else {
         return Ok(None);
     };
-    let positions = client.position().refresh().await?;
-    let open_orders = client.trade().refresh_open_orders(None).await?;
+    let positions = client.fetch_positions().await?;
+    let open_orders = client.fetch_open_orders(None).await?;
     let occupied = occupied_instruments(&positions, &open_orders);
     let preferred_symbol = env::var("BAT_MARKETS_LIVE_TRADE_SYMBOL")
         .ok()
@@ -208,7 +209,7 @@ pub async fn prepare_binance_trade_cycle(
         return build_live_trade_plan(client, &spec, max_budget, &occupied).await;
     }
 
-    let mut specs = client.market().instrument_specs();
+    let mut specs = client.markets();
     specs.sort_by(|left, right| {
         preferred_live_rank(left)
             .cmp(&preferred_live_rank(right))
@@ -237,26 +238,24 @@ pub async fn run_binance_trade_cycle(client: &BatMarkets) -> Result<Option<LiveT
             plan.instrument_id.clone(),
         ))
         .await?;
-    let mut orders = client.stream().private().watch_orders().await?;
-    let mut executions = client.stream().private().watch_executions().await?;
-    let mut positions = client.stream().private().watch_positions().await?;
-    let mut balances = client.stream().private().watch_balances().await?;
+    let mut orders = client.watch_orders().await?;
+    let mut executions = client.watch_my_trades().await?;
+    let mut positions = client.watch_positions().await?;
+    let mut balances = client.watch_balance().await?;
     let mut account = client.stream().private().watch_account().await?;
 
     let _ = public.recv().await?;
     sleep(PRIVATE_STREAM_WARMUP).await;
 
-    let _ = client.account().refresh().await?;
-    let _ = client.position().refresh().await?;
+    let _ = client.fetch_balance().await?;
+    let _ = client.fetch_positions().await?;
     let _ = client
-        .trade()
-        .refresh_open_orders(Some(&ListOpenOrdersRequest {
+        .fetch_open_orders(Some(&ListOpenOrdersRequest {
             instrument_id: Some(plan.instrument_id.clone()),
         }))
         .await?;
     let _ = client
-        .trade()
-        .refresh_executions(Some(&ListExecutionsRequest {
+        .fetch_my_trades(Some(&ListExecutionsRequest {
             instrument_id: Some(plan.instrument_id.clone()),
             limit: Some(25),
         }))
@@ -326,7 +325,6 @@ pub async fn run_binance_trade_cycle(client: &BatMarkets) -> Result<Option<LiveT
     .await?;
 
     let mut open_handle = client
-        .entry()
         .create_order(&CreateOrderRequest {
             request_id: None,
             instrument_id: plan.instrument_id.clone(),
@@ -385,7 +383,6 @@ pub async fn run_binance_trade_cycle(client: &BatMarkets) -> Result<Option<LiveT
     .await?;
 
     let mut close_handle = client
-        .entry()
         .close_position(&ClosePositionRequest {
             request_id: None,
             instrument_id: plan.instrument_id.clone(),
@@ -428,7 +425,6 @@ pub async fn run_binance_trade_cycle(client: &BatMarkets) -> Result<Option<LiveT
     .await?;
 
     let mut maker_buy_handle = client
-        .entry()
         .create_order(&CreateOrderRequest {
             request_id: None,
             instrument_id: plan.instrument_id.clone(),
@@ -465,7 +461,6 @@ pub async fn run_binance_trade_cycle(client: &BatMarkets) -> Result<Option<LiveT
     .await?;
 
     let mut maker_buy_cancel_handle = client
-        .entry()
         .cancel_order(&CancelOrderRequest {
             request_id: None,
             instrument_id: plan.instrument_id.clone(),
@@ -498,7 +493,6 @@ pub async fn run_binance_trade_cycle(client: &BatMarkets) -> Result<Option<LiveT
     .await?;
 
     let mut maker_sell_handle = client
-        .entry()
         .create_order(&CreateOrderRequest {
             request_id: None,
             instrument_id: plan.instrument_id.clone(),
@@ -535,7 +529,6 @@ pub async fn run_binance_trade_cycle(client: &BatMarkets) -> Result<Option<LiveT
     .await?;
 
     let mut maker_sell_cancel_handle = client
-        .entry()
         .cancel_order(&CancelOrderRequest {
             request_id: None,
             instrument_id: plan.instrument_id.clone(),
@@ -568,24 +561,22 @@ pub async fn run_binance_trade_cycle(client: &BatMarkets) -> Result<Option<LiveT
     .await?;
 
     let final_open_orders = client
-        .trade()
-        .refresh_open_orders(Some(&ListOpenOrdersRequest {
+        .fetch_open_orders(Some(&ListOpenOrdersRequest {
             instrument_id: Some(plan.instrument_id.clone()),
         }))
         .await?;
     let refreshed_executions = client
-        .trade()
-        .refresh_executions(Some(&ListExecutionsRequest {
+        .fetch_my_trades(Some(&ListExecutionsRequest {
             instrument_id: Some(plan.instrument_id.clone()),
             limit: Some(50),
         }))
         .await?;
-    let final_positions = client.position().refresh().await?;
+    let final_positions = client.fetch_positions().await?;
     let final_position = final_positions
         .into_iter()
         .find(|position| position.instrument_id == plan.instrument_id)
         .unwrap_or(final_position);
-    let diagnostics = client.diagnostics().snapshot();
+    let diagnostics = client.advanced().diagnostics();
 
     public.shutdown().await?;
     orders.shutdown().await?;
@@ -640,26 +631,24 @@ pub async fn run_binance_extended_stress(
             plan.instrument_id.clone(),
         ))
         .await?;
-    let mut orders = client.stream().private().watch_orders().await?;
-    let mut executions = client.stream().private().watch_executions().await?;
-    let mut positions = client.stream().private().watch_positions().await?;
-    let mut balances = client.stream().private().watch_balances().await?;
+    let mut orders = client.watch_orders().await?;
+    let mut executions = client.watch_my_trades().await?;
+    let mut positions = client.watch_positions().await?;
+    let mut balances = client.watch_balance().await?;
     let mut account = client.stream().private().watch_account().await?;
 
     let _ = public.recv().await?;
     sleep(PRIVATE_STREAM_WARMUP).await;
 
-    let _ = client.account().refresh().await?;
-    let _ = client.position().refresh().await?;
+    let _ = client.fetch_balance().await?;
+    let _ = client.fetch_positions().await?;
     let _ = client
-        .trade()
-        .refresh_open_orders(Some(&ListOpenOrdersRequest {
+        .fetch_open_orders(Some(&ListOpenOrdersRequest {
             instrument_id: Some(plan.instrument_id.clone()),
         }))
         .await?;
     let _ = client
-        .trade()
-        .refresh_executions(Some(&ListExecutionsRequest {
+        .fetch_my_trades(Some(&ListExecutionsRequest {
             instrument_id: Some(plan.instrument_id.clone()),
             limit: Some(50),
         }))
@@ -687,7 +676,7 @@ pub async fn run_binance_extended_stress(
     };
     validate_live_order(client, &open_request).await?;
 
-    let mut open_handle = client.entry().create_order(&open_request).await?;
+    let mut open_handle = client.create_order(&open_request).await?;
     let open_transport = open_handle.ack().transport;
     ensure_command_not_rejected(&mut open_handle, "extended stress open market order").await?;
 
@@ -770,7 +759,6 @@ pub async fn run_binance_extended_stress(
 
     let protective_create_started = Instant::now();
     let protective_handles = client
-        .entry()
         .create_orders(&CreateOrdersRequest {
             request_id: None,
             orders: vec![stop_request.clone(), take_profit_request.clone()],
@@ -835,7 +823,6 @@ pub async fn run_binance_extended_stress(
 
     let protective_cancel_started = Instant::now();
     let protective_cancel_handles = client
-        .entry()
         .cancel_orders(&CancelOrdersRequest {
             request_id: None,
             orders: vec![
@@ -925,7 +912,7 @@ pub async fn run_binance_extended_stress(
         time_in_force: None,
         post_only: false,
     };
-    let mut close_handle = client.entry().close_position(&close_request).await?;
+    let mut close_handle = client.close_position(&close_request).await?;
     let close_transport = close_handle.ack().transport;
     ensure_command_not_rejected(&mut close_handle, "extended stress close position").await?;
 
@@ -987,19 +974,17 @@ pub async fn run_binance_extended_stress(
     }
 
     let final_open_orders = client
-        .trade()
-        .refresh_open_orders(Some(&ListOpenOrdersRequest {
+        .fetch_open_orders(Some(&ListOpenOrdersRequest {
             instrument_id: Some(plan.instrument_id.clone()),
         }))
         .await?;
     let refreshed_executions = client
-        .trade()
-        .refresh_executions(Some(&ListExecutionsRequest {
+        .fetch_my_trades(Some(&ListExecutionsRequest {
             instrument_id: Some(plan.instrument_id.clone()),
             limit: Some(100),
         }))
         .await?;
-    let diagnostics = client.diagnostics().snapshot();
+    let diagnostics = client.advanced().diagnostics();
 
     public.shutdown().await?;
     orders.shutdown().await?;
@@ -1070,7 +1055,7 @@ async fn run_binance_burst_round(
     }
 
     let create_started = Instant::now();
-    let create_handles = client.entry().create_orders(&create_request).await?;
+    let create_handles = client.create_orders(&create_request).await?;
     let create_ack_ns = saturating_duration_ns(create_started.elapsed());
     if create_handles.len() != burst_size {
         return Err(MarketError::new(
@@ -1109,7 +1094,6 @@ async fn run_binance_burst_round(
 
     let cancel_started = Instant::now();
     let cancel_handles = client
-        .entry()
         .cancel_orders(&CancelOrdersRequest {
             request_id: None,
             orders: client_order_ids
@@ -1344,7 +1328,6 @@ async fn build_live_trade_plan(
 
 async fn validate_live_order(client: &BatMarkets, order: &CreateOrderRequest) -> Result<()> {
     let handle = match client
-        .entry()
         .validate_order(&bat_markets::types::ValidateOrderRequest {
             request_id: None,
             order: order.clone(),
@@ -1515,7 +1498,7 @@ async fn await_balance_update(watch: &mut bat_markets::BalancesWatch<'_>) -> Res
     })?
 }
 
-async fn await_account_update(watch: &mut bat_markets::AccountWatch<'_>) -> Result<AccountSummary> {
+async fn await_account_update(watch: &mut AccountWatch<'_>) -> Result<AccountSummary> {
     timeout(ACCOUNT_EVENT_TIMEOUT, watch.recv())
         .await
         .map_err(|_| {
@@ -1535,8 +1518,7 @@ async fn await_open_order_presence(
     let deadline = tokio::time::Instant::now() + OPEN_ORDER_TIMEOUT;
     loop {
         let orders = client
-            .trade()
-            .refresh_open_orders(Some(&ListOpenOrdersRequest {
+            .fetch_open_orders(Some(&ListOpenOrdersRequest {
                 instrument_id: Some(instrument_id.clone()),
             }))
             .await?;
@@ -1662,7 +1644,7 @@ async fn observe_or_refresh_balance(
     {
         Ok(Ok(balance)) => Ok((balance, true)),
         Ok(Err(_)) | Err(_) => {
-            let _ = client.account().refresh().await?;
+            let _ = client.fetch_balance().await?;
             client
                 .account()
                 .balances()
@@ -1698,7 +1680,7 @@ async fn observe_or_refresh_balance_latency(
             }),
         )),
         Ok(Err(_)) | Err(_) => {
-            let _ = client.account().refresh().await?;
+            let _ = client.fetch_balance().await?;
             client
                 .account()
                 .balances()
@@ -1725,7 +1707,7 @@ async fn observe_or_refresh_balance_latency(
 
 async fn observe_or_refresh_account(
     client: &BatMarkets,
-    watch: &mut bat_markets::AccountWatch<'_>,
+    watch: &mut AccountWatch<'_>,
 ) -> Result<(AccountSummary, bool)> {
     match timeout(
         OPTIONAL_PRIVATE_STREAM_OBSERVE_TIMEOUT,
@@ -1734,23 +1716,15 @@ async fn observe_or_refresh_account(
     .await
     {
         Ok(Ok(summary)) => Ok((summary, true)),
-        Ok(Err(_)) | Err(_) => client
-            .account()
-            .refresh()
-            .await?
-            .map(|summary| (summary, false))
-            .ok_or_else(|| {
-                MarketError::new(
-                    ErrorKind::TransportError,
-                    "missing refreshed account summary snapshot",
-                )
-            }),
+        Ok(Err(_)) | Err(_) => refresh_account_summary(client)
+            .await
+            .map(|summary| (summary, false)),
     }
 }
 
 async fn observe_or_refresh_account_latency(
     client: &BatMarkets,
-    watch: &mut bat_markets::AccountWatch<'_>,
+    watch: &mut AccountWatch<'_>,
 ) -> Result<(AccountSummary, Option<StreamLatencyObservation>)> {
     let started = Instant::now();
     match timeout(
@@ -1766,26 +1740,25 @@ async fn observe_or_refresh_account_latency(
                 streamed: true,
             }),
         )),
-        Ok(Err(_)) | Err(_) => client
-            .account()
-            .refresh()
-            .await?
-            .map(|summary| {
-                (
-                    summary,
-                    Some(StreamLatencyObservation {
-                        latency_ns: saturating_duration_ns(started.elapsed()),
-                        streamed: false,
-                    }),
-                )
-            })
-            .ok_or_else(|| {
-                MarketError::new(
-                    ErrorKind::TransportError,
-                    "missing refreshed account summary snapshot",
-                )
-            }),
+        Ok(Err(_)) | Err(_) => refresh_account_summary(client).await.map(|summary| {
+            (
+                summary,
+                Some(StreamLatencyObservation {
+                    latency_ns: saturating_duration_ns(started.elapsed()),
+                    streamed: false,
+                }),
+            )
+        }),
     }
+}
+
+async fn refresh_account_summary(client: &BatMarkets) -> Result<AccountSummary> {
+    client.fetch_balance().await?.summary.ok_or_else(|| {
+        MarketError::new(
+            ErrorKind::TransportError,
+            "missing refreshed account summary snapshot",
+        )
+    })
 }
 
 async fn await_position_snapshot(
@@ -1795,7 +1768,7 @@ async fn await_position_snapshot(
 ) -> Result<Position> {
     let deadline = tokio::time::Instant::now() + POSITION_EVENT_TIMEOUT;
     loop {
-        let positions = client.position().refresh().await?;
+        let positions = client.fetch_positions().await?;
         if let Some(position) = positions
             .into_iter()
             .find(|position| position.instrument_id == *instrument_id)
@@ -1828,8 +1801,7 @@ async fn await_rest_order_state(
     let deadline = tokio::time::Instant::now() + ORDER_EVENT_TIMEOUT;
     loop {
         let result = client
-            .trade()
-            .get_order(&GetOrderRequest {
+            .fetch_order(&GetOrderRequest {
                 request_id: None,
                 instrument_id: instrument_id.clone(),
                 order_id: order_id.clone(),
@@ -1860,8 +1832,7 @@ async fn await_execution_snapshot(
     let deadline = tokio::time::Instant::now() + EXECUTION_EVENT_TIMEOUT;
     loop {
         let executions = client
-            .trade()
-            .refresh_executions(Some(&ListExecutionsRequest {
+            .fetch_my_trades(Some(&ListExecutionsRequest {
                 instrument_id: Some(instrument_id.clone()),
                 limit: Some(50),
             }))
