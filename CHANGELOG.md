@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0 - 2026-04-25
+## 0.1.1 - 2026-04-25
 
 - bootstrap workspace structure from the blueprint
 - add core domain contracts and error taxonomy

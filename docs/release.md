@@ -73,8 +73,8 @@ Run a workflow dry-run from GitHub Actions first. A manual dispatch with
 To publish, tag the exact workspace version:
 
 ```bash
-git tag -a v0.1.0 -m "v0.1.0"
-git push origin v0.1.0
+git tag -a v0.1.1 -m "v0.1.1"
+git push origin v0.1.1
 ```
 
 The publish workflow verifies the repository, publishes in dependency order, and
