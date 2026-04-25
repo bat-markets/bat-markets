@@ -19,17 +19,7 @@ use bat_markets_binance::BinanceLinearFuturesAdapter;
 use bat_markets_bybit::BybitLinearFuturesAdapter;
 
 use crate::{
-    account::AccountClient,
-    diagnostics::{DiagnosticsClient, SharedStateDiagnostics},
-    entry::EntryClient,
-    health::HealthClient,
-    market::MarketClient,
-    native::NativeClient,
-    position::PositionClient,
-    runtime,
-    stream::StreamClient,
-    subscriptions::SubscriptionHubs,
-    trade::TradeClient,
+    diagnostics::SharedStateDiagnostics, runtime, subscriptions::SubscriptionHubs,
     transport::CommandTransportHub,
 };
 
@@ -306,72 +296,6 @@ impl BatMarkets {
     #[must_use]
     pub fn instrument_specs(&self) -> Vec<InstrumentSpec> {
         self.shared.read(EngineState::instrument_specs)
-    }
-
-    /// Access market snapshots and public REST reads.
-    #[doc(hidden)]
-    #[must_use]
-    pub fn market(&self) -> MarketClient<'_> {
-        MarketClient::new(self)
-    }
-
-    /// Access public, private, and command stream lanes.
-    #[doc(hidden)]
-    #[must_use]
-    pub fn stream(&self) -> StreamClient<'_> {
-        StreamClient::new(self)
-    }
-
-    /// Access read-side order and execution state.
-    #[doc(hidden)]
-    #[must_use]
-    pub fn trade(&self) -> TradeClient<'_> {
-        TradeClient::new(self)
-    }
-
-    /// Access write-side order-entry and account-setting commands.
-    #[doc(hidden)]
-    #[must_use]
-    pub fn entry(&self) -> EntryClient<'_> {
-        EntryClient::new(self)
-    }
-
-    /// Access position snapshots and compatibility position settings methods.
-    #[doc(hidden)]
-    #[must_use]
-    pub fn position(&self) -> PositionClient<'_> {
-        PositionClient::new(self)
-    }
-
-    /// Access account balances and summary state.
-    #[doc(hidden)]
-    #[must_use]
-    pub fn account(&self) -> AccountClient<'_> {
-        AccountClient::new(self)
-    }
-
-    /// Access cheap health snapshots and health-change subscriptions.
-    #[doc(hidden)]
-    #[must_use]
-    pub fn health(&self) -> HealthClient<'_> {
-        HealthClient::new(self)
-    }
-
-    /// Access local runtime and shared-state diagnostics.
-    #[doc(hidden)]
-    #[must_use]
-    pub fn diagnostics(&self) -> DiagnosticsClient<'_> {
-        DiagnosticsClient::new(self)
-    }
-
-    /// Access venue-specific adapter functionality.
-    ///
-    /// Use this only when unified facade methods would hide important
-    /// exchange-specific behavior.
-    #[doc(hidden)]
-    #[must_use]
-    pub fn native(&self) -> NativeClient<'_> {
-        NativeClient::new(&self.adapter)
     }
 
     pub(crate) fn read_state<T>(&self, f: impl FnOnce(&EngineState) -> T) -> T {

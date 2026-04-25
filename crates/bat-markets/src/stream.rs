@@ -6,16 +6,15 @@ use tokio::{
 };
 
 use bat_markets_core::{
-    AccountSummary, Balance, BookTop, CommandLaneEvent, CommandLifecycleEvent, CommandOperation,
-    CommandReceipt, ErrorKind, Execution, FundingRate, InstrumentId, Kline, KlineInterval,
-    Liquidation, MarkPrice, OpenInterest, Order, OrderBookDelta, Position, PrivateLaneEvent,
-    PublicLaneEvent, ReconcileReport, ReconcileTrigger, RequestId, Result, Ticker, TradeTick,
-    WatchFastFeedRequest, WatchOrderBookRequest,
+    Balance, ErrorKind, Execution, FundingRate, InstrumentId, Kline, KlineInterval, Liquidation,
+    MarkPrice, OpenInterest, Order, OrderBookDelta, Position, PrivateLaneEvent, PublicLaneEvent,
+    Result, Ticker, TradeTick, WatchOrderBookRequest,
 };
+#[cfg(test)]
+use bat_markets_core::{BookTop, WatchFastFeedRequest};
 
 use crate::{
     client::BatMarkets,
-    runtime,
     subscriptions::{PrivateSubscriptionLease, PublicSubscriptionLease},
 };
 
@@ -27,13 +26,9 @@ pub(crate) const fn private_lane(inner: &BatMarkets) -> PrivateLaneClient<'_> {
     PrivateLaneClient { inner }
 }
 
-pub(crate) const fn command_lane(inner: &BatMarkets) -> CommandLaneClient<'_> {
-    CommandLaneClient { inner }
-}
-
 /// Public market-data subscription plan for live websocket runners.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PublicSubscription {
+pub(crate) struct PublicSubscription {
     /// Instruments included in the public subscription.
     pub instrument_ids: Vec<InstrumentId>,
     /// Subscribe to ticker updates.
@@ -56,32 +51,9 @@ pub struct PublicSubscription {
     pub kline_intervals: Vec<Box<str>>,
 }
 
-impl PublicSubscription {
-    /// Build a balanced default public subscription for common market-data feeds.
-    ///
-    /// This enables ticker, trades, book top, mark price, funding rate, and
-    /// open interest. Full order-book deltas, liquidations, and OHLCV intervals
-    /// remain opt-in because they can be higher-volume feeds.
-    #[must_use]
-    pub fn all_for(instrument_ids: Vec<InstrumentId>) -> Self {
-        Self {
-            instrument_ids,
-            ticker: true,
-            trades: true,
-            book_top: true,
-            order_book: false,
-            mark_price: true,
-            funding_rate: true,
-            open_interest: true,
-            liquidations: false,
-            kline_intervals: Vec::new(),
-        }
-    }
-}
-
 /// Typed market-data watch request for one or many instruments.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct WatchInstrumentsRequest {
+pub(crate) struct WatchInstrumentsRequest {
     /// Instruments to watch.
     pub instrument_ids: Vec<InstrumentId>,
 }
@@ -104,7 +76,7 @@ impl WatchInstrumentsRequest {
 
 /// Typed OHLCV watch request for one or many instruments.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct WatchOhlcvRequest {
+pub(crate) struct WatchOhlcvRequest {
     /// Instruments to watch.
     pub instrument_ids: Vec<InstrumentId>,
     /// OHLCV interval in unified notation, such as `1m`, `5m`, or `1h`.
@@ -150,40 +122,15 @@ impl WatchOhlcvRequest {
 }
 
 /// Handle for a running live stream task.
-pub struct LiveStreamHandle {
-    pub(crate) shutdown: Option<oneshot::Sender<()>>,
+pub(crate) struct LiveStreamHandle {
+    pub(crate) _shutdown: oneshot::Sender<()>,
     pub(crate) join: JoinHandle<Result<()>>,
 }
 
 impl LiveStreamHandle {
-    /// Ask the stream task to shut down and wait for it to finish.
-    pub async fn shutdown(mut self) -> Result<()> {
-        if let Some(shutdown) = self.shutdown.take() {
-            let _ = shutdown.send(());
-        }
-        self.join.await.map_err(|error| {
-            bat_markets_core::MarketError::new(
-                bat_markets_core::ErrorKind::TransportError,
-                format!("stream task join failed: {error}"),
-            )
-        })?
-    }
-
     /// Abort the stream task immediately.
-    ///
-    /// Prefer [`Self::shutdown`] when graceful stream closure matters.
     pub fn abort(&self) {
         self.join.abort();
-    }
-
-    /// Wait until the stream task exits on its own.
-    pub async fn wait(self) -> Result<()> {
-        self.join.await.map_err(|error| {
-            bat_markets_core::MarketError::new(
-                bat_markets_core::ErrorKind::TransportError,
-                format!("stream task join failed: {error}"),
-            )
-        })?
     }
 }
 
@@ -223,26 +170,8 @@ async fn recv_private_event(
     }
 }
 
-async fn recv_command_event(
-    receiver: &mut broadcast::Receiver<CommandLaneEvent>,
-    label: &str,
-) -> Result<CommandLaneEvent> {
-    loop {
-        match receiver.recv().await {
-            Ok(event) => return Ok(event),
-            Err(broadcast::error::RecvError::Lagged(_)) => continue,
-            Err(error) => {
-                return Err(bat_markets_core::MarketError::new(
-                    ErrorKind::TransportError,
-                    format!("{label} receive failed: {error}"),
-                ));
-            }
-        }
-    }
-}
-
 /// Typed OHLCV subscription receiver over the shared public event bus.
-pub struct OhlcvUpdates<'a> {
+pub(crate) struct OhlcvUpdates<'a> {
     inner: &'a BatMarkets,
     receiver: broadcast::Receiver<PublicLaneEvent>,
     instrument_ids: BTreeSet<InstrumentId>,
@@ -332,7 +261,7 @@ impl<'a> OhlcvWatch<'a> {
 }
 
 /// Typed ticker subscription receiver over the shared public event bus.
-pub struct TickerUpdates<'a> {
+pub(crate) struct TickerUpdates<'a> {
     inner: &'a BatMarkets,
     receiver: broadcast::Receiver<PublicLaneEvent>,
     instrument_ids: BTreeSet<InstrumentId>,
@@ -396,7 +325,7 @@ impl<'a> TickerWatch<'a> {
 }
 
 /// Typed trade subscription receiver over the shared public event bus.
-pub struct TradeUpdates<'a> {
+pub(crate) struct TradeUpdates<'a> {
     inner: &'a BatMarkets,
     receiver: broadcast::Receiver<PublicLaneEvent>,
     instrument_ids: BTreeSet<InstrumentId>,
@@ -460,12 +389,14 @@ impl<'a> TradesWatch<'a> {
 }
 
 /// Typed top-of-book subscription receiver over the shared public event bus.
-pub struct BookTopUpdates<'a> {
+#[cfg(test)]
+pub(crate) struct BookTopUpdates<'a> {
     inner: &'a BatMarkets,
     receiver: broadcast::Receiver<PublicLaneEvent>,
     instrument_ids: BTreeSet<InstrumentId>,
 }
 
+#[cfg(test)]
 impl<'a> BookTopUpdates<'a> {
     fn new(
         inner: &'a BatMarkets,
@@ -497,34 +428,8 @@ impl<'a> BookTopUpdates<'a> {
     }
 }
 
-/// Live top-of-book watcher with typed updates and stream lifecycle control.
-pub struct BookTopWatch<'a> {
-    updates: BookTopUpdates<'a>,
-    _lease: PublicSubscriptionLease,
-}
-
-impl<'a> BookTopWatch<'a> {
-    /// Wait for the next matching top-of-book update from the live watcher.
-    pub async fn recv(&mut self) -> Result<BookTop> {
-        self.updates.recv().await
-    }
-
-    /// Release the shared subscription lease.
-    pub async fn shutdown(self) -> Result<()> {
-        Ok(())
-    }
-
-    /// No-op for shared-hub watchers.
-    pub fn abort(&self) {}
-
-    /// Release the shared subscription lease.
-    pub async fn wait(self) -> Result<()> {
-        Ok(())
-    }
-}
-
 /// Typed mark-price subscription receiver over the shared public event bus.
-pub struct MarkPriceUpdates<'a> {
+pub(crate) struct MarkPriceUpdates<'a> {
     inner: &'a BatMarkets,
     receiver: broadcast::Receiver<PublicLaneEvent>,
     instrument_ids: BTreeSet<InstrumentId>,
@@ -580,7 +485,7 @@ impl<'a> MarkPriceWatch<'a> {
 }
 
 /// Typed funding-rate subscription receiver over the shared public event bus.
-pub struct FundingRateUpdates {
+pub(crate) struct FundingRateUpdates {
     receiver: broadcast::Receiver<PublicLaneEvent>,
     instrument_ids: BTreeSet<InstrumentId>,
 }
@@ -632,7 +537,7 @@ impl<'a> FundingRateWatch<'a> {
 }
 
 /// Typed open-interest subscription receiver over the shared public event bus.
-pub struct OpenInterestUpdates {
+pub(crate) struct OpenInterestUpdates {
     receiver: broadcast::Receiver<PublicLaneEvent>,
     instrument_ids: BTreeSet<InstrumentId>,
 }
@@ -684,7 +589,7 @@ impl<'a> OpenInterestWatch<'a> {
 }
 
 /// Typed liquidation subscription receiver over the shared public event bus.
-pub struct LiquidationUpdates<'a> {
+pub(crate) struct LiquidationUpdates<'a> {
     inner: &'a BatMarkets,
     receiver: broadcast::Receiver<PublicLaneEvent>,
     instrument_ids: BTreeSet<InstrumentId>,
@@ -740,7 +645,7 @@ impl<'a> LiquidationWatch<'a> {
 }
 
 /// Typed order-book delta subscription receiver over the shared public event bus.
-pub struct OrderBookUpdates<'a> {
+pub(crate) struct OrderBookUpdates<'a> {
     inner: &'a BatMarkets,
     receiver: broadcast::Receiver<PublicLaneEvent>,
     instrument_id: InstrumentId,
@@ -796,12 +701,14 @@ impl<'a> OrderBookWatch<'a> {
 }
 
 /// Compact fast-feed receiver for frontend fanout.
-pub struct FastFeedUpdates {
+#[cfg(test)]
+pub(crate) struct FastFeedUpdates {
     receiver: broadcast::Receiver<PublicLaneEvent>,
     request: WatchFastFeedRequest,
     instrument_ids: BTreeSet<InstrumentId>,
 }
 
+#[cfg(test)]
 impl FastFeedUpdates {
     fn new(receiver: broadcast::Receiver<PublicLaneEvent>, request: WatchFastFeedRequest) -> Self {
         Self {
@@ -869,27 +776,8 @@ impl FastFeedUpdates {
     }
 }
 
-/// Live compact fast-feed watcher with typed events and stream lifecycle control.
-pub struct FastFeedWatch<'a> {
-    updates: FastFeedUpdates,
-    _lease: PublicSubscriptionLease,
-    _marker: std::marker::PhantomData<&'a BatMarkets>,
-}
-
-impl<'a> FastFeedWatch<'a> {
-    /// Wait for the next public-lane event from the live fast-feed watcher.
-    pub async fn recv(&mut self) -> Result<PublicLaneEvent> {
-        self.updates.recv().await
-    }
-
-    /// Release the shared subscription lease.
-    pub async fn shutdown(self) -> Result<()> {
-        Ok(())
-    }
-}
-
 /// Typed order subscription receiver over the shared private event bus.
-pub struct OrderUpdates {
+pub(crate) struct OrderUpdates {
     receiver: broadcast::Receiver<PrivateLaneEvent>,
 }
 
@@ -929,7 +817,7 @@ impl<'a> OrdersWatch<'a> {
 }
 
 /// Typed execution subscription receiver over the shared private event bus.
-pub struct ExecutionUpdates {
+pub(crate) struct ExecutionUpdates {
     receiver: broadcast::Receiver<PrivateLaneEvent>,
 }
 
@@ -969,7 +857,7 @@ impl<'a> ExecutionsWatch<'a> {
 }
 
 /// Typed position subscription receiver over the shared private event bus.
-pub struct PositionUpdates {
+pub(crate) struct PositionUpdates {
     receiver: broadcast::Receiver<PrivateLaneEvent>,
 }
 
@@ -1009,7 +897,7 @@ impl<'a> PositionsWatch<'a> {
 }
 
 /// Typed balance subscription receiver over the shared private event bus.
-pub struct BalanceUpdates {
+pub(crate) struct BalanceUpdates {
     receiver: broadcast::Receiver<PrivateLaneEvent>,
 }
 
@@ -1039,52 +927,6 @@ pub struct BalancesWatch<'a> {
 impl<'a> BalancesWatch<'a> {
     /// Wait for the next private balance update from the live watcher.
     pub async fn recv(&mut self) -> Result<Balance> {
-        self.updates.recv().await
-    }
-
-    /// Release the shared private-stream lease.
-    pub async fn shutdown(self) -> Result<()> {
-        Ok(())
-    }
-}
-
-/// Typed account-summary receiver derived from the shared private event bus.
-pub struct AccountUpdates<'a> {
-    inner: &'a BatMarkets,
-    receiver: broadcast::Receiver<PrivateLaneEvent>,
-}
-
-impl<'a> AccountUpdates<'a> {
-    fn new(inner: &'a BatMarkets, receiver: broadcast::Receiver<PrivateLaneEvent>) -> Self {
-        Self { inner, receiver }
-    }
-
-    /// Wait for the next account summary changed by private balance activity.
-    pub async fn recv(&mut self) -> Result<AccountSummary> {
-        loop {
-            let event = recv_private_event(&mut self.receiver, "account subscription").await?;
-            if !matches!(event, PrivateLaneEvent::Balance(_)) {
-                continue;
-            }
-            if let Some(summary) = self
-                .inner
-                .read_state(bat_markets_core::EngineState::account_summary)
-            {
-                return Ok(summary);
-            }
-        }
-    }
-}
-
-/// Live account-summary watcher with typed updates and stream lifecycle control.
-pub struct AccountWatch<'a> {
-    updates: AccountUpdates<'a>,
-    _lease: PrivateSubscriptionLease,
-}
-
-impl<'a> AccountWatch<'a> {
-    /// Wait for the next account summary update from the live watcher.
-    pub async fn recv(&mut self) -> Result<AccountSummary> {
         self.updates.recv().await
     }
 
@@ -1126,37 +968,8 @@ fn parse_watch_interval(raw: &str) -> Result<KlineInterval> {
     })
 }
 
-/// Entry point for lane-specific ingestion.
-pub struct StreamClient<'a> {
-    inner: &'a BatMarkets,
-}
-
-impl<'a> StreamClient<'a> {
-    pub(crate) const fn new(inner: &'a BatMarkets) -> Self {
-        Self { inner }
-    }
-
-    /// Access the public market-data lane.
-    #[must_use]
-    pub fn public(&self) -> PublicLaneClient<'a> {
-        public_lane(self.inner)
-    }
-
-    /// Access the private account/order/position lane.
-    #[must_use]
-    pub fn private(&self) -> PrivateLaneClient<'a> {
-        private_lane(self.inner)
-    }
-
-    /// Access command-lifecycle events and low-level command classification.
-    #[must_use]
-    pub fn command(&self) -> CommandLaneClient<'a> {
-        command_lane(self.inner)
-    }
-}
-
 /// Public market-data lane ingestion.
-pub struct PublicLaneClient<'a> {
+pub(crate) struct PublicLaneClient<'a> {
     inner: &'a BatMarkets,
 }
 
@@ -1165,6 +978,7 @@ impl<'a> PublicLaneClient<'a> {
     ///
     /// This is primarily for fixtures, replay tools, and custom transports. Live
     /// applications usually prefer `watch_*` methods.
+    #[cfg(test)]
     pub fn ingest_json(&self, payload: &str) -> Result<Vec<PublicLaneEvent>> {
         let events = self.inner.adapter.as_adapter().parse_public(payload)?;
         self.inner.shared.apply_public_events(&events);
@@ -1191,6 +1005,7 @@ impl<'a> PublicLaneClient<'a> {
 
     /// Subscribe to typed top-of-book updates already flowing through the public lane.
     #[must_use]
+    #[cfg(test)]
     pub fn subscribe_book_top(&self, request: WatchInstrumentsRequest) -> BookTopUpdates<'a> {
         BookTopUpdates::new(self.inner, self.subscribe(), request)
     }
@@ -1236,6 +1051,7 @@ impl<'a> PublicLaneClient<'a> {
 
     /// Subscribe to a compact multi-topic fast feed already flowing through the public lane.
     #[must_use]
+    #[cfg(test)]
     pub fn subscribe_fast(&self, request: WatchFastFeedRequest) -> FastFeedUpdates {
         FastFeedUpdates::new(self.subscribe(), request)
     }
@@ -1244,10 +1060,6 @@ impl<'a> PublicLaneClient<'a> {
     ///
     /// Prefer `watch_*` / `subscribe_fast(...)` in applications so the subscription hub can
     /// preserve shared subscriptions and avoid accidental duplicate sockets.
-    pub async fn spawn_live(&self, subscription: PublicSubscription) -> Result<LiveStreamHandle> {
-        runtime::spawn_public_stream(self.inner.live_context(), subscription).await
-    }
-
     /// Spawn a reconnecting live ticker watcher for one or many instruments.
     pub async fn watch_ticker(&self, request: WatchInstrumentsRequest) -> Result<TickerWatch<'a>> {
         let updates = self.subscribe_ticker(request.clone());
@@ -1295,35 +1107,6 @@ impl<'a> PublicLaneClient<'a> {
             })
             .await?;
         Ok(TradesWatch {
-            updates,
-            _lease: lease,
-        })
-    }
-
-    /// Spawn a reconnecting live top-of-book watcher for one or many instruments.
-    pub async fn watch_book_top(
-        &self,
-        request: WatchInstrumentsRequest,
-    ) -> Result<BookTopWatch<'a>> {
-        let updates = self.subscribe_book_top(request.clone());
-        let lease = self
-            .inner
-            .subscription_hubs
-            .public
-            .acquire(PublicSubscription {
-                instrument_ids: request.instrument_ids,
-                ticker: false,
-                trades: false,
-                book_top: true,
-                order_book: false,
-                mark_price: false,
-                funding_rate: false,
-                open_interest: false,
-                liquidations: false,
-                kline_intervals: Vec::new(),
-            })
-            .await?;
-        Ok(BookTopWatch {
             updates,
             _lease: lease,
         })
@@ -1476,33 +1259,6 @@ impl<'a> PublicLaneClient<'a> {
         })
     }
 
-    /// Spawn a reconnecting compact fast feed watcher.
-    pub async fn watch_fast(&self, request: WatchFastFeedRequest) -> Result<FastFeedWatch<'a>> {
-        let updates = self.subscribe_fast(request.clone());
-        let lease = self
-            .inner
-            .subscription_hubs
-            .public
-            .acquire(PublicSubscription {
-                instrument_ids: request.instrument_ids,
-                ticker: request.ticker,
-                trades: request.trades,
-                book_top: request.book_top,
-                order_book: false,
-                mark_price: request.mark_price,
-                funding_rate: request.funding_rate,
-                open_interest: request.open_interest,
-                liquidations: request.liquidations,
-                kline_intervals: Vec::new(),
-            })
-            .await?;
-        Ok(FastFeedWatch {
-            updates,
-            _lease: lease,
-            _marker: std::marker::PhantomData,
-        })
-    }
-
     /// Spawn a reconnecting live OHLCV watcher for one or many instruments.
     ///
     /// Intervals are accepted in unified ccxt-style notation such as `1m`, `5m`, `1h`,
@@ -1560,7 +1316,7 @@ impl<'a> PublicLaneClient<'a> {
 }
 
 /// Private state-lane ingestion.
-pub struct PrivateLaneClient<'a> {
+pub(crate) struct PrivateLaneClient<'a> {
     inner: &'a BatMarkets,
 }
 
@@ -1569,6 +1325,7 @@ impl<'a> PrivateLaneClient<'a> {
     ///
     /// This is primarily for fixtures, replay tools, and custom transports. Live
     /// applications usually prefer `watch_*` methods.
+    #[cfg(test)]
     pub fn ingest_json(&self, payload: &str) -> Result<Vec<PrivateLaneEvent>> {
         let events = self.inner.adapter.as_adapter().parse_private(payload)?;
         self.inner.shared.apply_private_events(&events);
@@ -1605,20 +1362,10 @@ impl<'a> PrivateLaneClient<'a> {
         BalanceUpdates::new(self.subscribe())
     }
 
-    /// Subscribe to account-summary updates derived from private balance events.
-    #[must_use]
-    pub fn subscribe_account(&self) -> AccountUpdates<'a> {
-        AccountUpdates::new(self.inner, self.subscribe())
-    }
-
     /// Spawn a reconnecting live private-stream runner.
     ///
     /// Prefer `watch_*` in applications so the private subscription hub preserves one shared
     /// account stream.
-    pub async fn spawn_live(&self) -> Result<LiveStreamHandle> {
-        runtime::spawn_private_stream(self.inner.live_context()).await
-    }
-
     /// Acquire the shared private stream and receive typed order updates.
     pub async fn watch_orders(&self) -> Result<OrdersWatch<'a>> {
         let updates = self.subscribe_orders();
@@ -1662,85 +1409,6 @@ impl<'a> PrivateLaneClient<'a> {
             _marker: std::marker::PhantomData,
         })
     }
-
-    /// Acquire the shared private stream and receive derived account summaries.
-    pub async fn watch_account(&self) -> Result<AccountWatch<'a>> {
-        let updates = self.subscribe_account();
-        let lease = self.inner.subscription_hubs.private.acquire().await?;
-        Ok(AccountWatch {
-            updates,
-            _lease: lease,
-        })
-    }
-
-    /// Trigger a manual REST-backed repair cycle for the private-state lane.
-    ///
-    /// ```no_run
-    /// use bat_markets::{BatMarkets, errors::Result, types::{Product, Venue}};
-    ///
-    /// # #[tokio::main]
-    /// # async fn main() -> Result<()> {
-    /// let client = BatMarkets::builder()
-    ///     .venue(Venue::Binance)
-    ///     .product(Product::LinearUsdt)
-    ///     .build_live()
-    ///     .await?;
-    ///
-    /// let report = client.advanced().reconcile().await?;
-    /// println!("reconcile outcome: {:?}", report.outcome);
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub async fn reconcile(&self) -> Result<ReconcileReport> {
-        runtime::reconcile_private(&self.inner.live_context(), ReconcileTrigger::Manual).await
-    }
-}
-
-/// Command-lane classification and state hint application.
-pub struct CommandLaneClient<'a> {
-    inner: &'a BatMarkets,
-}
-
-impl<'a> CommandLaneClient<'a> {
-    /// Subscribe to raw command-lane events.
-    #[must_use]
-    pub fn subscribe(&self) -> broadcast::Receiver<CommandLaneEvent> {
-        self.inner.shared.subscribe_command_events()
-    }
-
-    /// Wait for the next command lifecycle event.
-    pub async fn next_lifecycle(&self) -> Result<CommandLifecycleEvent> {
-        let mut receiver = self.subscribe();
-        loop {
-            let event = recv_command_event(&mut receiver, "command subscription").await?;
-            if let CommandLaneEvent::Lifecycle(lifecycle) = event {
-                return Ok(lifecycle);
-            }
-        }
-    }
-
-    /// Classify a raw command response payload and apply the resulting state hint.
-    ///
-    /// This is a low-level integration hook for custom transports. Normal order
-    /// entry should use [`EntryClient`](crate::EntryClient).
-    pub fn classify_json(
-        &self,
-        operation: CommandOperation,
-        payload: Option<&str>,
-        request_id: Option<RequestId>,
-    ) -> Result<CommandReceipt> {
-        let receipt = self
-            .inner
-            .adapter
-            .as_adapter()
-            .classify_command(operation, payload, request_id)?;
-        self.inner
-            .write_state(|state| state.apply_command_receipt(&receipt));
-        self.inner
-            .shared
-            .emit_command_event(CommandLaneEvent::Receipt(receipt.clone()));
-        Ok(receipt)
-    }
 }
 
 #[cfg(test)]
@@ -1753,7 +1421,9 @@ mod tests {
     use crate::BatMarketsBuilder;
     use bat_markets_core::{WatchFastFeedRequest, WatchOrderBookRequest};
 
-    use super::{WatchInstrumentsRequest, WatchOhlcvRequest, recv_public_event};
+    use super::{
+        WatchInstrumentsRequest, WatchOhlcvRequest, private_lane, public_lane, recv_public_event,
+    };
 
     const BINANCE_PUBLIC_TRADE: &str = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -1803,11 +1473,9 @@ mod tests {
             .product(Product::LinearUsdt)
             .build()
             .expect("fixture client should build");
-        let mut receiver = client.stream().public().subscribe();
+        let mut receiver = public_lane(&client).subscribe();
 
-        let events = client
-            .stream()
-            .public()
+        let events = public_lane(&client)
             .ingest_json(BINANCE_PUBLIC_TRADE)
             .expect("fixture payload should parse");
         assert!(!events.is_empty());
@@ -1827,17 +1495,11 @@ mod tests {
             .product(Product::LinearUsdt)
             .build()
             .expect("fixture client should build");
-        let mut updates =
-            client
-                .stream()
-                .public()
-                .subscribe_ticker(WatchInstrumentsRequest::for_instrument(InstrumentId::from(
-                    "BTC/USDT:USDT",
-                )));
+        let mut updates = public_lane(&client).subscribe_ticker(
+            WatchInstrumentsRequest::for_instrument(InstrumentId::from("BTC/USDT:USDT")),
+        );
 
-        client
-            .stream()
-            .public()
+        public_lane(&client)
             .ingest_json(BINANCE_PUBLIC_TICKER)
             .expect("fixture ticker should parse");
 
@@ -1857,17 +1519,11 @@ mod tests {
             .product(Product::LinearUsdt)
             .build()
             .expect("fixture client should build");
-        let mut updates =
-            client
-                .stream()
-                .public()
-                .subscribe_trades(WatchInstrumentsRequest::for_instrument(InstrumentId::from(
-                    "BTC/USDT:USDT",
-                )));
+        let mut updates = public_lane(&client).subscribe_trades(
+            WatchInstrumentsRequest::for_instrument(InstrumentId::from("BTC/USDT:USDT")),
+        );
 
-        client
-            .stream()
-            .public()
+        public_lane(&client)
             .ingest_json(BINANCE_PUBLIC_TRADE)
             .expect("fixture trade should parse");
 
@@ -1887,9 +1543,7 @@ mod tests {
             .product(Product::LinearUsdt)
             .build()
             .expect("fixture client should build");
-        let sample_event = client
-            .stream()
-            .public()
+        let sample_event = public_lane(&client)
             .ingest_json(BINANCE_PUBLIC_TICKER)
             .expect("fixture ticker should parse")
             .into_iter()
@@ -1922,17 +1576,11 @@ mod tests {
             .product(Product::LinearUsdt)
             .build()
             .expect("fixture client should build");
-        let mut updates =
-            client
-                .stream()
-                .public()
-                .subscribe_book_top(WatchInstrumentsRequest::for_instrument(InstrumentId::from(
-                    "BTC/USDT:USDT",
-                )));
+        let mut updates = public_lane(&client).subscribe_book_top(
+            WatchInstrumentsRequest::for_instrument(InstrumentId::from("BTC/USDT:USDT")),
+        );
 
-        client
-            .stream()
-            .public()
+        public_lane(&client)
             .ingest_json(BINANCE_PUBLIC_BOOK_TICKER)
             .expect("fixture book ticker should parse");
 
@@ -1953,18 +1601,12 @@ mod tests {
             .product(Product::LinearUsdt)
             .build()
             .expect("fixture client should build");
-        let mut updates =
-            client
-                .stream()
-                .public()
-                .subscribe_ohlcv(WatchOhlcvRequest::for_instrument(
-                    InstrumentId::from("BTC/USDT:USDT"),
-                    "1m",
-                ));
+        let mut updates = public_lane(&client).subscribe_ohlcv(WatchOhlcvRequest::for_instrument(
+            InstrumentId::from("BTC/USDT:USDT"),
+            "1m",
+        ));
 
-        client
-            .stream()
-            .public()
+        public_lane(&client)
             .ingest_json(BINANCE_PUBLIC_KLINE)
             .expect("fixture kline should parse");
 
@@ -1984,18 +1626,12 @@ mod tests {
             .product(Product::LinearUsdt)
             .build()
             .expect("fixture client should build");
-        let mut updates =
-            client
-                .stream()
-                .public()
-                .subscribe_ohlcv(WatchOhlcvRequest::for_instrument(
-                    InstrumentId::from("BTC/USDT:USDT"),
-                    "1m",
-                ));
+        let mut updates = public_lane(&client).subscribe_ohlcv(WatchOhlcvRequest::for_instrument(
+            InstrumentId::from("BTC/USDT:USDT"),
+            "1m",
+        ));
 
-        client
-            .stream()
-            .public()
+        public_lane(&client)
             .ingest_json(
                 r#"{
                     "e":"kline",
@@ -2015,9 +1651,7 @@ mod tests {
                 }"#,
             )
             .expect("eth kline should parse");
-        client
-            .stream()
-            .public()
+        public_lane(&client)
             .ingest_json(BINANCE_PUBLIC_KLINE)
             .expect("btc kline should parse");
 
@@ -2036,13 +1670,11 @@ mod tests {
             .product(Product::LinearUsdt)
             .build()
             .expect("fixture client should build");
-        let mut updates = client.stream().public().subscribe_mark_prices(
+        let mut updates = public_lane(&client).subscribe_mark_prices(
             WatchInstrumentsRequest::for_instrument(InstrumentId::from("BTC/USDT:USDT")),
         );
 
-        client
-            .stream()
-            .public()
+        public_lane(&client)
             .ingest_json(BINANCE_PUBLIC_MARK_PRICE)
             .expect("fixture mark price should parse");
 
@@ -2061,28 +1693,21 @@ mod tests {
             .product(Product::LinearUsdt)
             .build()
             .expect("fixture client should build");
-        let mut updates = client
-            .stream()
-            .public()
-            .subscribe_fast(WatchFastFeedRequest {
-                instrument_ids: vec![InstrumentId::from("BTC/USDT:USDT")],
-                ticker: false,
-                trades: false,
-                book_top: false,
-                mark_price: true,
-                funding_rate: false,
-                open_interest: false,
-                liquidations: false,
-            });
+        let mut updates = public_lane(&client).subscribe_fast(WatchFastFeedRequest {
+            instrument_ids: vec![InstrumentId::from("BTC/USDT:USDT")],
+            ticker: false,
+            trades: false,
+            book_top: false,
+            mark_price: true,
+            funding_rate: false,
+            open_interest: false,
+            liquidations: false,
+        });
 
-        client
-            .stream()
-            .public()
+        public_lane(&client)
             .ingest_json(BINANCE_PUBLIC_TICKER)
             .expect("fixture ticker should parse");
-        client
-            .stream()
-            .public()
+        public_lane(&client)
             .ingest_json(BINANCE_PUBLIC_MARK_PRICE)
             .expect("fixture mark price should parse");
 
@@ -2101,18 +1726,12 @@ mod tests {
             .product(Product::LinearUsdt)
             .build()
             .expect("fixture client should build");
-        let mut updates =
-            client
-                .stream()
-                .public()
-                .subscribe_order_book(WatchOrderBookRequest::new(
-                    InstrumentId::from("BTC/USDT:USDT"),
-                    Some(50),
-                ));
+        let mut updates = public_lane(&client).subscribe_order_book(WatchOrderBookRequest::new(
+            InstrumentId::from("BTC/USDT:USDT"),
+            Some(50),
+        ));
 
-        client
-            .stream()
-            .public()
+        public_lane(&client)
             .ingest_json(BYBIT_PUBLIC_ORDERBOOK)
             .expect("fixture orderbook should parse");
 
@@ -2133,13 +1752,11 @@ mod tests {
             .product(Product::LinearUsdt)
             .build()
             .expect("fixture client should build");
-        let mut updates = client.stream().public().subscribe_liquidations(
+        let mut updates = public_lane(&client).subscribe_liquidations(
             WatchInstrumentsRequest::for_instrument(InstrumentId::from("BTC/USDT:USDT")),
         );
 
-        client
-            .stream()
-            .public()
+        public_lane(&client)
             .ingest_json(BINANCE_PUBLIC_LIQUIDATION)
             .expect("fixture liquidation should parse");
 
@@ -2160,23 +1777,17 @@ mod tests {
             .product(Product::LinearUsdt)
             .build()
             .expect("fixture client should build");
-        let mut orders = client.stream().private().subscribe_orders();
-        let mut executions = client.stream().private().subscribe_executions();
-        let mut balances = client.stream().private().subscribe_balances();
+        let mut orders = private_lane(&client).subscribe_orders();
+        let mut executions = private_lane(&client).subscribe_executions();
+        let mut balances = private_lane(&client).subscribe_balances();
 
-        client
-            .stream()
-            .private()
+        private_lane(&client)
             .ingest_json(BYBIT_PRIVATE_ORDER)
             .expect("fixture private order should parse");
-        client
-            .stream()
-            .private()
+        private_lane(&client)
             .ingest_json(BYBIT_PRIVATE_EXECUTION)
             .expect("fixture private execution should parse");
-        client
-            .stream()
-            .private()
+        private_lane(&client)
             .ingest_json(BYBIT_PRIVATE_WALLET)
             .expect("fixture private wallet should parse");
 

@@ -3,7 +3,7 @@
 //! `bat-markets` is a futures-first, headless exchange engine for Binance USD-M
 //! and Bybit USDT linear futures.
 //!
-//! The v0.2 facade follows the CCXT mental model: `fetch_*` is REST/read,
+//! The v0.3 facade follows the CCXT mental model: `fetch_*` is REST/read,
 //! `watch_*` is websocket/live, `create/edit/cancel/set_*` are commands, and
 //! [`BatMarkets::advanced`] is the low-level escape hatch.
 //!
@@ -65,8 +65,6 @@
 
 #![deny(missing_docs)]
 
-#[doc(hidden)]
-pub mod account;
 /// Low-level advanced facade for custom transports and diagnostics.
 pub mod advanced;
 /// Re-exported capability contracts from `bat-markets-core`.
@@ -75,27 +73,16 @@ pub mod capabilities;
 pub mod client;
 /// Re-exported runtime config contracts from `bat-markets-core`.
 pub mod config;
-#[doc(hidden)]
-pub mod diagnostics;
-#[doc(hidden)]
-pub mod entry;
+mod diagnostics;
+mod entry;
 /// Re-exported error contracts from `bat-markets-core`.
 pub mod errors;
 mod facade;
-#[doc(hidden)]
-pub mod health;
-#[doc(hidden)]
-pub mod market;
-#[doc(hidden)]
-pub mod native;
-#[doc(hidden)]
-pub mod position;
+mod health;
+mod native;
 mod runtime;
-#[doc(hidden)]
-pub mod stream;
+mod stream;
 mod subscriptions;
-#[doc(hidden)]
-pub mod trade;
 mod transport;
 /// Re-exported domain and request/response types from `bat-markets-core`.
 pub mod types;
@@ -110,25 +97,3 @@ pub use stream::{
     BalancesWatch, ExecutionsWatch, FundingRateWatch, LiquidationWatch, MarkPriceWatch, OhlcvWatch,
     OpenInterestWatch, OrderBookWatch, OrdersWatch, PositionsWatch, TickerWatch, TradesWatch,
 };
-
-#[doc(hidden)]
-pub use account::AccountClient;
-#[doc(hidden)]
-pub use diagnostics::DiagnosticsClient;
-#[doc(hidden)]
-pub use entry::EntryClient;
-#[doc(hidden)]
-pub use health::HealthClient;
-#[doc(hidden)]
-pub use market::MarketClient;
-#[doc(hidden)]
-pub use position::PositionClient;
-#[doc(hidden)]
-pub use stream::{
-    AccountUpdates, AccountWatch, BalanceUpdates, BookTopUpdates, BookTopWatch, CommandLaneClient,
-    ExecutionUpdates, FastFeedUpdates, FastFeedWatch, FundingRateUpdates, LiveStreamHandle,
-    OrderUpdates, PositionUpdates, PrivateLaneClient, PublicLaneClient, PublicSubscription,
-    StreamClient, TickerUpdates, TradeUpdates, WatchInstrumentsRequest, WatchOhlcvRequest,
-};
-#[doc(hidden)]
-pub use trade::TradeClient;

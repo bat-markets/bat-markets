@@ -3,8 +3,6 @@ use std::{
     time::Duration,
 };
 
-use crate::client::BatMarkets;
-
 /// Snapshot of observed lock wait/hold costs for shared engine state.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct LockDiagnosticsSnapshot {
@@ -82,8 +80,6 @@ pub struct RuntimeDiagnosticsSnapshot {
     pub fetch_funding_rate: LatencyDiagnosticsSnapshot,
     /// Public REST trade fetch latency.
     pub fetch_trades: LatencyDiagnosticsSnapshot,
-    /// Public REST top-of-book fetch latency.
-    pub fetch_book_top: LatencyDiagnosticsSnapshot,
     /// Public REST order-book fetch latency.
     pub fetch_order_book: LatencyDiagnosticsSnapshot,
     /// Public liquidation cache/fetch latency.
@@ -130,29 +126,6 @@ pub struct RuntimeDiagnosticsSnapshot {
     pub refresh_open_interest: LatencyDiagnosticsSnapshot,
 }
 
-/// Read-only access to runtime and contention diagnostics.
-pub struct DiagnosticsClient<'a> {
-    inner: &'a BatMarkets,
-}
-
-impl<'a> DiagnosticsClient<'a> {
-    pub(crate) const fn new(inner: &'a BatMarkets) -> Self {
-        Self { inner }
-    }
-
-    /// Return a point-in-time diagnostics snapshot.
-    ///
-    /// The snapshot combines shared-state lock diagnostics with live runtime
-    /// operation latency counters.
-    #[must_use]
-    pub fn snapshot(&self) -> RuntimeDiagnosticsSnapshot {
-        let mut snapshot = self.inner.runtime_state.diagnostics.snapshot();
-        snapshot.state_reads = self.inner.shared.read_diagnostics();
-        snapshot.state_writes = self.inner.shared.write_diagnostics();
-        snapshot
-    }
-}
-
 #[derive(Debug, Default)]
 pub(crate) struct SharedStateDiagnostics {
     reads: AtomicLockDiagnostics,
@@ -184,7 +157,6 @@ pub(crate) struct RuntimeDiagnosticsState {
     fetch_mark_price: AtomicLatencyDiagnostics,
     fetch_funding_rate: AtomicLatencyDiagnostics,
     fetch_trades: AtomicLatencyDiagnostics,
-    fetch_book_top: AtomicLatencyDiagnostics,
     fetch_order_book: AtomicLatencyDiagnostics,
     fetch_liquidations: AtomicLatencyDiagnostics,
     fetch_ohlcv: AtomicLatencyDiagnostics,
@@ -217,7 +189,6 @@ impl RuntimeDiagnosticsState {
             RuntimeOperation::FetchMarkPrice => &self.fetch_mark_price,
             RuntimeOperation::FetchFundingRate => &self.fetch_funding_rate,
             RuntimeOperation::FetchTrades => &self.fetch_trades,
-            RuntimeOperation::FetchBookTop => &self.fetch_book_top,
             RuntimeOperation::FetchOrderBook => &self.fetch_order_book,
             RuntimeOperation::FetchLiquidations => &self.fetch_liquidations,
             RuntimeOperation::FetchOhlcv => &self.fetch_ohlcv,
@@ -253,7 +224,6 @@ impl RuntimeDiagnosticsState {
             fetch_mark_price: self.fetch_mark_price.snapshot(),
             fetch_funding_rate: self.fetch_funding_rate.snapshot(),
             fetch_trades: self.fetch_trades.snapshot(),
-            fetch_book_top: self.fetch_book_top.snapshot(),
             fetch_order_book: self.fetch_order_book.snapshot(),
             fetch_liquidations: self.fetch_liquidations.snapshot(),
             fetch_ohlcv: self.fetch_ohlcv.snapshot(),
@@ -287,7 +257,6 @@ pub(crate) enum RuntimeOperation {
     FetchMarkPrice,
     FetchFundingRate,
     FetchTrades,
-    FetchBookTop,
     FetchOrderBook,
     FetchLiquidations,
     FetchOhlcv,
@@ -397,14 +366,14 @@ mod tests {
             .build()
             .expect("fixture client should build");
 
-        let before = client.diagnostics().snapshot();
+        let before = client.advanced().diagnostics();
         assert_eq!(before.state_reads.operations, 0);
         assert_eq!(before.state_writes.operations, 0);
 
-        let _ = client.market().instrument_specs();
+        let _ = client.markets();
         client.write_state(|state| state.mark_rest_success(None));
 
-        let after = client.diagnostics().snapshot();
+        let after = client.advanced().diagnostics();
         assert!(after.state_reads.operations >= 1);
         assert!(after.state_writes.operations >= 1);
     }

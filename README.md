@@ -3,7 +3,7 @@
 `bat-markets` is a futures-first, headless Rust exchange engine for Binance
 USD-M and Bybit USDT linear futures.
 
-The v0.2 API follows the CCXT mental model:
+The v0.3 API follows the CCXT mental model:
 
 - `fetch_*` methods are REST/read operations.
 - `watch_*` methods are websocket/live operations.
@@ -19,14 +19,14 @@ not need to learn those lanes before using the crate.
 
 ```toml
 [dependencies]
-bat-markets = "0.2"
+bat-markets = "0.3"
 ```
 
 Enable a single venue when you want a smaller dependency tree:
 
 ```toml
 [dependencies]
-bat-markets = { version = "0.2", default-features = false, features = ["binance"] }
+bat-markets = { version = "0.3", default-features = false, features = ["binance"] }
 ```
 
 Feature flags:
@@ -196,6 +196,7 @@ environment variables. Never commit tokens to the repository.
 - [Architecture](docs/architecture.md)
 - [Capability matrix](docs/capability-matrix.md)
 - [Error model](docs/error-model.md)
+- [v0.3 migration guide](docs/migration-v0.3.md)
 - [v0.2 migration guide](docs/migration-v0.2.md)
 - [Release process](docs/release.md)
 - [Roadmap](docs/roadmap.md)

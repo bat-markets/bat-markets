@@ -4,7 +4,7 @@ use rust_decimal::{Decimal, RoundingStrategy};
 use tokio::time::{Instant, sleep};
 
 use bat_markets::{
-    BatMarkets, BatMarketsBuilder, PublicSubscription,
+    BatMarkets, BatMarketsBuilder,
     errors::Result,
     types::{
         CancelOrderRequest, ClientOrderId, CreateOrderRequest, GetOrderRequest, OrderType, Price,
@@ -45,23 +45,11 @@ async fn binance_demo_create_cancel_stress_is_stable() -> Result<()> {
     );
 
     let spec = preferred_stress_spec(&client)?;
-    let public = client
-        .stream()
-        .public()
-        .spawn_live(PublicSubscription {
-            instrument_ids: vec![spec.instrument_id.clone()],
-            ticker: true,
-            trades: false,
-            book_top: true,
-            order_book: false,
-            mark_price: false,
-            funding_rate: false,
-            open_interest: false,
-            liquidations: false,
-            kline_intervals: Vec::new(),
-        })
+    let ticker_watch = client.watch_ticker(spec.instrument_id.clone()).await?;
+    let order_book_watch = client
+        .watch_order_book(spec.instrument_id.clone(), Some(50))
         .await?;
-    let private = client.stream().private().spawn_live().await?;
+    let private = client.watch_balance().await?;
 
     wait_for_live_public_price(&client, &spec).await?;
 
@@ -203,9 +191,10 @@ async fn binance_demo_create_cancel_stress_is_stable() -> Result<()> {
     let _ = client.fetch_open_orders(None).await?;
     let _ = client.fetch_my_trades(None).await?;
     let _ = client.advanced().reconcile().await?;
-    let final_open_orders = client.trade().open_orders();
+    let final_open_orders = client.advanced().cached_open_orders();
 
-    public.shutdown().await?;
+    ticker_watch.shutdown().await?;
+    order_book_watch.shutdown().await?;
     private.shutdown().await?;
 
     let diagnostics = client.advanced().diagnostics();
@@ -279,13 +268,13 @@ async fn stress_order_parameters(
 
     let _ = client.fetch_balance().await?;
     let reference_price = client
-        .market()
-        .book_top(&spec.instrument_id)
+        .advanced()
+        .cached_book_top(&spec.instrument_id)
         .map(|book| book.bid.price)
         .or_else(|| {
             client
-                .market()
-                .ticker(&spec.instrument_id)
+                .advanced()
+                .cached_ticker(&spec.instrument_id)
                 .map(|ticker| ticker.last_price)
         })
         .ok_or_else(|| {
@@ -316,8 +305,14 @@ async fn stress_order_parameters(
 async fn wait_for_live_public_price(client: &BatMarkets, spec: &InstrumentSpec) -> Result<()> {
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {
-        if client.market().book_top(&spec.instrument_id).is_some()
-            || client.market().ticker(&spec.instrument_id).is_some()
+        if client
+            .advanced()
+            .cached_book_top(&spec.instrument_id)
+            .is_some()
+            || client
+                .advanced()
+                .cached_ticker(&spec.instrument_id)
+                .is_some()
         {
             return Ok(());
         }

@@ -10,7 +10,6 @@ use tokio::time::{Instant, sleep, timeout};
 use bat_markets::{
     BatMarkets, OrdersWatch, RuntimeDiagnosticsSnapshot,
     errors::Result,
-    stream::{AccountWatch, WatchInstrumentsRequest},
     types::{
         AccountSummary, Balance, CancelOrderRequest, CancelOrdersRequest, ClientOrderId,
         ClosePositionRequest, CommandStatus, CommandTransport, CreateOrderRequest,
@@ -35,7 +34,6 @@ const ORDER_EVENT_TIMEOUT: Duration = Duration::from_secs(25);
 const EXECUTION_EVENT_TIMEOUT: Duration = Duration::from_secs(25);
 const POSITION_EVENT_TIMEOUT: Duration = Duration::from_secs(25);
 const BALANCE_EVENT_TIMEOUT: Duration = Duration::from_secs(25);
-const ACCOUNT_EVENT_TIMEOUT: Duration = Duration::from_secs(25);
 const OPEN_ORDER_TIMEOUT: Duration = Duration::from_secs(15);
 const PRIVATE_STREAM_WARMUP: Duration = Duration::from_secs(2);
 const OPTIONAL_PRIVATE_STREAM_OBSERVE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -205,7 +203,7 @@ pub async fn prepare_binance_trade_cycle(
     }
 
     if let Some(instrument_id) = preferred_symbol {
-        let spec = client.market().require_instrument(&instrument_id)?;
+        let spec = client.advanced().require_instrument(&instrument_id)?;
         return build_live_trade_plan(client, &spec, max_budget, &occupied).await;
     }
 
@@ -232,18 +230,12 @@ pub async fn run_binance_trade_cycle(client: &BatMarkets) -> Result<Option<LiveT
     };
 
     let mut public = client
-        .stream()
-        .public()
-        .watch_book_top(WatchInstrumentsRequest::for_instrument(
-            plan.instrument_id.clone(),
-        ))
+        .watch_order_book(plan.instrument_id.clone(), Some(50))
         .await?;
     let mut orders = client.watch_orders().await?;
     let mut executions = client.watch_my_trades().await?;
     let mut positions = client.watch_positions().await?;
     let mut balances = client.watch_balance().await?;
-    let mut account = client.stream().private().watch_account().await?;
-
     let _ = public.recv().await?;
     sleep(PRIVATE_STREAM_WARMUP).await;
 
@@ -367,8 +359,7 @@ pub async fn run_binance_trade_cycle(client: &BatMarkets) -> Result<Option<LiveT
     if balance_streamed {
         event_counts.balances += 1;
     }
-    let (account_update, account_streamed) =
-        observe_or_refresh_account(client, &mut account).await?;
+    let (account_update, account_streamed) = observe_or_refresh_account(client).await?;
     if account_streamed {
         event_counts.account += 1;
     }
@@ -583,7 +574,6 @@ pub async fn run_binance_trade_cycle(client: &BatMarkets) -> Result<Option<LiveT
     executions.shutdown().await?;
     positions.shutdown().await?;
     balances.shutdown().await?;
-    account.shutdown().await?;
 
     Ok(Some(LiveTradeCycleReport {
         instrument_id: plan.instrument_id,
@@ -621,22 +611,16 @@ pub async fn run_binance_extended_stress(
         return Ok(None);
     };
 
-    let spec = client.market().require_instrument(&plan.instrument_id)?;
+    let spec = client.advanced().require_instrument(&plan.instrument_id)?;
     let burst_quantity = burst_order_quantity(&spec, plan.reference_ask)?;
 
     let mut public = client
-        .stream()
-        .public()
-        .watch_book_top(WatchInstrumentsRequest::for_instrument(
-            plan.instrument_id.clone(),
-        ))
+        .watch_order_book(plan.instrument_id.clone(), Some(50))
         .await?;
     let mut orders = client.watch_orders().await?;
     let mut executions = client.watch_my_trades().await?;
     let mut positions = client.watch_positions().await?;
     let mut balances = client.watch_balance().await?;
-    let mut account = client.stream().private().watch_account().await?;
-
     let _ = public.recv().await?;
     sleep(PRIVATE_STREAM_WARMUP).await;
 
@@ -708,8 +692,7 @@ pub async fn run_binance_extended_stress(
     {
         event_counts.balances += 1;
     }
-    let (account_update, account_latency) =
-        observe_or_refresh_account_latency(client, &mut account).await?;
+    let (account_update, account_latency) = observe_or_refresh_account_latency(client).await?;
     if account_latency
         .as_ref()
         .is_some_and(|latency| latency.streamed)
@@ -991,7 +974,6 @@ pub async fn run_binance_extended_stress(
     executions.shutdown().await?;
     positions.shutdown().await?;
     balances.shutdown().await?;
-    account.shutdown().await?;
 
     Ok(Some(BinanceExtendedStressReport {
         instrument_id: plan.instrument_id,
@@ -1275,12 +1257,16 @@ async fn build_live_trade_plan(
         return Ok(None);
     }
 
-    let book_top = match client.market().fetch_book_top(&spec.instrument_id).await {
-        Ok(book_top) => book_top,
+    let order_book = match client.fetch_order_book(&spec.instrument_id, Some(5)).await {
+        Ok(order_book) => order_book,
         Err(_) => return Ok(None),
     };
-    let bid = book_top.bid.price;
-    let ask = book_top.ask.price;
+    let Some(bid) = order_book.bids.first().map(|level| level.price) else {
+        return Ok(None);
+    };
+    let Some(ask) = order_book.asks.first().map(|level| level.price) else {
+        return Ok(None);
+    };
     let tick = spec.tick_size.value();
     let step = spec.step_size.value();
     if bid.value() <= Decimal::ZERO
@@ -1498,17 +1484,6 @@ async fn await_balance_update(watch: &mut bat_markets::BalancesWatch<'_>) -> Res
     })?
 }
 
-async fn await_account_update(watch: &mut AccountWatch<'_>) -> Result<AccountSummary> {
-    timeout(ACCOUNT_EVENT_TIMEOUT, watch.recv())
-        .await
-        .map_err(|_| {
-            MarketError::new(
-                ErrorKind::TransportError,
-                "timed out waiting for account update",
-            )
-        })?
-}
-
 async fn await_open_order_presence(
     client: &BatMarkets,
     instrument_id: &InstrumentId,
@@ -1646,8 +1621,8 @@ async fn observe_or_refresh_balance(
         Ok(Err(_)) | Err(_) => {
             let _ = client.fetch_balance().await?;
             client
-                .account()
-                .balances()
+                .advanced()
+                .cached_balances()
                 .into_iter()
                 .find(|balance| balance.asset.as_ref() == "USDT")
                 .map(|balance| (balance, false))
@@ -1682,8 +1657,8 @@ async fn observe_or_refresh_balance_latency(
         Ok(Err(_)) | Err(_) => {
             let _ = client.fetch_balance().await?;
             client
-                .account()
-                .balances()
+                .advanced()
+                .cached_balances()
                 .into_iter()
                 .find(|balance| balance.asset.as_ref() == "USDT")
                 .map(|balance| {
@@ -1705,51 +1680,25 @@ async fn observe_or_refresh_balance_latency(
     }
 }
 
-async fn observe_or_refresh_account(
-    client: &BatMarkets,
-    watch: &mut AccountWatch<'_>,
-) -> Result<(AccountSummary, bool)> {
-    match timeout(
-        OPTIONAL_PRIVATE_STREAM_OBSERVE_TIMEOUT,
-        await_account_update(watch),
-    )
-    .await
-    {
-        Ok(Ok(summary)) => Ok((summary, true)),
-        Ok(Err(_)) | Err(_) => refresh_account_summary(client)
-            .await
-            .map(|summary| (summary, false)),
-    }
+async fn observe_or_refresh_account(client: &BatMarkets) -> Result<(AccountSummary, bool)> {
+    refresh_account_summary(client)
+        .await
+        .map(|summary| (summary, false))
 }
 
 async fn observe_or_refresh_account_latency(
     client: &BatMarkets,
-    watch: &mut AccountWatch<'_>,
 ) -> Result<(AccountSummary, Option<StreamLatencyObservation>)> {
     let started = Instant::now();
-    match timeout(
-        OPTIONAL_PRIVATE_STREAM_OBSERVE_TIMEOUT,
-        await_account_update(watch),
-    )
-    .await
-    {
-        Ok(Ok(summary)) => Ok((
+    refresh_account_summary(client).await.map(|summary| {
+        (
             summary,
             Some(StreamLatencyObservation {
                 latency_ns: saturating_duration_ns(started.elapsed()),
-                streamed: true,
+                streamed: false,
             }),
-        )),
-        Ok(Err(_)) | Err(_) => refresh_account_summary(client).await.map(|summary| {
-            (
-                summary,
-                Some(StreamLatencyObservation {
-                    latency_ns: saturating_duration_ns(started.elapsed()),
-                    streamed: false,
-                }),
-            )
-        }),
-    }
+        )
+    })
 }
 
 async fn refresh_account_summary(client: &BatMarkets) -> Result<AccountSummary> {

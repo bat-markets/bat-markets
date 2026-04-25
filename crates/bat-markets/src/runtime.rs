@@ -23,7 +23,7 @@ use url::form_urlencoded::Serializer;
 #[cfg(feature = "binance")]
 use bat_markets_core::OrderType;
 use bat_markets_core::{
-    AccountSnapshot, AmendOrderRequest, AmendOrdersRequest, BookTop, CancelAllOrdersRequest,
+    AccountSnapshot, AmendOrderRequest, AmendOrdersRequest, CancelAllOrdersRequest,
     CancelOrderRequest, CancelOrdersRequest, ClientOrderId, ClosePositionRequest, CommandAck,
     CommandLaneEvent, CommandLifecycleEvent, CommandOperation, CommandReceipt, CommandStatus,
     CommandTransport, CreateOrderRequest, CreateOrdersRequest, DegradedReason, ErrorKind,
@@ -3936,50 +3936,6 @@ pub(crate) async fn fetch_trades(
     result
 }
 
-pub(crate) async fn fetch_book_top(
-    context: &LiveContext,
-    instrument_id: &InstrumentId,
-) -> Result<BookTop> {
-    let started_at = Instant::now();
-    let result = async {
-        let spec = require_spec(context, instrument_id)?;
-        let book_top = match &context.adapter {
-            #[cfg(feature = "binance")]
-            AdapterHandle::Binance(adapter) => {
-                let payload = public_get_with_retry(
-                    context,
-                    "/fapi/v1/ticker/bookTicker",
-                    &[("symbol", spec.native_symbol.as_ref())],
-                    "binance.fetch_book_top",
-                )
-                .await?;
-                adapter.parse_book_top_snapshot(&payload, instrument_id)?
-            }
-            #[cfg(feature = "bybit")]
-            AdapterHandle::Bybit(adapter) => {
-                let payload = public_get_with_retry(
-                    context,
-                    "/v5/market/orderbook",
-                    &[
-                        ("category", "linear"),
-                        ("symbol", spec.native_symbol.as_ref()),
-                        ("limit", "1"),
-                    ],
-                    "bybit.fetch_book_top",
-                )
-                .await?;
-                adapter.parse_book_top_snapshot(&payload, instrument_id)?
-            }
-        };
-
-        context.shared.write(|state| state.mark_rest_success(None));
-        Ok(book_top)
-    }
-    .await;
-    record_runtime_latency(context, RuntimeOperation::FetchBookTop, started_at);
-    result
-}
-
 pub(crate) async fn fetch_order_book(
     context: &LiveContext,
     request: &FetchOrderBookRequest,
@@ -4453,7 +4409,7 @@ pub(crate) async fn spawn_public_stream(
     let join =
         tokio::spawn(async move { run_public_stream(context, subscription, shutdown_rx).await });
     Ok(LiveStreamHandle {
-        shutdown: Some(shutdown),
+        _shutdown: shutdown,
         join,
     })
 }
@@ -4462,7 +4418,7 @@ pub(crate) async fn spawn_private_stream(context: LiveContext) -> Result<LiveStr
     let (shutdown, shutdown_rx) = oneshot::channel();
     let join = tokio::spawn(async move { run_private_stream(context, shutdown_rx).await });
     Ok(LiveStreamHandle {
-        shutdown: Some(shutdown),
+        _shutdown: shutdown,
         join,
     })
 }
@@ -7505,9 +7461,8 @@ mod tests {
             .expect("fixture bybit client should build");
         let instrument_id = InstrumentId::from("BTC/USDT:USDT");
         let mut events = client
-            .stream()
-            .public()
-            .ingest_json(BYBIT_PUBLIC_ORDERBOOK)
+            .advanced()
+            .ingest_public_json(BYBIT_PUBLIC_ORDERBOOK)
             .expect("fixture orderbook should parse");
 
         retain_public_events_for_subscription(
@@ -7894,7 +7849,7 @@ mod tests {
             .build()
             .expect("fixture binance client should build");
         let context = client.live_context();
-        let mut receiver = client.entry().subscribe();
+        let mut receiver = client.advanced().subscribe_command_events();
         let receipt = CommandReceipt {
             operation: CommandOperation::CreateOrder,
             status: CommandStatus::UnknownExecution,

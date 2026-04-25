@@ -3,7 +3,7 @@ use std::{env, time::Duration};
 use tokio::time::{sleep, timeout};
 
 use bat_markets::{
-    BatMarketsBuilder, PublicSubscription,
+    BatMarketsBuilder,
     errors::Result,
     types::{InstrumentId, Venue},
 };
@@ -34,23 +34,8 @@ async fn binance_mainnet_read_flows_are_manual_and_read_only() -> Result<()> {
             .sandbox
     );
     let instrument = preferred_mainnet_instrument(&client);
-    let public = client
-        .stream()
-        .public()
-        .spawn_live(PublicSubscription {
-            instrument_ids: vec![instrument.clone()],
-            ticker: false,
-            trades: false,
-            book_top: true,
-            order_book: false,
-            mark_price: false,
-            funding_rate: false,
-            open_interest: false,
-            liquidations: false,
-            kline_intervals: Vec::new(),
-        })
-        .await?;
-    let private = client.stream().private().spawn_live().await?;
+    let public = client.watch_ticker(instrument.clone()).await?;
+    let private = client.watch_balance().await?;
 
     sleep(Duration::from_secs(3)).await;
 
@@ -59,7 +44,7 @@ async fn binance_mainnet_read_flows_are_manual_and_read_only() -> Result<()> {
 
     let ticker = client.fetch_ticker(&instrument).await?;
     let trades = client.fetch_trades(&instrument, Some(10)).await?;
-    let book_top = client.market().fetch_book_top(&instrument).await?;
+    let order_book = client.fetch_order_book(&instrument, Some(5)).await?;
     let _ = client.fetch_open_interest(&instrument).await?;
     let _ = client.fetch_balance().await?;
     let _ = client.fetch_positions().await?;
@@ -69,25 +54,25 @@ async fn binance_mainnet_read_flows_are_manual_and_read_only() -> Result<()> {
 
     let mut ticker_watch = client.watch_ticker(instrument.clone()).await?;
     let mut trades_watch = client.watch_trades(instrument.clone()).await?;
-    let mut book_top_watch = client
-        .stream()
-        .public()
-        .watch_book_top(bat_markets::WatchInstrumentsRequest::for_instrument(
-            instrument.clone(),
-        ))
+    let mut order_book_watch = client
+        .watch_order_book(instrument.clone(), Some(50))
         .await?;
     let _ = await_live_update("ticker", ticker_watch.recv()).await?;
     let _ = await_live_update("trade", trades_watch.recv()).await?;
-    let _ = await_live_update("book_top", book_top_watch.recv()).await?;
+    let _ = await_live_update("order_book", order_book_watch.recv()).await?;
     ticker_watch.shutdown().await?;
     trades_watch.shutdown().await?;
-    book_top_watch.shutdown().await?;
+    order_book_watch.shutdown().await?;
 
     assert_eq!(ticker.instrument_id, instrument);
     assert!(!trades.is_empty());
-    assert_eq!(book_top.instrument_id, instrument);
-    assert!(client.market().book_top(&instrument).is_some());
-    assert!(client.market().open_interest(&instrument).is_some());
+    assert_eq!(order_book.instrument_id, instrument);
+    assert!(
+        client
+            .advanced()
+            .cached_open_interest(&instrument)
+            .is_some()
+    );
     Ok(())
 }
 
@@ -113,23 +98,8 @@ async fn bybit_mainnet_read_flows_are_manual_and_read_only() -> Result<()> {
             .sandbox
     );
     let instrument = preferred_mainnet_instrument(&client);
-    let public = client
-        .stream()
-        .public()
-        .spawn_live(PublicSubscription {
-            instrument_ids: vec![instrument.clone()],
-            ticker: false,
-            trades: false,
-            book_top: true,
-            order_book: false,
-            mark_price: false,
-            funding_rate: false,
-            open_interest: false,
-            liquidations: false,
-            kline_intervals: Vec::new(),
-        })
-        .await?;
-    let private = client.stream().private().spawn_live().await?;
+    let public = client.watch_ticker(instrument.clone()).await?;
+    let private = client.watch_balance().await?;
 
     sleep(Duration::from_secs(3)).await;
 
@@ -138,7 +108,7 @@ async fn bybit_mainnet_read_flows_are_manual_and_read_only() -> Result<()> {
 
     let ticker = client.fetch_ticker(&instrument).await?;
     let trades = client.fetch_trades(&instrument, Some(10)).await?;
-    let book_top = client.market().fetch_book_top(&instrument).await?;
+    let order_book = client.fetch_order_book(&instrument, Some(5)).await?;
     let _ = client.fetch_open_interest(&instrument).await?;
     let _ = client.fetch_balance().await?;
     let _ = client.fetch_positions().await?;
@@ -148,25 +118,25 @@ async fn bybit_mainnet_read_flows_are_manual_and_read_only() -> Result<()> {
 
     let mut ticker_watch = client.watch_ticker(instrument.clone()).await?;
     let mut trades_watch = client.watch_trades(instrument.clone()).await?;
-    let mut book_top_watch = client
-        .stream()
-        .public()
-        .watch_book_top(bat_markets::WatchInstrumentsRequest::for_instrument(
-            instrument.clone(),
-        ))
+    let mut order_book_watch = client
+        .watch_order_book(instrument.clone(), Some(50))
         .await?;
     let _ = await_live_update("ticker", ticker_watch.recv()).await?;
     let _ = await_live_update("trade", trades_watch.recv()).await?;
-    let _ = await_live_update("book_top", book_top_watch.recv()).await?;
+    let _ = await_live_update("order_book", order_book_watch.recv()).await?;
     ticker_watch.shutdown().await?;
     trades_watch.shutdown().await?;
-    book_top_watch.shutdown().await?;
+    order_book_watch.shutdown().await?;
 
     assert_eq!(ticker.instrument_id, instrument);
     assert!(!trades.is_empty());
-    assert_eq!(book_top.instrument_id, instrument);
-    assert!(client.market().book_top(&instrument).is_some());
-    assert!(client.market().open_interest(&instrument).is_some());
+    assert_eq!(order_book.instrument_id, instrument);
+    assert!(
+        client
+            .advanced()
+            .cached_open_interest(&instrument)
+            .is_some()
+    );
     Ok(())
 }
 

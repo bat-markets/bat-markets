@@ -935,14 +935,14 @@ mod tests {
 
         let instrument = bat_markets::types::InstrumentId::from("BTC/USDT:USDT");
         let ticker = client
-            .market()
-            .ticker(&instrument)
+            .advanced()
+            .cached_ticker(&instrument)
             .expect("binance ticker missing after ingest");
         assert_eq!(ticker.last_price.to_string(), "70100.50");
-        assert_eq!(client.account().balances().len(), 1);
-        assert_eq!(client.position().list().len(), 1);
-        assert_eq!(client.trade().open_orders().len(), 1);
-        assert_eq!(client.trade().executions().len(), 1);
+        assert_eq!(client.advanced().cached_balances().len(), 1);
+        assert_eq!(client.advanced().cached_positions().len(), 1);
+        assert_eq!(client.advanced().cached_open_orders().len(), 1);
+        assert_eq!(client.advanced().cached_executions().len(), 1);
         assert_eq!(client.status().status, HealthStatus::Healthy);
 
         Ok(())
@@ -955,17 +955,17 @@ mod tests {
 
         let instrument = bat_markets::types::InstrumentId::from("BTC/USDT:USDT");
         let ticker = client
-            .market()
-            .ticker(&instrument)
+            .advanced()
+            .cached_ticker(&instrument)
             .expect("bybit ticker missing after ingest");
         assert_eq!(
             ticker.mark_price.expect("mark price missing").to_string(),
             "70108.50"
         );
-        assert_eq!(client.account().balances().len(), 1);
-        assert_eq!(client.position().list().len(), 1);
-        assert_eq!(client.trade().open_orders().len(), 1);
-        assert_eq!(client.trade().executions().len(), 1);
+        assert_eq!(client.advanced().cached_balances().len(), 1);
+        assert_eq!(client.advanced().cached_positions().len(), 1);
+        assert_eq!(client.advanced().cached_open_orders().len(), 1);
+        assert_eq!(client.advanced().cached_executions().len(), 1);
         assert_eq!(client.status().status, HealthStatus::Healthy);
 
         Ok(())
@@ -1036,8 +1036,8 @@ mod tests {
             .advanced()
             .ingest_private_json(binance::PRIVATE_ORDER)?;
 
-        assert_eq!(client.trade().executions().len(), 1);
-        assert_eq!(client.trade().orders().len(), 1);
+        assert_eq!(client.advanced().cached_executions().len(), 1);
+        assert_eq!(client.advanced().cached_orders().len(), 1);
 
         Ok(())
     }
@@ -1050,8 +1050,8 @@ mod tests {
         client.advanced().ingest_public_json(bybit::PUBLIC_TRADE)?;
 
         let trades = client
-            .market()
-            .recent_trades(&instrument)
+            .advanced()
+            .cached_recent_trades(&instrument)
             .expect("recent trades missing after duplicate public ingest");
         assert_eq!(trades.len(), 1);
 
@@ -1071,7 +1071,7 @@ mod tests {
             .advanced()
             .ingest_private_json(binance::PRIVATE_ORDER)?;
 
-        assert_eq!(client.trade().executions().len(), 1);
+        assert_eq!(client.advanced().cached_executions().len(), 1);
         assert_eq!(client.status().status, HealthStatus::CommandUncertain);
 
         Ok(())
@@ -1084,8 +1084,8 @@ mod tests {
             .advanced()
             .ingest_public_json(binance::PUBLIC_LIQUIDATION)?;
         let liquidations = binance
-            .market()
-            .liquidations(&bat_markets::types::InstrumentId::from("BTC/USDT:USDT"))
+            .advanced()
+            .cached_liquidations(&bat_markets::types::InstrumentId::from("BTC/USDT:USDT"))
             .expect("binance liquidation cache should be populated");
         assert_eq!(liquidations.len(), 1);
 
@@ -1094,8 +1094,8 @@ mod tests {
             .advanced()
             .ingest_public_json(bybit::PUBLIC_LIQUIDATION)?;
         let liquidations = bybit
-            .market()
-            .liquidations(&bat_markets::types::InstrumentId::from("BTC/USDT:USDT"))
+            .advanced()
+            .cached_liquidations(&bat_markets::types::InstrumentId::from("BTC/USDT:USDT"))
             .expect("bybit liquidation cache should be populated");
         assert_eq!(liquidations.len(), 1);
 
@@ -1171,7 +1171,7 @@ mod tests {
     #[test]
     fn health_notifications_emit_only_for_structural_changes() -> Result<()> {
         let client = build_binance();
-        let mut notifications = client.health().notifications();
+        let mut notifications = client.advanced().subscribe_health_notifications();
         client
             .advanced()
             .ingest_public_json(binance::PUBLIC_TICKER)?;
@@ -1203,10 +1203,10 @@ mod tests {
             .advanced()
             .ingest_private_json(bybit::PRIVATE_EXECUTION_LATE_AFTER_CANCEL)?;
 
-        let orders = client.trade().orders();
+        let orders = client.advanced().cached_orders();
         assert_eq!(orders.len(), 1);
         assert_eq!(orders[0].status, OrderStatus::Canceled);
-        assert_eq!(client.trade().executions().len(), 1);
+        assert_eq!(client.advanced().cached_executions().len(), 1);
 
         Ok(())
     }

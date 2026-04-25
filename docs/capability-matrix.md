@@ -1,6 +1,6 @@
 # Capability Matrix
 
-This matrix documents the current `0.2.x` CCXT-style root surface after live transport integration and the WS-first command/runtime pass.
+This matrix documents the current `0.3.x` CCXT-style root surface after the legacy facade cleanup, live transport integration, and WS-first command/runtime pass.
 
 ## Unified Surface
 

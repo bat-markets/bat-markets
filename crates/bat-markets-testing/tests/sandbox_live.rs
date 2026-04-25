@@ -4,7 +4,7 @@ use rust_decimal::{Decimal, RoundingStrategy};
 use tokio::time::{Instant, sleep};
 
 use bat_markets::{
-    BatMarkets, BatMarketsBuilder, PublicSubscription,
+    BatMarkets, BatMarketsBuilder,
     errors::Result,
     types::{
         CancelOrderRequest, CancelOrdersRequest, ClientOrderId, CommandStatus, CreateOrderRequest,
@@ -52,21 +52,20 @@ async fn binance_sandbox_read_flows_are_env_gated() -> Result<()> {
 
     let first = preferred_sandbox_instrument(&client);
 
-    let public = client
-        .stream()
-        .public()
-        .spawn_live(PublicSubscription::all_for(vec![first.clone()]))
-        .await?;
-    let private = client.stream().private().spawn_live().await?;
+    let public = client.watch_ticker(first.clone()).await?;
+    let private = client.watch_balance().await?;
 
     wait_for_public_market_signal(
         &client,
         &first,
         Duration::from_secs(8),
         |client, instrument_id| {
-            client.market().ticker(instrument_id).is_some()
-                || client.market().book_top(instrument_id).is_some()
-                || client.market().recent_trades(instrument_id).is_some()
+            client.advanced().cached_ticker(instrument_id).is_some()
+                || client.advanced().cached_book_top(instrument_id).is_some()
+                || client
+                    .advanced()
+                    .cached_recent_trades(instrument_id)
+                    .is_some()
         },
     )
     .await?;
@@ -81,9 +80,9 @@ async fn binance_sandbox_read_flows_are_env_gated() -> Result<()> {
     let _ = client.advanced().reconcile().await?;
 
     assert!(
-        client.market().ticker(&first).is_some()
-            || client.market().book_top(&first).is_some()
-            || client.market().recent_trades(&first).is_some()
+        client.advanced().cached_ticker(&first).is_some()
+            || client.advanced().cached_book_top(&first).is_some()
+            || client.advanced().cached_recent_trades(&first).is_some()
     );
     Ok(())
 }
@@ -115,21 +114,20 @@ async fn bybit_sandbox_read_flows_are_env_gated() -> Result<()> {
 
     let first = preferred_sandbox_instrument(&client);
 
-    let public = client
-        .stream()
-        .public()
-        .spawn_live(PublicSubscription::all_for(vec![first.clone()]))
-        .await?;
-    let private = client.stream().private().spawn_live().await?;
+    let public = client.watch_ticker(first.clone()).await?;
+    let private = client.watch_balance().await?;
 
     wait_for_public_market_signal(
         &client,
         &first,
         Duration::from_secs(8),
         |client, instrument_id| {
-            client.market().ticker(instrument_id).is_some()
-                || client.market().book_top(instrument_id).is_some()
-                || client.market().open_interest(instrument_id).is_some()
+            client.advanced().cached_ticker(instrument_id).is_some()
+                || client.advanced().cached_book_top(instrument_id).is_some()
+                || client
+                    .advanced()
+                    .cached_open_interest(instrument_id)
+                    .is_some()
         },
     )
     .await?;
@@ -143,7 +141,7 @@ async fn bybit_sandbox_read_flows_are_env_gated() -> Result<()> {
     let _ = client.fetch_my_trades(None).await?;
     let _ = client.advanced().reconcile().await?;
 
-    assert!(client.market().open_interest(&first).is_some());
+    assert!(client.advanced().cached_open_interest(&first).is_some());
     Ok(())
 }
 
@@ -175,7 +173,7 @@ async fn binance_sandbox_create_cancel_is_manual_and_safe() -> Result<()> {
         live_test_uses_sandbox(Venue::Binance, LiveTestEndpointMode::Sandbox)
     );
 
-    let private = client.stream().private().spawn_live().await?;
+    let private = client.watch_balance().await?;
     let mut create_handle = client
         .create_order(&CreateOrderRequest {
             request_id: None,
@@ -260,7 +258,7 @@ async fn bybit_sandbox_create_cancel_is_manual_and_safe() -> Result<()> {
         live_test_uses_sandbox(Venue::Bybit, LiveTestEndpointMode::Sandbox)
     );
 
-    let private = client.stream().private().spawn_live().await?;
+    let private = client.watch_balance().await?;
     let mut create_handle = client
         .create_order(&CreateOrderRequest {
             request_id: None,
@@ -350,7 +348,7 @@ async fn binance_sandbox_batch_validate_create_cancel_is_manual_and_safe() -> Re
         .filter_map(|order| order.client_order_id.clone())
         .collect::<Vec<_>>();
 
-    let private = client.stream().private().spawn_live().await?;
+    let private = client.watch_balance().await?;
     validate_batch_orders(&client, &create_request).await?;
 
     let create = client.create_orders(&create_request).await?;
@@ -426,7 +424,7 @@ async fn bybit_sandbox_batch_validate_create_cancel_is_manual_and_safe() -> Resu
         .filter_map(|order| order.client_order_id.clone())
         .collect::<Vec<_>>();
 
-    let private = client.stream().private().spawn_live().await?;
+    let private = client.watch_balance().await?;
     validate_batch_orders(&client, &create_request).await?;
 
     let create = client.create_orders(&create_request).await?;
@@ -592,33 +590,22 @@ async fn discover_spec_order_parameters(
     spec: &InstrumentSpec,
     max_budget: Decimal,
 ) -> Result<Option<(InstrumentId, Price, Quantity)>> {
-    let public = client
-        .stream()
-        .public()
-        .spawn_live(PublicSubscription {
-            instrument_ids: vec![spec.instrument_id.clone()],
-            ticker: true,
-            trades: false,
-            book_top: true,
-            order_book: false,
-            mark_price: false,
-            funding_rate: false,
-            open_interest: false,
-            liquidations: false,
-            kline_intervals: Vec::new(),
-        })
+    let ticker_watch = client.watch_ticker(spec.instrument_id.clone()).await?;
+    let order_book_watch = client
+        .watch_order_book(spec.instrument_id.clone(), Some(50))
         .await?;
     sleep(Duration::from_secs(2)).await;
-    public.shutdown().await?;
+    ticker_watch.shutdown().await?;
+    order_book_watch.shutdown().await?;
 
     let reference_price = client
-        .market()
-        .book_top(&spec.instrument_id)
+        .advanced()
+        .cached_book_top(&spec.instrument_id)
         .map(|book| book.bid.price)
         .or_else(|| {
             client
-                .market()
-                .ticker(&spec.instrument_id)
+                .advanced()
+                .cached_ticker(&spec.instrument_id)
                 .map(|ticker| ticker.last_price)
         });
     let Some(reference_price) = reference_price else {

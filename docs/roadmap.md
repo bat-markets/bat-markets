@@ -2,9 +2,9 @@
 
 ## Current Milestone
 
-Ship a registry-ready `0.2.x` facade for Binance and Bybit linear futures with
+Ship a registry-ready `0.3.x` facade for Binance and Bybit linear futures with
 a CCXT-style root API, clean documentation, shared websocket hubs, explicit
-command lifecycle semantics, and no bundled operator demos.
+command lifecycle semantics, and no legacy nested facade surface.
 
 ## In Scope
 
@@ -39,4 +39,4 @@ command lifecycle semantics, and no bundled operator demos.
 3. keep fixture/static mode stable while live/runtime coverage expands
 4. keep root rustdoc examples aligned with README and migration docs
 5. add more venue-native stress and latency probes inside `bat-markets-testing`
-6. add release automation once manual crates.io publication is proven
+6. keep release automation version-locked to the workspace package version

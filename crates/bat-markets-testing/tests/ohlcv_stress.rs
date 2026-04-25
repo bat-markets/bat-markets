@@ -7,14 +7,15 @@ use std::{
 use tokio::time::{Instant, timeout};
 
 use bat_markets::{
-    BatMarkets, BatMarketsBuilder, WatchOhlcvRequest,
+    BatMarkets, BatMarketsBuilder,
     config::{AuthConfig, BatMarketsConfig, EndpointConfig},
     errors::Result,
     types::{
-        FetchOhlcvRequest, InstrumentId, InstrumentStatus, Kline, Product, TimestampMs, Venue,
+        FetchOhlcvRequest, InstrumentId, InstrumentStatus, Kline, KlineInterval, Product,
+        TimestampMs, Venue,
     },
 };
-use bat_markets_core::{ErrorKind, MarketError};
+use bat_markets_core::{ErrorKind, MarketError, PublicLaneEvent};
 use bat_markets_testing::{build_binance, build_bybit, has_binance_live_env, has_bybit_live_env};
 
 const FRONTEND_SYMBOL_TARGET: usize = 30;
@@ -125,26 +126,22 @@ fn stress_binance_subscribe_ohlcv_handles_30_symbols_locally() -> Result<()> {
     let runtime =
         tokio::runtime::Runtime::new().expect("tokio runtime should build for local ohlcv stress");
     runtime.block_on(async move {
-        let mut updates = client
-            .stream()
-            .public()
-            .subscribe_ohlcv(WatchOhlcvRequest::for_instruments(symbols.clone(), "1m"));
+        let mut updates = client.advanced().subscribe_public_events();
 
         for round in 0..LOCAL_WATCH_ROUNDS {
             for (index, instrument_id) in symbols.iter().enumerate() {
-                let spec = client.market().require_instrument(instrument_id)?;
+                let spec = client.advanced().require_instrument(instrument_id)?;
                 let open_time = 1_710_000_000_000_i64
                     + (round as i64 * symbols.len() as i64 + index as i64) * ONE_MINUTE_MS;
                 client
-                    .stream()
-                    .public()
-                    .ingest_json(&binance_kline_payload(
+                    .advanced()
+                    .ingest_public_json(&binance_kline_payload(
                         spec.native_symbol.as_ref(),
                         open_time,
                         round % 2 == 0,
                     ))?;
 
-                let received = timeout(Duration::from_secs(1), updates.recv())
+                let received = timeout(Duration::from_secs(1), recv_kline(&client, &mut updates))
                     .await
                     .expect("typed binance ohlcv update should arrive")
                     .expect("typed binance ohlcv update should parse");
@@ -167,23 +164,20 @@ fn stress_bybit_subscribe_ohlcv_handles_30_symbols_locally() -> Result<()> {
     let runtime =
         tokio::runtime::Runtime::new().expect("tokio runtime should build for local ohlcv stress");
     runtime.block_on(async move {
-        let mut updates = client
-            .stream()
-            .public()
-            .subscribe_ohlcv(WatchOhlcvRequest::for_instruments(symbols.clone(), "1m"));
+        let mut updates = client.advanced().subscribe_public_events();
 
         for round in 0..LOCAL_WATCH_ROUNDS {
             for (index, instrument_id) in symbols.iter().enumerate() {
-                let spec = client.market().require_instrument(instrument_id)?;
+                let spec = client.advanced().require_instrument(instrument_id)?;
                 let open_time = 1_710_100_000_000_i64
                     + (round as i64 * symbols.len() as i64 + index as i64) * ONE_MINUTE_MS;
-                client.stream().public().ingest_json(&bybit_kline_payload(
+                client.advanced().ingest_public_json(&bybit_kline_payload(
                     spec.native_symbol.as_ref(),
                     open_time,
                     round % 2 == 0,
                 ))?;
 
-                let received = timeout(Duration::from_secs(1), updates.recv())
+                let received = timeout(Duration::from_secs(1), recv_kline(&client, &mut updates))
                     .await
                     .expect("typed bybit ohlcv update should arrive")
                     .expect("typed bybit ohlcv update should parse");
@@ -308,9 +302,7 @@ async fn exercise_watch_ohlcv_live(venue: Venue) -> Result<()> {
     let mut updates = 0_u64;
 
     let mut watch = client
-        .stream()
-        .public()
-        .watch_ohlcv(WatchOhlcvRequest::for_instruments(symbols.clone(), "1m"))
+        .watch_ohlcv_for_symbols(symbols.clone(), "1m")
         .await?;
 
     let started_at = Instant::now();
@@ -319,7 +311,7 @@ async fn exercise_watch_ohlcv_live(venue: Venue) -> Result<()> {
     while seen.len() < symbols.len() {
         let now = Instant::now();
         if now >= deadline {
-            watch.abort();
+            let _ = watch.shutdown().await;
             let missing = requested
                 .difference(&seen)
                 .map(ToString::to_string)
@@ -377,7 +369,6 @@ async fn fetch_frontend_window(
     plan: OhlcvStressPlan,
 ) -> Result<Vec<FetchWindowReport>> {
     let page = client
-        .market()
         .fetch_ohlcv(&FetchOhlcvRequest::for_instruments(
             symbols.clone(),
             "1m",
@@ -415,6 +406,32 @@ async fn fetch_frontend_window(
         })
         .collect();
     Ok(reports)
+}
+
+async fn recv_kline(
+    client: &BatMarkets,
+    receiver: &mut tokio::sync::broadcast::Receiver<PublicLaneEvent>,
+) -> Result<Kline> {
+    loop {
+        match receiver.recv().await {
+            Ok(PublicLaneEvent::Kline(kline)) => {
+                let spec = client.advanced().require_instrument(&kline.instrument_id)?;
+                let mut kline = kline.to_unified(&spec);
+                if let Some(interval) = KlineInterval::parse(kline.interval.as_ref()) {
+                    kline.interval = interval.as_ccxt_str().into();
+                }
+                return Ok(kline);
+            }
+            Ok(_) => continue,
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+            Err(error) => {
+                return Err(MarketError::new(
+                    ErrorKind::TransportError,
+                    format!("ohlcv stress receive failed: {error}"),
+                ));
+            }
+        }
+    }
 }
 
 fn assert_dense_minute_window(report: &FetchWindowReport, plan: OhlcvStressPlan) {

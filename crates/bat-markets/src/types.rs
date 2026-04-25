@@ -16,6 +16,3 @@ pub use bat_markets_core::{
     Side, Ticker, TimeInForce, TimestampMs, TradeId, TradeTick, TriggerType, ValidateOrderRequest,
     Venue, WatchFastFeedRequest, WatchOrderBookRequest,
 };
-
-#[doc(hidden)]
-pub use bat_markets_core::{AmendOrderRequest, AmendOrdersRequest};

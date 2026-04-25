@@ -2,10 +2,15 @@
 
 ## Unreleased
 
-- hide legacy lane-client modules, nested facade accessors, and amend request aliases from the documented facade surface while retaining doc-hidden compatibility shims for `0.2.x`
-- route root facade methods directly through runtime/subscription helpers instead of depending on nested compatibility clients
-- replace the stale draft blueprint with the current CCXT-style API, architecture, workspace, and release contract
-- move repository harness command, fetch, diagnostics, private-watch, and native-access paths toward the root API and `advanced()`
+## 0.3.0 - 2026-04-25
+
+- remove legacy nested facade accessors and lane-client exports from the public crate surface
+- keep public usage centered on root `fetch_*`, `watch_*`, command verbs, `status()`, and `advanced()`
+- move cached state inspection for tests/custom tooling under explicit `advanced().cached_*` helpers
+- remove public amend request aliases from `bat-markets`; public code should use `EditOrderRequest` and `EditOrdersRequest`
+- remove legacy top-of-book REST/watch and account-summary watch helpers in favor of `fetch_order_book`, `watch_order_book`, `fetch_balance`, and `watch_balance`
+- update repository tests, benches, and live harnesses to exercise the root API and `advanced()` escape hatch only
+- align workspace package versions and internal dependency versions for a clean `0.3.0` release
 
 ## 0.2.0 - 2026-04-25
 
