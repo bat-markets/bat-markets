@@ -193,10 +193,10 @@ environment variables. Never commit tokens to the repository.
 
 ## Documentation
 
-- [Architecture](docs/architecture.md)
-- [Capability matrix](docs/capability-matrix.md)
-- [Error model](docs/error-model.md)
-- [v0.3 migration guide](docs/migration-v0.3.md)
-- [v0.2 migration guide](docs/migration-v0.2.md)
-- [Release process](docs/release.md)
-- [Roadmap](docs/roadmap.md)
+- [Architecture, project map, and measurements](https://github.com/bat-markets/bat-markets/blob/main/docs/architecture.md)
+- [Capability matrix](https://github.com/bat-markets/bat-markets/blob/main/docs/capability-matrix.md)
+- [Error model](https://github.com/bat-markets/bat-markets/blob/main/docs/error-model.md)
+- [v0.3 migration guide](https://github.com/bat-markets/bat-markets/blob/main/docs/migration-v0.3.md)
+- [v0.2 migration guide](https://github.com/bat-markets/bat-markets/blob/main/docs/migration-v0.2.md)
+- [Release process](https://github.com/bat-markets/bat-markets/blob/main/docs/release.md)
+- [Roadmap](https://github.com/bat-markets/bat-markets/blob/main/docs/roadmap.md)
