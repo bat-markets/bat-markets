@@ -1,43 +1,101 @@
-# Release Model
+# Release Process
 
-## 0.1.x Contract
+## Crates.io Contract
 
-`bat-markets` `0.1.x` is distributed as a GitHub/source release, not a crates.io package.
+`bat-markets` is prepared as a crates.io workspace release.
 
-This is intentional:
+Published crates:
 
-- the public facade still depends on internal workspace crates;
-- those internal crates are deliberately `publish = false`;
-- the repository is still allowed to reshape internal boundaries during `0.x`.
+- `bat-markets-core`
+- `bat-markets-binance`
+- `bat-markets-bybit`
+- `bat-markets`
 
-The release model stays honest to the current architecture instead of pretending the registry surface is already stable.
+Workspace-only crate:
 
-## Supported Consumption Paths
+- `bat-markets-testing` remains `publish = false` because it contains fixtures,
+  live smoke helpers, and benches for repository validation.
 
-Use a tagged git dependency:
+## Versioning
 
-```toml
-[dependencies]
-bat-markets = { git = "https://github.com/bat-markets/bat-markets.git", tag = "v0.1.0" }
+All runtime crates share the workspace version. For `0.x`, public API changes can
+still happen, but each published crate must keep dependency versions aligned with
+the workspace release.
+
+Dependency order:
+
+1. `bat-markets-core`
+2. `bat-markets-binance`
+3. `bat-markets-bybit`
+4. `bat-markets`
+
+## Local Release Gate
+
+Run:
+
+```bash
+./scripts/check.sh
+cargo audit
 ```
 
-Or consume a GitHub source archive from the tagged release page and verify its SHA-256 checksum.
+Before publishing the first crate, run local package verification for the whole
+runtime graph:
 
-## How A Source Release Is Cut
+```bash
+cargo package --workspace --exclude bat-markets-testing --allow-dirty
+./scripts/publish-crates.sh --dry-run
+```
 
-1. Run the full local gate with `./scripts/check.sh`.
-2. Create an annotated version tag such as `v0.1.0`.
-3. Push the tag to GitHub.
-4. The release workflow reruns checks, creates a source tarball from the tagged git tree, writes a SHA-256 file, and uploads both assets to the GitHub release.
+Downstream dry-runs resolve dependencies from the crates.io index. Before
+`bat-markets-core` is published, adapter dry-runs are expected to fail with
+`no matching package named bat-markets-core found`. Publish each dependency,
+wait for the index to update, then dry-run and publish the next crate.
 
-## What A Source Release Guarantees
+## Publishing
 
-- the tagged git tree passed the repository quality gate;
-- the uploaded archive is derived from the tagged source tree;
-- checksums are published for operator verification.
+Publishing is automated by `.github/workflows/publish-crates.yml`.
 
-## What It Does Not Guarantee Yet
+Create a protected GitHub Actions environment named `crates-io`, then add a
+repository or environment secret named `CARGO_REGISTRY_TOKEN`.
 
-- crates.io publication;
-- long-term stability of internal workspace crate boundaries;
-- registry-friendly semver for every internal crate.
+Using GitHub CLI:
+
+```bash
+gh secret set CARGO_REGISTRY_TOKEN --env crates-io
+```
+
+Use a freshly created crates.io token. If a token was pasted into chat, logs, or
+any non-secret channel, revoke it before adding a replacement secret.
+
+Run a workflow dry-run from GitHub Actions first. A manual dispatch with
+`dry_run=true` verifies packaging without uploading.
+
+To publish, tag the exact workspace version:
+
+```bash
+git tag -a v0.1.0 -m "v0.1.0"
+git push origin v0.1.0
+```
+
+The publish workflow verifies the repository, publishes in dependency order, and
+waits for each crate version to become visible before publishing dependants.
+
+Manual fallback:
+
+```bash
+CARGO_REGISTRY_TOKEN=... ./scripts/publish-crates.sh
+```
+
+Never commit tokens, write them into scripts, or paste them into logs.
+
+## Trusted Publishing
+
+After the initial manual/token-backed publication, prefer crates.io Trusted
+Publishing for future releases. Configure each crate on crates.io with:
+
+- owner/repository: `bat-markets/bat-markets`
+- workflow: `publish-crates.yml`
+- environment: `crates-io`
+
+Trusted Publishing removes the long-lived `CARGO_REGISTRY_TOKEN` secret and uses
+GitHub Actions OIDC to mint short-lived publish credentials.

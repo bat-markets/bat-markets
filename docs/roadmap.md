@@ -2,7 +2,9 @@
 
 ## Current Milestone
 
-Stabilize the live, WS-first futures `0.1.x` foundation and ship it honestly as a GitHub/source release before any crates.io packaging work.
+Ship a minimal, registry-ready `0.1.x` foundation for Binance and Bybit linear
+futures without bundling operator demos, unpublished harnesses, or broad venue
+promises into the public package surface.
 
 ## In Scope
 
@@ -10,16 +12,12 @@ Stabilize the live, WS-first futures `0.1.x` foundation and ship it honestly as 
 - metadata bootstrap from Binance and Bybit snapshots
 - reconnect-aware shared public/private stream runners
 - sequence-aware transport gap detection and snapshot-driven repair foundations
-- recent execution / order-history repair where venue makes it available
-- periodic health/reconcile/metadata maintenance inside live runners
+- recent execution and order-history repair where a venue makes it available
 - low-latency `entry()` command plane with lifecycle tracking
 - websocket-first command routing where the venue supports it
-- env-gated sandbox integration tests
-- operator-oriented mainnet smoke and stress harnesses for approved testing subaccounts
-- Bun-based realtime operator panel and expanded runnable examples
-- capability matrix and public rustdoc examples
-- expanded fixtures for negative and contradictory scenarios
-- GitHub/source release workflow and documentation for tagged `0.1.x` cuts
+- env-gated sandbox and mainnet validation in the unpublished testing crate
+- crates.io package metadata, package checks, and release documentation
+- public rustdoc and concise package README documentation
 
 ## Explicitly Out Of Scope
 
@@ -31,13 +29,13 @@ Stabilize the live, WS-first futures `0.1.x` foundation and ship it honestly as 
 - options
 - persistence inside core
 - fake cross-venue abstractions for unstable semantics
-- crates.io publication before a dedicated registry strategy exists
+- bundled web/operator demos in published crates
 
 ## Ordered Backlog
 
 1. tighten local realtime account and position projection when Binance omits `ACCOUNT_UPDATE`
 2. reduce allocation and serialization cost in the command hot path
 3. keep fixture/static mode stable while live/runtime coverage expands
-4. expand operator docs and rustdoc around the new `entry()` and stream surfaces
-5. add more venue-native stress and latency probes for focused production workflows
-6. formalize GitHub/source release workflow for `0.1.x`
+4. expand rustdoc around `entry()` and stream surfaces
+5. add more venue-native stress and latency probes inside `bat-markets-testing`
+6. add release automation once manual crates.io publication is proven

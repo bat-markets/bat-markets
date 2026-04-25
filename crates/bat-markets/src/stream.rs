@@ -1121,6 +1121,9 @@ impl<'a> PublicLaneClient<'a> {
     }
 
     /// Spawn a reconnecting live public-stream runner.
+    ///
+    /// Prefer `watch_*` / `subscribe_fast(...)` in applications so the subscription hub can
+    /// preserve shared subscriptions and avoid accidental duplicate sockets.
     pub async fn spawn_live(&self, subscription: PublicSubscription) -> Result<LiveStreamHandle> {
         runtime::spawn_public_stream(self.inner.live_context(), subscription).await
     }
@@ -1482,6 +1485,9 @@ impl<'a> PrivateLaneClient<'a> {
     }
 
     /// Spawn a reconnecting live private-stream runner.
+    ///
+    /// Prefer `watch_*` in applications so the private subscription hub preserves one shared
+    /// account stream.
     pub async fn spawn_live(&self) -> Result<LiveStreamHandle> {
         runtime::spawn_private_stream(self.inner.live_context()).await
     }

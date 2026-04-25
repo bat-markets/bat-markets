@@ -4,7 +4,9 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use futures_util::{SinkExt, StreamExt, future::try_join_all};
+#[cfg(feature = "binance")]
+use futures_util::future::try_join_all;
+use futures_util::{SinkExt, StreamExt};
 #[cfg(feature = "binance")]
 use reqwest::Method;
 use reqwest::StatusCode;
@@ -18,6 +20,8 @@ use tokio::{
 use tokio_tungstenite::tungstenite::Message;
 use url::form_urlencoded::Serializer;
 
+#[cfg(feature = "binance")]
+use bat_markets_core::OrderType;
 use bat_markets_core::{
     AmendOrderRequest, AmendOrdersRequest, BookTop, CancelAllOrdersRequest, CancelOrderRequest,
     CancelOrdersRequest, ClientOrderId, ClosePositionRequest, CommandAck, CommandLaneEvent,
@@ -26,7 +30,7 @@ use bat_markets_core::{
     FetchOhlcvRequest, FetchOrderBookRequest, FetchTickersRequest, FetchTradesRequest,
     GetOrderRequest, HealthReport, InstrumentId, InstrumentSpec, Kline, KlineInterval, Liquidation,
     ListExecutionsRequest, ListOpenOrdersRequest, MarginMode, MarkPrice, MarketError, OpenInterest,
-    Order, OrderBookLevel, OrderBookSnapshot, OrderId, OrderTarget, OrderType, Price,
+    Order, OrderBookLevel, OrderBookSnapshot, OrderId, OrderTarget, Position, Price,
     PrivateLaneEvent, Product, PublicLaneEvent, Quantity, ReconcileOutcome, ReconcileReport,
     ReconcileTrigger, RequestId, Result, SequenceNumber, SetLeverageRequest, SetMarginModeRequest,
     SetPositionModeRequest, Ticker, TimestampMs, TradeTick, ValidateOrderRequest, Venue,
@@ -34,7 +38,11 @@ use bat_markets_core::{
 };
 
 #[cfg(feature = "binance")]
+use bat_markets_binance::BinanceLinearFuturesAdapter;
+#[cfg(feature = "binance")]
 use bat_markets_binance::native as binance_native;
+#[cfg(feature = "bybit")]
+use bat_markets_bybit::BybitLinearFuturesAdapter;
 #[cfg(feature = "bybit")]
 use bat_markets_bybit::native as bybit_native;
 
@@ -1086,6 +1094,7 @@ pub(crate) async fn create_orders(
                             instrument_id: Some(order.instrument_id.clone()),
                             order_id: None,
                             client_order_id: order.client_order_id.clone(),
+                            #[cfg(feature = "bybit")]
                             request_id: order.request_id.clone(),
                         })
                         .collect::<Vec<_>>();
@@ -1728,6 +1737,7 @@ pub(crate) async fn amend_orders(
                             instrument_id: Some(order.instrument_id.clone()),
                             order_id: order.order_id.clone(),
                             client_order_id: order.client_order_id.clone(),
+                            #[cfg(feature = "bybit")]
                             request_id: order.request_id.clone(),
                         })
                         .collect::<Vec<_>>();
@@ -2347,6 +2357,7 @@ pub(crate) async fn cancel_orders(
                             instrument_id: Some(target.instrument_id.clone()),
                             order_id: target.order_id.clone(),
                             client_order_id: target.client_order_id.clone(),
+                            #[cfg(feature = "bybit")]
                             request_id: None,
                         })
                         .collect::<Vec<_>>();
@@ -2633,65 +2644,52 @@ pub(crate) async fn close_position(
     context: &LiveContext,
     request: &ClosePositionRequest,
 ) -> Result<CommandAck> {
-    let position = context
-        .shared
-        .read(|state| {
-            state
-                .positions()
-                .into_iter()
-                .find(|position| position.instrument_id == request.instrument_id)
-        })
-        .ok_or_else(|| {
-            MarketError::new(
-                ErrorKind::ConfigError,
-                format!("no cached position found for {}", request.instrument_id),
-            )
-        })?;
-    let position_size = position.size;
-    if position_size.value().is_zero() {
-        return Err(MarketError::new(
-            ErrorKind::ConfigError,
-            format!("position {} is already flat", request.instrument_id),
-        ));
-    }
-    let quantity = request.quantity.unwrap_or(position_size);
-    if quantity.value() > position_size.value() {
-        return Err(MarketError::new(
-            ErrorKind::ConfigError,
-            "close_position quantity exceeds current position size",
-        ));
-    }
-
-    let derived_request = CreateOrderRequest {
-        request_id: request.request_id.clone(),
-        instrument_id: request.instrument_id.clone(),
-        client_order_id: request.client_order_id.clone(),
-        side: match position.direction {
-            bat_markets_core::PositionDirection::Long => bat_markets_core::Side::Sell,
-            bat_markets_core::PositionDirection::Short => bat_markets_core::Side::Buy,
-            bat_markets_core::PositionDirection::Flat => {
-                return Err(MarketError::new(
-                    ErrorKind::ConfigError,
-                    format!("position {} is already flat", request.instrument_id),
-                ));
-            }
-        },
-        order_type: if request.price.is_some() {
-            bat_markets_core::OrderType::Limit
-        } else {
-            bat_markets_core::OrderType::Market
-        },
-        time_in_force: request.time_in_force,
-        quantity,
-        price: request.price,
-        trigger_price: None,
-        trigger_type: None,
-        reduce_only: true,
-        post_only: request.post_only,
-    };
-
     let started_at = Instant::now();
     let result = async {
+        let position = resolve_close_position(context, request).await?;
+        let position_size = position.size;
+        if position_size.value().is_zero() {
+            return Err(MarketError::new(
+                ErrorKind::ConfigError,
+                format!("position {} is already flat", request.instrument_id),
+            ));
+        }
+        let quantity = request.quantity.unwrap_or(position_size);
+        if quantity.value() > position_size.value() {
+            return Err(MarketError::new(
+                ErrorKind::ConfigError,
+                "close_position quantity exceeds current position size",
+            ));
+        }
+
+        let derived_request = CreateOrderRequest {
+            request_id: request.request_id.clone(),
+            instrument_id: request.instrument_id.clone(),
+            client_order_id: request.client_order_id.clone(),
+            side: match position.direction {
+                bat_markets_core::PositionDirection::Long => bat_markets_core::Side::Sell,
+                bat_markets_core::PositionDirection::Short => bat_markets_core::Side::Buy,
+                bat_markets_core::PositionDirection::Flat => {
+                    return Err(MarketError::new(
+                        ErrorKind::ConfigError,
+                        format!("position {} is already flat", request.instrument_id),
+                    ));
+                }
+            },
+            order_type: if request.price.is_some() {
+                bat_markets_core::OrderType::Limit
+            } else {
+                bat_markets_core::OrderType::Market
+            },
+            time_in_force: request.time_in_force,
+            quantity,
+            price: request.price,
+            trigger_price: None,
+            trigger_type: None,
+            reduce_only: true,
+            post_only: request.post_only,
+        };
+
         validate_create_order(context, &derived_request)?;
         context.command_limiter.acquire().await;
         let (receipt, transport) = match &context.adapter {
@@ -2942,6 +2940,49 @@ pub(crate) async fn close_position(
     .await;
     record_runtime_latency(context, RuntimeOperation::ClosePosition, started_at);
     result
+}
+
+async fn resolve_close_position(
+    context: &LiveContext,
+    request: &ClosePositionRequest,
+) -> Result<Position> {
+    if let Some(position) = cached_position(context, &request.instrument_id)
+        && close_position_cache_is_actionable(&position, request)
+    {
+        return Ok(position);
+    }
+
+    let refreshed = refresh_positions(context).await?;
+    refreshed
+        .into_iter()
+        .find(|position| position.instrument_id == request.instrument_id)
+        .ok_or_else(|| {
+            MarketError::new(
+                ErrorKind::ConfigError,
+                format!(
+                    "no refreshed position found for {}; start private stream or call refresh_positions before close_position",
+                    request.instrument_id
+                ),
+            )
+        })
+}
+
+fn cached_position(context: &LiveContext, instrument_id: &InstrumentId) -> Option<Position> {
+    context.shared.read(|state| {
+        state
+            .positions()
+            .into_iter()
+            .find(|position| &position.instrument_id == instrument_id)
+    })
+}
+
+fn close_position_cache_is_actionable(position: &Position, request: &ClosePositionRequest) -> bool {
+    if position.size.value().is_zero() {
+        return false;
+    }
+    request
+        .quantity
+        .is_none_or(|quantity| quantity.value() <= position.size.value())
 }
 
 pub(crate) async fn set_leverage(
@@ -5346,15 +5387,11 @@ async fn binance_keepalive_listen_key(context: &LiveContext, listen_key: &str) -
 async fn refresh_bybit_account_context(
     context: &LiveContext,
 ) -> Result<bat_markets_bybit::BybitAccountContext> {
-    let adapter = match &context.adapter {
-        AdapterHandle::Bybit(adapter) => adapter,
-        #[cfg(feature = "binance")]
-        AdapterHandle::Binance(_) => {
-            return Err(MarketError::new(
-                ErrorKind::Unsupported,
-                "bybit account context requested for non-bybit adapter",
-            ));
-        }
+    let Some(adapter) = bybit_adapter(context) else {
+        return Err(MarketError::new(
+            ErrorKind::Unsupported,
+            "bybit account context requested for non-bybit adapter",
+        ));
     };
     refresh_bybit_account_context_with_adapter(context, adapter).await
 }
@@ -5438,6 +5475,7 @@ async fn validate_amend_order(context: &LiveContext, request: &AmendOrderRequest
     Ok(())
 }
 
+#[cfg(feature = "binance")]
 async fn resolve_order_for_amend(
     context: &LiveContext,
     request: &AmendOrderRequest,
@@ -5474,6 +5512,7 @@ struct BatchIdentity {
     instrument_id: Option<InstrumentId>,
     order_id: Option<OrderId>,
     client_order_id: Option<ClientOrderId>,
+    #[cfg(feature = "bybit")]
     request_id: Option<RequestId>,
 }
 
@@ -5588,6 +5627,7 @@ async fn cache_and_emit_create_receipts(
             instrument_id: Some(order.instrument_id.clone()),
             order_id: None,
             client_order_id: order.client_order_id.clone(),
+            #[cfg(feature = "bybit")]
             request_id: order.request_id.clone(),
         })
         .collect::<Vec<_>>();
@@ -5613,6 +5653,7 @@ async fn cache_and_emit_amend_receipts(
             instrument_id: Some(order.instrument_id.clone()),
             order_id: order.order_id.clone(),
             client_order_id: order.client_order_id.clone(),
+            #[cfg(feature = "bybit")]
             request_id: order.request_id.clone(),
         })
         .collect::<Vec<_>>();
@@ -5638,6 +5679,7 @@ async fn cache_and_emit_cancel_receipts(
             instrument_id: Some(target.instrument_id.clone()),
             order_id: target.order_id.clone(),
             client_order_id: target.client_order_id.clone(),
+            #[cfg(feature = "bybit")]
             request_id: None,
         })
         .collect::<Vec<_>>();
@@ -5874,6 +5916,7 @@ fn build_bybit_batch_cancel_object(context: &LiveContext, request: &OrderTarget)
     Ok(Value::Object(order))
 }
 
+#[cfg(feature = "binance")]
 fn resolve_cached_order_for_amend(
     context: &LiveContext,
     request: &AmendOrderRequest,
@@ -6045,6 +6088,7 @@ fn classify_bybit_batch_payload(
     Ok(receipts)
 }
 
+#[cfg(feature = "bybit")]
 fn value_as_i64(value: &Value) -> Option<i64> {
     match value {
         Value::Number(number) => number.as_i64(),
@@ -6534,15 +6578,41 @@ fn topic_key(value: impl Into<Box<str>>) -> TopicKey {
     TopicKey(value.into())
 }
 
+#[cfg(all(feature = "binance", feature = "bybit"))]
+fn binance_adapter(context: &LiveContext) -> Option<&BinanceLinearFuturesAdapter> {
+    match &context.adapter {
+        AdapterHandle::Binance(adapter) => Some(adapter),
+        AdapterHandle::Bybit(_) => None,
+    }
+}
+
+#[cfg(all(feature = "binance", not(feature = "bybit")))]
+fn binance_adapter(context: &LiveContext) -> Option<&BinanceLinearFuturesAdapter> {
+    let AdapterHandle::Binance(adapter) = &context.adapter;
+    Some(adapter)
+}
+
+#[cfg(all(feature = "bybit", feature = "binance"))]
+fn bybit_adapter(context: &LiveContext) -> Option<&BybitLinearFuturesAdapter> {
+    match &context.adapter {
+        AdapterHandle::Bybit(adapter) => Some(adapter),
+        AdapterHandle::Binance(_) => None,
+    }
+}
+
+#[cfg(all(feature = "bybit", not(feature = "binance")))]
+fn bybit_adapter(context: &LiveContext) -> Option<&BybitLinearFuturesAdapter> {
+    let AdapterHandle::Bybit(adapter) = &context.adapter;
+    Some(adapter)
+}
+
 #[cfg(feature = "binance")]
 fn binance_public_sequence_observations(
     context: &LiveContext,
     payload: &str,
 ) -> Result<Vec<SequenceObservation>> {
-    let adapter = match &context.adapter {
-        AdapterHandle::Binance(adapter) => adapter,
-        #[cfg(feature = "bybit")]
-        AdapterHandle::Bybit(_) => return Ok(Vec::new()),
+    let Some(adapter) = binance_adapter(context) else {
+        return Ok(Vec::new());
     };
     if serde_json::from_str::<binance_native::OpenInterestSnapshot>(payload).is_ok() {
         return Ok(Vec::new());
@@ -6569,10 +6639,8 @@ fn binance_private_sequence_observations(
     context: &LiveContext,
     payload: &str,
 ) -> Result<Vec<SequenceObservation>> {
-    let adapter = match &context.adapter {
-        AdapterHandle::Binance(adapter) => adapter,
-        #[cfg(feature = "bybit")]
-        AdapterHandle::Bybit(_) => return Ok(Vec::new()),
+    let Some(adapter) = binance_adapter(context) else {
+        return Ok(Vec::new());
     };
     match adapter.parse_native_private(payload)? {
         binance_native::PrivateMessage::OrderTradeUpdate(event) => Ok(event
@@ -6602,10 +6670,8 @@ fn bybit_public_sequence_observations(
     context: &LiveContext,
     payload: &str,
 ) -> Result<Vec<SequenceObservation>> {
-    let adapter = match &context.adapter {
-        AdapterHandle::Bybit(adapter) => adapter,
-        #[cfg(feature = "binance")]
-        AdapterHandle::Binance(_) => return Ok(Vec::new()),
+    let Some(adapter) = bybit_adapter(context) else {
+        return Ok(Vec::new());
     };
     let envelope = adapter.parse_native_public(payload)?;
     if !envelope.topic.starts_with("orderbook.") {
@@ -6636,10 +6702,8 @@ fn bybit_private_sequence_observations(
     context: &LiveContext,
     payload: &str,
 ) -> Result<Vec<SequenceObservation>> {
-    let adapter = match &context.adapter {
-        AdapterHandle::Bybit(adapter) => adapter,
-        #[cfg(feature = "binance")]
-        AdapterHandle::Binance(_) => return Ok(Vec::new()),
+    let Some(adapter) = bybit_adapter(context) else {
+        return Ok(Vec::new());
     };
     let envelope = adapter.parse_native_private(payload)?;
     match envelope.topic.as_str() {
@@ -7252,10 +7316,11 @@ mod tests {
     use crate::client::{AdapterHandle, BatMarketsBuilder};
     use crate::stream::PublicSubscription;
     use bat_markets_core::{
-        ClientOrderId, CommandLifecycleEvent, CommandOperation, CommandReceipt, CommandStatus,
-        CreateOrderRequest, CreateOrdersRequest, DegradedReason, Execution, HealthReport,
-        InstrumentId, Order, OrderId, Price, Product, Quantity, ReconcileTrigger, RequestId, Side,
-        TimestampMs, Venue,
+        ClientOrderId, ClosePositionRequest, CommandLifecycleEvent, CommandOperation,
+        CommandReceipt, CommandStatus, CreateOrderRequest, CreateOrdersRequest, DegradedReason,
+        Execution, HealthReport, InstrumentId, MarginMode, Order, OrderId, Position,
+        PositionDirection, PositionId, PositionMode, Price, Product, Quantity, ReconcileTrigger,
+        RequestId, Side, TimestampMs, Venue,
     };
     use bat_markets_core::{OrderStatus, OrderType, PublicLaneEvent};
     use rust_decimal::Decimal;
@@ -7699,6 +7764,32 @@ mod tests {
         assert_eq!(start_ms, now_ms - super::HISTORY_REPAIR_MAX_LOOKBACK_MS);
     }
 
+    #[test]
+    fn close_position_cache_actionable_requires_non_zero_and_enough_size() {
+        let request = ClosePositionRequest {
+            request_id: None,
+            instrument_id: InstrumentId::from("BTC/USDT:USDT"),
+            client_order_id: None,
+            quantity: Some(Quantity::new(Decimal::new(2, 0))),
+            price: None,
+            time_in_force: None,
+            post_only: false,
+        };
+
+        assert!(super::close_position_cache_is_actionable(
+            &test_position("3", PositionDirection::Long),
+            &request
+        ));
+        assert!(!super::close_position_cache_is_actionable(
+            &test_position("1", PositionDirection::Long),
+            &request
+        ));
+        assert!(!super::close_position_cache_is_actionable(
+            &test_position("0", PositionDirection::Flat),
+            &request
+        ));
+    }
+
     #[tokio::test]
     async fn unknown_execution_emits_lifecycle_ack_and_recovery_scheduled() {
         let client = BatMarketsBuilder::default()
@@ -7771,6 +7862,22 @@ mod tests {
             query,
             vec![("orderLinkId".to_owned(), "cli-bybit".to_owned())]
         );
+    }
+
+    fn test_position(size: &str, direction: PositionDirection) -> Position {
+        Position {
+            position_id: PositionId::from("test-position"),
+            instrument_id: InstrumentId::from("BTC/USDT:USDT"),
+            direction,
+            size: Quantity::new(size.parse::<Decimal>().expect("valid decimal")),
+            entry_price: None,
+            mark_price: None,
+            unrealized_pnl: None,
+            leverage: None,
+            margin_mode: MarginMode::Cross,
+            position_mode: PositionMode::OneWay,
+            updated_at: TimestampMs::new(1),
+        }
     }
 
     fn pending_unknown(

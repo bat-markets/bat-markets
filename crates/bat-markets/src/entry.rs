@@ -1,50 +1,46 @@
-use std::sync::Arc;
-
 use tokio::sync::broadcast;
 
 use bat_markets_core::{
     AmendOrderRequest, AmendOrdersRequest, CancelAllOrdersRequest, CancelOrderRequest,
     CancelOrdersRequest, ClosePositionRequest, CommandAck, CommandLaneEvent, CommandLifecycleEvent,
     CommandReceipt, CommandStatus, CommandTransport, CreateOrderRequest, CreateOrdersRequest,
-    ErrorKind, Result, SetLeverageRequest, SetMarginModeRequest, SetPositionModeRequest,
-    ValidateOrderRequest,
+    ErrorKind, ReconcileOutcome, ReconcileReport, Result, SetLeverageRequest, SetMarginModeRequest,
+    SetPositionModeRequest, ValidateOrderRequest,
 };
 
-use crate::{
-    client::{BatMarkets, SharedState},
-    runtime,
-};
+use crate::{client::BatMarkets, runtime};
 
 /// Low-latency command handle with lifecycle tracking over the shared command bus.
 pub struct PendingCommandHandle {
     ack: CommandAck,
-    shared: Arc<SharedState>,
-    receiver: Option<broadcast::Receiver<CommandLaneEvent>>,
+    receiver: broadcast::Receiver<CommandLaneEvent>,
     initial_receipt_pending: bool,
 }
 
 impl PendingCommandHandle {
-    pub(crate) fn from_ack(inner: &BatMarkets, ack: CommandAck) -> Self {
+    pub(crate) fn from_ack(
+        ack: CommandAck,
+        receiver: broadcast::Receiver<CommandLaneEvent>,
+    ) -> Self {
         Self {
             ack,
-            shared: Arc::clone(&inner.shared),
-            receiver: None,
+            receiver,
             initial_receipt_pending: true,
         }
     }
 
     pub(crate) fn from_receipt(
-        inner: &BatMarkets,
         receipt: CommandReceipt,
         transport: CommandTransport,
+        receiver: broadcast::Receiver<CommandLaneEvent>,
     ) -> Self {
         Self::from_ack(
-            inner,
             CommandAck {
                 receipt,
                 transport,
                 acknowledged_at: timestamp_now_ms(),
             },
+            receiver,
         )
     }
 
@@ -101,15 +97,14 @@ impl PendingCommandHandle {
 
         loop {
             let lifecycle = self.next_lifecycle().await?;
-            if matches!(lifecycle, CommandLifecycleEvent::RecoveryCompleted { .. }) {
-                return Ok(self.ack.receipt.clone());
+            if let CommandLifecycleEvent::RecoveryCompleted { report, .. } = lifecycle {
+                return Ok(receipt_after_recovery(&self.ack.receipt, &report));
             }
         }
     }
 
     fn receiver_mut(&mut self) -> &mut broadcast::Receiver<CommandLaneEvent> {
-        self.receiver
-            .get_or_insert_with(|| self.shared.subscribe_command_events())
+        &mut self.receiver
     }
 }
 
@@ -129,50 +124,59 @@ impl<'a> EntryClient<'a> {
     }
 
     pub async fn create_order(&self, request: &CreateOrderRequest) -> Result<PendingCommandHandle> {
+        let receiver = self.inner.shared.subscribe_command_events();
         let ack = runtime::create_order(&self.inner.live_context(), request).await?;
-        Ok(PendingCommandHandle::from_ack(self.inner, ack))
+        Ok(PendingCommandHandle::from_ack(ack, receiver))
     }
 
     pub async fn create_orders(
         &self,
         request: &CreateOrdersRequest,
     ) -> Result<Vec<PendingCommandHandle>> {
+        let mut receivers = pre_subscribe_command_receivers(self.inner, request.orders.len());
         let acks = runtime::create_orders(&self.inner.live_context(), request).await?;
         Ok(acks
             .into_iter()
-            .map(|ack| PendingCommandHandle::from_ack(self.inner, ack))
+            .zip(receivers.drain(..))
+            .map(|(ack, receiver)| PendingCommandHandle::from_ack(ack, receiver))
             .collect())
     }
 
     pub async fn amend_order(&self, request: &AmendOrderRequest) -> Result<PendingCommandHandle> {
+        let receiver = self.inner.shared.subscribe_command_events();
         let ack = runtime::amend_order(&self.inner.live_context(), request).await?;
-        Ok(PendingCommandHandle::from_ack(self.inner, ack))
+        Ok(PendingCommandHandle::from_ack(ack, receiver))
     }
 
     pub async fn amend_orders(
         &self,
         request: &AmendOrdersRequest,
     ) -> Result<Vec<PendingCommandHandle>> {
+        let mut receivers = pre_subscribe_command_receivers(self.inner, request.orders.len());
         let acks = runtime::amend_orders(&self.inner.live_context(), request).await?;
         Ok(acks
             .into_iter()
-            .map(|ack| PendingCommandHandle::from_ack(self.inner, ack))
+            .zip(receivers.drain(..))
+            .map(|(ack, receiver)| PendingCommandHandle::from_ack(ack, receiver))
             .collect())
     }
 
     pub async fn cancel_order(&self, request: &CancelOrderRequest) -> Result<PendingCommandHandle> {
+        let receiver = self.inner.shared.subscribe_command_events();
         let ack = runtime::cancel_order(&self.inner.live_context(), request).await?;
-        Ok(PendingCommandHandle::from_ack(self.inner, ack))
+        Ok(PendingCommandHandle::from_ack(ack, receiver))
     }
 
     pub async fn cancel_orders(
         &self,
         request: &CancelOrdersRequest,
     ) -> Result<Vec<PendingCommandHandle>> {
+        let mut receivers = pre_subscribe_command_receivers(self.inner, request.orders.len());
         let acks = runtime::cancel_orders(&self.inner.live_context(), request).await?;
         Ok(acks
             .into_iter()
-            .map(|ack| PendingCommandHandle::from_ack(self.inner, ack))
+            .zip(receivers.drain(..))
+            .map(|(ack, receiver)| PendingCommandHandle::from_ack(ack, receiver))
             .collect())
     }
 
@@ -180,11 +184,12 @@ impl<'a> EntryClient<'a> {
         &self,
         request: &CancelAllOrdersRequest,
     ) -> Result<PendingCommandHandle> {
+        let receiver = self.inner.shared.subscribe_command_events();
         let receipt = runtime::cancel_all_orders(&self.inner.live_context(), request).await?;
         Ok(PendingCommandHandle::from_receipt(
-            self.inner,
             receipt,
             CommandTransport::Rest,
+            receiver,
         ))
     }
 
@@ -192,28 +197,31 @@ impl<'a> EntryClient<'a> {
         &self,
         request: &ClosePositionRequest,
     ) -> Result<PendingCommandHandle> {
+        let receiver = self.inner.shared.subscribe_command_events();
         let ack = runtime::close_position(&self.inner.live_context(), request).await?;
-        Ok(PendingCommandHandle::from_ack(self.inner, ack))
+        Ok(PendingCommandHandle::from_ack(ack, receiver))
     }
 
     pub async fn validate_order(
         &self,
         request: &ValidateOrderRequest,
     ) -> Result<PendingCommandHandle> {
+        let receiver = self.inner.shared.subscribe_command_events();
         let receipt = runtime::validate_order(&self.inner.live_context(), request).await?;
         Ok(PendingCommandHandle::from_receipt(
-            self.inner,
             receipt,
             CommandTransport::Rest,
+            receiver,
         ))
     }
 
     pub async fn set_leverage(&self, request: &SetLeverageRequest) -> Result<PendingCommandHandle> {
+        let receiver = self.inner.shared.subscribe_command_events();
         let receipt = runtime::set_leverage(&self.inner.live_context(), request).await?;
         Ok(PendingCommandHandle::from_receipt(
-            self.inner,
             receipt,
             CommandTransport::Rest,
+            receiver,
         ))
     }
 
@@ -221,11 +229,12 @@ impl<'a> EntryClient<'a> {
         &self,
         request: &SetMarginModeRequest,
     ) -> Result<PendingCommandHandle> {
+        let receiver = self.inner.shared.subscribe_command_events();
         let receipt = runtime::set_margin_mode(&self.inner.live_context(), request).await?;
         Ok(PendingCommandHandle::from_receipt(
-            self.inner,
             receipt,
             CommandTransport::Rest,
+            receiver,
         ))
     }
 
@@ -233,13 +242,23 @@ impl<'a> EntryClient<'a> {
         &self,
         request: &SetPositionModeRequest,
     ) -> Result<PendingCommandHandle> {
+        let receiver = self.inner.shared.subscribe_command_events();
         let receipt = runtime::set_position_mode(&self.inner.live_context(), request).await?;
         Ok(PendingCommandHandle::from_receipt(
-            self.inner,
             receipt,
             CommandTransport::Rest,
+            receiver,
         ))
     }
+}
+
+fn pre_subscribe_command_receivers(
+    inner: &BatMarkets,
+    count: usize,
+) -> Vec<broadcast::Receiver<CommandLaneEvent>> {
+    (0..count)
+        .map(|_| inner.shared.subscribe_command_events())
+        .collect()
 }
 
 fn matches_lifecycle(receipt: &CommandReceipt, lifecycle: &CommandLifecycleEvent) -> bool {
@@ -271,6 +290,31 @@ fn matches_receipt(left: &CommandReceipt, right: &CommandReceipt) -> bool {
     left.instrument_id == right.instrument_id
 }
 
+fn receipt_after_recovery(receipt: &CommandReceipt, report: &ReconcileReport) -> CommandReceipt {
+    let mut resolved = receipt.clone();
+    match report.outcome {
+        ReconcileOutcome::Synchronized => {
+            resolved.status = CommandStatus::Accepted;
+            resolved.retriable = false;
+            resolved.message = Some(
+                report
+                    .note
+                    .clone()
+                    .unwrap_or_else(|| "command outcome resolved by reconcile".into()),
+            );
+        }
+        ReconcileOutcome::StillUncertain | ReconcileOutcome::Diverged => {
+            resolved.status = CommandStatus::UnknownExecution;
+            resolved.retriable = true;
+            resolved.message =
+                Some(report.note.clone().unwrap_or_else(|| {
+                    "command outcome remains unresolved after reconcile".into()
+                }));
+        }
+    }
+    resolved
+}
+
 fn timestamp_now_ms() -> bat_markets_core::TimestampMs {
     let millis = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -278,4 +322,73 @@ fn timestamp_now_ms() -> bat_markets_core::TimestampMs {
         .unwrap_or_default()
         .min(i64::MAX as u128) as i64;
     bat_markets_core::TimestampMs::new(millis)
+}
+
+#[cfg(test)]
+mod tests {
+    use bat_markets_core::{
+        CommandOperation, CommandReceipt, CommandStatus, Product, ReconcileOutcome,
+        ReconcileReport, ReconcileTrigger, TimestampMs, Venue,
+    };
+
+    #[test]
+    fn recovery_synchronized_returns_accepted_non_retriable_receipt() {
+        let receipt = unknown_receipt();
+        let report = report(
+            ReconcileOutcome::Synchronized,
+            "recent history resolved command",
+        );
+
+        let resolved = super::receipt_after_recovery(&receipt, &report);
+
+        assert_eq!(resolved.status, CommandStatus::Accepted);
+        assert!(!resolved.retriable);
+        assert_eq!(
+            resolved.message.as_deref(),
+            Some("recent history resolved command")
+        );
+    }
+
+    #[test]
+    fn recovery_still_uncertain_keeps_receipt_explicitly_unknown() {
+        let receipt = unknown_receipt();
+        let report = report(
+            ReconcileOutcome::StillUncertain,
+            "1 pending command outcomes still unresolved",
+        );
+
+        let resolved = super::receipt_after_recovery(&receipt, &report);
+
+        assert_eq!(resolved.status, CommandStatus::UnknownExecution);
+        assert!(resolved.retriable);
+        assert_eq!(
+            resolved.message.as_deref(),
+            Some("1 pending command outcomes still unresolved")
+        );
+    }
+
+    fn unknown_receipt() -> CommandReceipt {
+        CommandReceipt {
+            operation: CommandOperation::CreateOrder,
+            status: CommandStatus::UnknownExecution,
+            venue: Venue::Binance,
+            product: Product::LinearUsdt,
+            instrument_id: None,
+            order_id: None,
+            client_order_id: None,
+            request_id: None,
+            message: Some("command outcome requires reconcile".into()),
+            native_code: None,
+            retriable: true,
+        }
+    }
+
+    fn report(outcome: ReconcileOutcome, note: &str) -> ReconcileReport {
+        ReconcileReport {
+            trigger: ReconcileTrigger::UnknownExecution,
+            outcome,
+            repaired_at: TimestampMs::new(1),
+            note: Some(note.into()),
+        }
+    }
 }

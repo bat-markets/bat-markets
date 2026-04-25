@@ -1,77 +1,113 @@
 # bat-markets
 
-`bat-markets` is a futures-first, headless Rust exchange engine.
+`bat-markets` is a futures-first, headless Rust exchange engine for Binance USD-M
+and Bybit USDT linear futures.
 
-The project intentionally stays narrow:
+The crate focuses on a narrow production surface:
 
-- initial venue focus: Binance and Bybit,
-- initial product focus: linear futures / perpetuals,
-- initial architecture focus: typed domain contracts, honest native boundaries, and a small facade crate.
+- typed market, account, position, trade, stream, and order-entry APIs;
+- decimal domain types instead of `f64` in public/state contracts;
+- fixture-backed native adapters for Binance and Bybit payloads;
+- shared public/private websocket lanes with typed watchers;
+- explicit command acknowledgements, lifecycle events, and `UnknownExecution`
+  recovery semantics;
+- in-memory state, health, and diagnostics snapshots for live runners.
 
-This repository currently implements the initial production-grade foundation:
-
-- a virtual workspace with explicit crate boundaries,
-- a strict core model without `f64` in public/state contracts,
-- three API layers encoded in code and docs,
-- three execution lanes encoded in code and docs,
-- fixture-backed Binance and Bybit adapters for linear futures payloads,
-- shared public/private websocket subscription hubs with typed watchers,
-- a low-latency `entry()` surface with command acknowledgements and lifecycle tracking,
-- a state engine that applies private events and tracks command uncertainty,
-- a live diagnostics snapshot for lock contention and key runtime latencies,
-- env-gated live stress harnesses plus operator-facing examples,
-- a simple Bun-based realtime operator panel under `examples/realtime-web`,
-- quality gates for formatting, linting, tests, docs, and benchmarks.
-
-## Release Model
-
-`0.1.x` is currently a GitHub/source release, not a crates.io package.
-
-Use a tagged git dependency:
+## Install
 
 ```toml
 [dependencies]
-bat-markets = { git = "https://github.com/bat-markets/bat-markets.git", tag = "v0.1.0" }
+bat-markets = "0.1"
 ```
 
-The repository keeps every workspace crate `publish = false` until there is an explicit crates.io strategy for the facade and internal crate boundaries.
+Default features enable Binance, Bybit, and private trading surfaces:
 
-## Crates
+```toml
+[dependencies]
+bat-markets = { version = "0.1", default-features = false, features = ["binance"] }
+```
 
-- `bat-markets`: public facade and ergonomic API
-- `bat-markets-core`: internal domain contracts and state engine
-- `bat-markets-binance`: Binance linear futures adapter
-- `bat-markets-bybit`: Bybit linear futures adapter
-- `bat-markets-testing`: shared fixtures, smoke helpers, and benchmarks
+Feature flags:
 
-## What This Milestone Is
-
-This milestone is the live, WS-first engine foundation for `0.1.x`.
-
-It is designed to be:
-
-- honest about venue differences,
-- testable without live keys,
-- narrow enough to evolve safely,
-- fast enough to operate through shared live feeds without per-watch socket sprawl,
-- ready to evolve without breaking the core model.
-
-## What This Milestone Is Not
-
-This repository does not claim complete exchange coverage.
-The implemented foundation focuses on:
-
-- parsing native exchange payloads,
-- mapping them into normalized and unified events,
-- maintaining market/private state in memory,
-- routing market/private streams through shared websocket hubs,
-- issuing low-latency commands with explicit `UnknownExecution` handling.
-
-Any live or sandbox checks remain opt-in and env-gated.
-
-Advanced venue-only flags and unstable exchange semantics still stay in `native()`.
+- `binance`: enable the Binance USD-M linear futures adapter.
+- `bybit`: enable the Bybit USDT linear futures adapter.
+- `private-trading`: expose authenticated order-entry and private account flows.
+- `metrics`: reserved for metrics integrations.
+- `serde`: reserved for serde-facing API expansion.
 
 ## Quick Start
+
+```rust,no_run
+use bat_markets::{
+    BatMarkets,
+    types::{Product, Venue},
+};
+
+fn main() -> bat_markets::errors::Result<()> {
+    let client = BatMarkets::builder()
+        .venue(Venue::Binance)
+        .product(Product::LinearUsdt)
+        .build()?;
+
+    println!("{:?}", client.capabilities().market);
+    Ok(())
+}
+```
+
+Live REST/WS clients are async and read credentials from environment variables by
+default:
+
+```rust,no_run
+use bat_markets::{
+    BatMarkets,
+    types::{Product, Venue},
+};
+
+#[tokio::main]
+async fn main() -> bat_markets::errors::Result<()> {
+    let client = BatMarkets::builder()
+        .venue(Venue::Bybit)
+        .product(Product::LinearUsdt)
+        .build_live()
+        .await?;
+
+    let instruments = client.market().instrument_specs();
+    println!("loaded {} instruments", instruments.len());
+    Ok(())
+}
+```
+
+## Safety Model
+
+`bat-markets` is intentionally conservative:
+
+- live credentials are supplied through environment variables or explicit config;
+- secrets are never required for public market reads;
+- live write tests are opt-in and environment-gated;
+- exchange-specific semantics remain visible through `native()` instead of being
+  hidden behind fake cross-venue guarantees;
+- uncertain command outcomes stay explicit until local state or reconciliation
+  evidence resolves them.
+
+## Workspace Crates
+
+- `bat-markets`: public facade and ergonomic API.
+- `bat-markets-core`: domain contracts, error taxonomy, state engine, and adapter traits.
+- `bat-markets-binance`: Binance USD-M linear futures adapter.
+- `bat-markets-bybit`: Bybit USDT linear futures adapter.
+- `bat-markets-testing`: unpublished workspace-only fixtures, smoke helpers, and benches.
+
+Publishing is automated from the protected GitHub Actions environment
+`crates-io`. Runtime crates are published in dependency order:
+
+```bash
+./scripts/publish-crates.sh
+```
+
+Store crates.io tokens only as GitHub Actions secrets or local environment
+variables. Never commit tokens to the repository.
+
+## Development
 
 Run the full local quality gate:
 
@@ -79,28 +115,21 @@ Run the full local quality gate:
 ./scripts/check.sh
 ```
 
-Run the workspace tests:
+Useful focused checks:
 
 ```bash
+cargo fmt --all --check
+cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace
+cargo audit
+cargo package --workspace --exclude bat-markets-testing --allow-dirty
+./scripts/publish-crates.sh --dry-run
 ```
 
-Run the simple realtime web menu:
+## Documentation
 
-```bash
-cd examples/realtime-web
-bun run dev
-```
-
-Then open `http://127.0.0.1:3107`.
-
-The web panel launches the real Rust examples and streams their logs in realtime.
-Live write scenarios can place real orders on approved testing subaccounts.
-
-Read the architecture documents:
-
-- [`docs/architecture.md`](docs/architecture.md)
-- [`docs/roadmap.md`](docs/roadmap.md)
-- [`docs/error-model.md`](docs/error-model.md)
-- [`docs/release.md`](docs/release.md)
-- [`blueprint.md`](blueprint.md)
+- [Architecture](docs/architecture.md)
+- [Capability matrix](docs/capability-matrix.md)
+- [Error model](docs/error-model.md)
+- [Release process](docs/release.md)
+- [Roadmap](docs/roadmap.md)

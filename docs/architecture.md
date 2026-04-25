@@ -14,7 +14,7 @@ The source of truth order for this repository is:
 The workspace uses a virtual root manifest and five crates:
 
 - `bat-markets`: public facade crate
-- `bat-markets-core`: internal contracts, state, and adapter interfaces
+- `bat-markets-core`: core contracts, state, and adapter interfaces
 - `bat-markets-binance`: Binance linear futures adapter
 - `bat-markets-bybit`: Bybit linear futures adapter
 - `bat-markets-testing`: fixtures, smoke helpers, and benchmarks
@@ -122,7 +122,7 @@ No public or state contract uses `f64`.
 
 The live runtime follows these rules:
 
-- `build()` remains the fixture/static constructor used by unit tests and offline examples
+- `build()` remains the fixture/static constructor used by unit tests and offline harnesses
 - `build_live().await` performs server-time sync and metadata bootstrap before the facade is returned
 - HTTP/WS clients remain internal implementation details
 - venue-specific transport details stay behind `AdapterHandle` dispatch rather than a public universal trait
@@ -157,6 +157,8 @@ The read-side `trade()` API is intentionally separated from the low-latency `ent
 - websocket order entry is used where the venue supports and the runtime validates it
 - REST remains the fallback path for venue-specific gaps and for settings/validation flows that are still REST-native
 - uncertain outcomes stay explicit and schedule reconcile in the background rather than blocking the hot path
+- compatibility write methods on `trade()` / `position()` are deprecated; new integrations should route all order-entry and account-setting commands through `entry()`
+- manual `spawn_live()` runners are low-level escape hatches; normal application code should use `watch_*` leases so shared hub subscriptions are preserved and accidental duplicate sockets are avoided
 
 ### Metadata Bootstrap
 
@@ -209,15 +211,11 @@ The current foundation relies on:
 - smoke tests for the facade,
 - benchmarks for decode, normalization, and state apply.
 
-## Examples And Benches
+## Validation Assets
 
-The executable Rust examples and benches live with their owning crates:
+Executable examples are not part of the public package surface. Repository
+validation lives in tests, fixtures, and benches:
 
-- Rust examples: `crates/bat-markets/examples/`
 - benches: `crates/bat-markets-testing/benches/`
-
-The workspace root also contains an operator-facing Bun panel:
-
-- web demo: `examples/realtime-web/`
-
-The Bun panel does not reimplement exchange logic. It launches the real Rust examples and streams their output into a browser for quick manual validation.
+- fixtures: `fixtures/`
+- integration and live smoke tests: `crates/bat-markets-testing/tests/`

@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted
+Superseded by [ADR 0007](0007-crates-io-publication-model.md).
 
 ## Context
 

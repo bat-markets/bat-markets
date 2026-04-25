@@ -158,8 +158,8 @@ async fn binance_sandbox_create_cancel_is_manual_and_safe() -> Result<()> {
     );
 
     let private = client.stream().private().spawn_live().await?;
-    let create = client
-        .trade()
+    let mut create_handle = client
+        .entry()
         .create_order(&CreateOrderRequest {
             request_id: None,
             instrument_id: instrument_id.clone(),
@@ -178,6 +178,7 @@ async fn binance_sandbox_create_cancel_is_manual_and_safe() -> Result<()> {
             post_only: true,
         })
         .await?;
+    let create = create_handle.receipt().await?;
 
     let order_id = create
         .order_id
@@ -195,8 +196,8 @@ async fn binance_sandbox_create_cancel_is_manual_and_safe() -> Result<()> {
         .await?;
     assert_eq!(fetched.instrument_id, instrument_id);
 
-    let _ = client
-        .trade()
+    let mut cancel_handle = client
+        .entry()
         .cancel_order(&CancelOrderRequest {
             request_id: None,
             instrument_id,
@@ -208,6 +209,7 @@ async fn binance_sandbox_create_cancel_is_manual_and_safe() -> Result<()> {
             client_order_id,
         })
         .await?;
+    let _ = cancel_handle.receipt().await?;
     let _ = client.trade().refresh_executions(None).await?;
     let _ = client.stream().private().reconcile().await?;
 
@@ -238,8 +240,8 @@ async fn bybit_sandbox_create_cancel_is_manual_and_safe() -> Result<()> {
     );
 
     let private = client.stream().private().spawn_live().await?;
-    let create = client
-        .trade()
+    let mut create_handle = client
+        .entry()
         .create_order(&CreateOrderRequest {
             request_id: None,
             instrument_id: instrument_id.clone(),
@@ -258,6 +260,7 @@ async fn bybit_sandbox_create_cancel_is_manual_and_safe() -> Result<()> {
             post_only: true,
         })
         .await?;
+    let create = create_handle.receipt().await?;
 
     let order_id = create
         .order_id
@@ -275,8 +278,8 @@ async fn bybit_sandbox_create_cancel_is_manual_and_safe() -> Result<()> {
         .await?;
     assert_eq!(fetched.instrument_id, instrument_id);
 
-    let _ = client
-        .trade()
+    let mut cancel_handle = client
+        .entry()
         .cancel_order(&CancelOrderRequest {
             request_id: None,
             instrument_id,
@@ -284,6 +287,7 @@ async fn bybit_sandbox_create_cancel_is_manual_and_safe() -> Result<()> {
             client_order_id,
         })
         .await?;
+    let _ = cancel_handle.receipt().await?;
     let _ = client.trade().refresh_executions(None).await?;
     let _ = client.stream().private().reconcile().await?;
 

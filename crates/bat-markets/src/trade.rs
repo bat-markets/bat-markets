@@ -55,12 +55,20 @@ impl<'a> TradeClient<'a> {
     ///
     /// Transport failures are classified into explicit `UnknownExecution` receipts rather than
     /// being hidden as generic timeouts.
+    #[deprecated(
+        since = "0.2.0",
+        note = "use entry().create_order(...) for low-latency command handles and lifecycle tracking"
+    )]
     pub async fn create_order(&self, request: &CreateOrderRequest) -> Result<CommandReceipt> {
         Ok(runtime::create_order(&self.inner.live_context(), request)
             .await?
             .receipt)
     }
 
+    #[deprecated(
+        since = "0.2.0",
+        note = "use entry().cancel_order(...) for low-latency command handles and lifecycle tracking"
+    )]
     pub async fn cancel_order(&self, request: &CancelOrderRequest) -> Result<CommandReceipt> {
         Ok(runtime::cancel_order(&self.inner.live_context(), request)
             .await?

@@ -19,11 +19,13 @@ Use the same checks as CI:
 
 ## Release Discipline
 
-For `0.1.x`, cut releases from GitHub tags and source archives only.
+For `0.1.x`, publish runtime crates to crates.io only after the local gate and
+package dry-runs pass.
 
-- do not run `cargo publish`
-- keep workspace crates `publish = false` until there is an ADR for registry publication
-- use `./scripts/source-release.sh <tag>` to build the archive and checksum shape used by GitHub releases
+- publish in dependency order: `bat-markets-core`, adapters, then `bat-markets`
+- keep `bat-markets-testing` unpublished
+- never commit or print crates.io tokens; use the protected GitHub environment secret `CARGO_REGISTRY_TOKEN`
+- publish by pushing a version tag that matches `[workspace.package].version`
 
 ## Scope Discipline
 

@@ -913,7 +913,9 @@ fn runtime_value_as_i64(value: &Value) -> Option<i64> {
 #[cfg(test)]
 mod tests {
     use tokio::sync::broadcast::error::TryRecvError;
+    use tokio::time::{Duration, timeout};
 
+    use bat_markets::types::CommandLifecycleEvent;
     use bat_markets::{BatMarkets, errors::Result};
     use bat_markets_core::{
         CommandOperation, CommandStatus, CommandTransport, HealthStatus, OrderStatus,
@@ -1232,12 +1234,23 @@ mod tests {
                 &command_ws_stub.command_ws_base(),
             );
 
-            for request in runtime_stub_validate_requests(venue) {
-                let handle = client.entry().validate_order(&request).await?;
+            for (index, request) in runtime_stub_validate_requests(venue)
+                .into_iter()
+                .enumerate()
+            {
+                let mut handle = client.entry().validate_order(&request).await?;
                 assert_eq!(handle.ack().receipt.status, CommandStatus::Accepted);
+                if index == 0 {
+                    let lifecycle = timeout(Duration::from_secs(1), handle.next_lifecycle())
+                        .await
+                        .expect(
+                            "pre-subscribed validate handle should not miss its lifecycle ack",
+                        )?;
+                    assert!(matches!(lifecycle, CommandLifecycleEvent::Ack(_)));
+                }
             }
 
-            let create_handles = client
+            let mut create_handles = client
                 .entry()
                 .create_orders(&runtime_stub_batch_create_request(venue))
                 .await?;
@@ -1252,8 +1265,12 @@ mod tests {
                     .iter()
                     .all(|handle| handle.ack().transport == CommandTransport::WebSocket)
             );
+            let lifecycle = timeout(Duration::from_secs(1), create_handles[0].next_lifecycle())
+                .await
+                .expect("pre-subscribed command handle should not miss its lifecycle ack")?;
+            assert!(matches!(lifecycle, CommandLifecycleEvent::Ack(_)));
 
-            let cancel_handles = client
+            let mut cancel_handles = client
                 .entry()
                 .cancel_orders(&runtime_stub_batch_cancel_request(venue))
                 .await?;
@@ -1268,6 +1285,10 @@ mod tests {
                     .iter()
                     .all(|handle| handle.ack().transport == CommandTransport::WebSocket)
             );
+            let lifecycle = timeout(Duration::from_secs(1), cancel_handles[0].next_lifecycle())
+                .await
+                .expect("pre-subscribed cancel handle should not miss its lifecycle ack")?;
+            assert!(matches!(lifecycle, CommandLifecycleEvent::Ack(_)));
         }
 
         Ok(())

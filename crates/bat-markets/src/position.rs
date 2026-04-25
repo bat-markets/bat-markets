@@ -25,14 +25,26 @@ impl<'a> PositionClient<'a> {
         runtime::refresh_positions(&self.inner.live_context()).await
     }
 
+    #[deprecated(
+        since = "0.2.0",
+        note = "use entry().set_leverage(...) for command handles and lifecycle tracking"
+    )]
     pub async fn set_leverage(&self, request: &SetLeverageRequest) -> Result<CommandReceipt> {
         runtime::set_leverage(&self.inner.live_context(), request).await
     }
 
+    #[deprecated(
+        since = "0.2.0",
+        note = "use entry().set_margin_mode(...) for command handles and lifecycle tracking"
+    )]
     pub async fn set_margin_mode(&self, request: &SetMarginModeRequest) -> Result<CommandReceipt> {
         runtime::set_margin_mode(&self.inner.live_context(), request).await
     }
 
+    #[deprecated(
+        since = "0.2.0",
+        note = "use entry().set_position_mode(...) for command handles and lifecycle tracking"
+    )]
     pub async fn set_position_mode(
         &self,
         request: &SetPositionModeRequest,

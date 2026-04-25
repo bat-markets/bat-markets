@@ -70,7 +70,7 @@ async fn binance_demo_create_cancel_stress_is_stable() -> Result<()> {
 
         let create_started = Instant::now();
         let create = client
-            .trade()
+            .entry()
             .create_order(&CreateOrderRequest {
                 request_id: None,
                 instrument_id: spec.instrument_id.clone(),
@@ -88,10 +88,19 @@ async fn binance_demo_create_cancel_stress_is_stable() -> Result<()> {
             .await;
         create_latencies.push(create_started.elapsed());
 
-        let create = match create {
-            Ok(create) => create,
+        let mut create_handle = match create {
+            Ok(create_handle) => create_handle,
             Err(error) => {
                 failures.push(format!("iteration {iteration}: create failed: {error}"));
+                continue;
+            }
+        };
+        let create = match create_handle.receipt().await {
+            Ok(receipt) => receipt,
+            Err(error) => {
+                failures.push(format!(
+                    "iteration {iteration}: create receipt failed: {error}"
+                ));
                 continue;
             }
         };
@@ -123,7 +132,7 @@ async fn binance_demo_create_cancel_stress_is_stable() -> Result<()> {
 
         let cancel_started = Instant::now();
         let cancel = client
-            .trade()
+            .entry()
             .cancel_order(&CancelOrderRequest {
                 request_id: None,
                 instrument_id: spec.instrument_id.clone(),
@@ -133,8 +142,18 @@ async fn binance_demo_create_cancel_stress_is_stable() -> Result<()> {
             .await;
         cancel_latencies.push(cancel_started.elapsed());
 
-        if let Err(error) = cancel {
-            failures.push(format!("iteration {iteration}: cancel failed: {error}"));
+        let mut cancel_handle = match cancel {
+            Ok(cancel_handle) => cancel_handle,
+            Err(error) => {
+                failures.push(format!("iteration {iteration}: cancel failed: {error}"));
+                continue;
+            }
+        };
+
+        if let Err(error) = cancel_handle.receipt().await {
+            failures.push(format!(
+                "iteration {iteration}: cancel receipt failed: {error}"
+            ));
             continue;
         }
 

@@ -2,12 +2,16 @@
 name = "bat-markets-core"
 version.workspace = true
 edition.workspace = true
+authors.workspace = true
 license.workspace = true
 homepage.workspace = true
 repository.workspace = true
 rust-version.workspace = true
-publish = false
-description = "Internal contracts and state engine for bat-markets"
+description = "Core domain contracts and in-memory state engine for bat-markets"
+documentation = "https://docs.rs/bat-markets-core"
+readme = "../../README.md"
+keywords = ["exchange", "futures", "trading", "state", "decimal"]
+categories = ["api-bindings", "finance", "asynchronous"]
 
 [dependencies]
 hex.workspace = true

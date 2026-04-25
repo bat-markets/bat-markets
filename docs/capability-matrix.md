@@ -44,18 +44,18 @@ This matrix documents the current `0.1.x` futures-first surface after live trans
 | open orders refresh | yes | yes | REST snapshot-backed |
 | execution history refresh | yes | yes | exposed through `trade().refresh_executions(...)` |
 | get order | yes | yes | REST-backed unified order snapshot |
-| create order | yes | yes | `trade()` compatibility surface returns receipts; `entry()` returns low-latency handles |
+| create order | yes | yes | `entry()` returns low-latency handles; deprecated `trade()` compatibility returns receipts |
 | create orders | yes | yes | batch create through `entry().create_orders(...)` |
 | amend order | yes | yes | `entry().amend_order(...)` |
 | amend orders | yes | yes | `entry().amend_orders(...)` |
-| cancel order | yes | yes | `trade()` compatibility surface returns receipts; `entry()` returns low-latency handles |
+| cancel order | yes | yes | `entry()` returns low-latency handles; deprecated `trade()` compatibility returns receipts |
 | cancel orders | yes | yes | batch cancel through `entry().cancel_orders(...)` |
 | cancel all orders | yes | yes | `entry().cancel_all_orders(...)` |
 | close position | yes | yes | `entry().close_position(...)` |
 | validate order | yes | yes | `entry().validate_order(...)` |
-| set leverage | yes | yes | venue-native REST flows |
-| set margin mode | yes | yes | Binance symbol-level, Bybit account-level |
-| set position mode | yes | yes | `entry().set_position_mode(...)` and compatibility path through `position()` |
+| set leverage | yes | yes | `entry().set_leverage(...)`; venue-native REST flow |
+| set margin mode | yes | yes | `entry().set_margin_mode(...)`; Binance symbol-level, Bybit account-level |
+| set position mode | yes | yes | `entry().set_position_mode(...)`; deprecated compatibility path through `position()` |
 | command lifecycle bus | yes | yes | `entry().subscribe()` and `PendingCommandHandle::next_lifecycle()` |
 | periodic reconcile / metadata maintenance | yes | yes | live stream runners perform background health checks and periodic repair/metadata refresh |
 | reconcile after reconnect / unknown execution | foundation+ | foundation+ | snapshots plus order/execution history are used where venue allows it; unresolved outcomes stay explicit |
