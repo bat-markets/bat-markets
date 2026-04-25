@@ -615,14 +615,14 @@ impl BybitLinearFuturesAdapter {
                         ErrorKind::DecodeError,
                         format!(
                             "failed to derive bybit kline close time for interval '{}'",
-                            interval.as_interval_str()
+                            Box::<str>::from(interval)
                         ),
                     )
                     .with_venue(Venue::Bybit, Product::LinearUsdt)
                 })?;
                 Ok(Kline {
                     instrument_id: spec.instrument_id.clone(),
-                    interval: interval.as_interval_str().into(),
+                    interval: Box::<str>::from(interval),
                     open: spec.price_from_fast(
                         Price::new(parse_decimal(&row[1])?).quantize(spec.price_scale)?,
                     ),

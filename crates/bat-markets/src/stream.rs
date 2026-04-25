@@ -225,7 +225,7 @@ impl<'a> OhlcvUpdates<'a> {
                     )
                 })?;
             let mut unified = kline.to_unified(&spec);
-            unified.interval = requested_interval.as_interval_str().into();
+            unified.interval = Box::<str>::from(requested_interval);
             return Ok(unified);
         }
     }
