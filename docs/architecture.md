@@ -31,8 +31,10 @@ The public facade must stay:
 - typed,
 - honest about exchange differences.
 
-Unified APIs exist only where semantics are actually stable.
-Venue-specific behavior stays in `native()`.
+Unified APIs exist only where semantics are actually stable. The primary user
+surface follows the CCXT-style root API: `fetch_*` for REST reads, `watch_*` for
+live websocket reads, command verbs for writes, and `advanced()` for low-level
+escape hatches. Venue-specific behavior stays in `advanced().native()`.
 
 ## Public Facade Ownership
 
@@ -41,30 +43,25 @@ boundary should be reconsidered before it is added.
 
 | Surface | Responsibility | Avoid putting here |
 | --- | --- | --- |
-| `BatMarkets` | construct and route one venue/product engine instance | venue-specific protocol details |
-| `market()` | cached market snapshots and public REST reads | account state or command writes |
-| `stream().public()` | public feed ingest, local subscriptions, and shared live watchers | synchronous REST fetches |
-| `stream().private()` | private feed ingest, account-stream watchers, and manual reconcile | order-entry submission |
-| `stream().command()` | command-bus observation and low-level command classification | user-facing write orchestration |
-| `entry()` | low-latency write commands with lifecycle handles | read-side order history |
-| `trade()` | read-side order and execution snapshots/refreshes | new write APIs |
-| `position()` | position snapshots and compatibility settings methods | market data |
-| `account()` | balances and account summary | order lifecycle tracking |
-| `health()` | cheap health snapshots and health-change subscriptions | metrics aggregation |
-| `diagnostics()` | local runtime and lock latency snapshots | external telemetry exporters |
-| `native()` | explicit venue-specific escape hatch | fake unified guarantees |
+| `BatMarkets` root methods | metadata, public/private REST, public/private WS, commands, and status | raw payload classification or adapter-specific protocol details |
+| `advanced()` | raw lane ingest/subscriptions, command classification, manual reconcile, diagnostics, and native adapter access | common user workflows that fit root `fetch_*`, `watch_*`, or command methods |
+| compatibility clients (`market()`, `stream()`, `entry()`, `trade()`, `position()`, `account()`, `health()`, `diagnostics()`, `native()`) | transitional and internal-lane-oriented access | primary documentation or new high-level examples |
 
 ## Method Contract Rules
 
 - `build()` is offline/static and must not perform network I/O.
 - `build_live().await` performs live bootstrap before returning the facade.
-- Snapshot getters are synchronous reads from cached `EngineState`.
-- `fetch_*` is reserved for public REST reads that do not imply account state repair.
-- `refresh_*` is reserved for REST reads that merge results into engine state.
-- `subscribe_*` attaches to an existing local event bus.
-- `watch_*` acquires a shared websocket-hub lease and returns typed updates.
-- `entry().*` owns new write flows; read-side compatibility write methods should
-  remain deprecated until they are removed in a breaking release.
+- `markets()` is a synchronous cached metadata read.
+- `load_markets().await` refreshes live metadata through REST.
+- Root `fetch_*` methods are REST reads; private `fetch_*` methods may merge
+  repairable snapshots into state.
+- Root `watch_*` methods acquire shared websocket-hub leases and return typed
+  RAII handles.
+- Root command methods return lifecycle-aware `PendingCommandHandle` values.
+- Explicit `*_ws` command variants must force websocket transport and return
+  `Unsupported` rather than silently falling back to REST.
+- `advanced().subscribe_*_events` attaches to an existing local event bus.
+- `advanced().native()` is the only documented venue-specific escape hatch.
 
 ## Three API Layers
 
@@ -182,14 +179,15 @@ The runtime publishes lane events before higher-level projections are queried by
 
 ### Command Plane
 
-The read-side `trade()` API is intentionally separated from the low-latency `entry()` API.
+The root command API is intentionally separated from read-side `fetch_*` methods.
 
-- `entry()` returns fast acknowledgements through `PendingCommandHandle`
+- root command methods return fast acknowledgements through `PendingCommandHandle`
 - command lifecycle events are broadcast through the shared command lane
 - websocket order entry is used where the venue supports and the runtime validates it
 - REST remains the fallback path for venue-specific gaps and for settings/validation flows that are still REST-native
+- explicit `*_ws` command methods disable REST fallback
 - uncertain outcomes stay explicit and schedule reconcile in the background rather than blocking the hot path
-- compatibility write methods on `trade()` / `position()` are deprecated; new integrations should route all order-entry and account-setting commands through `entry()`
+- compatibility write methods on nested clients are deprecated or transitional; new integrations should route order-entry and account-setting commands through root methods
 - manual `spawn_live()` runners are low-level escape hatches; normal application code should use `watch_*` leases so shared hub subscriptions are preserved and accidental duplicate sockets are avoided
 
 ### Metadata Bootstrap

@@ -63,9 +63,10 @@ pub use reconcile::{
 pub use state::EngineState;
 pub use trade::{
     AmendOrderRequest, AmendOrdersRequest, CancelAllOrdersRequest, CancelOrderRequest,
-    CancelOrdersRequest, ClosePositionRequest, CreateOrderRequest, CreateOrdersRequest, Execution,
-    GetOrderRequest, Liquidity, ListExecutionsRequest, ListOpenOrdersRequest, Order, OrderTarget,
-    SetLeverageRequest, SetMarginModeRequest, SetPositionModeRequest, ValidateOrderRequest,
+    CancelOrdersRequest, ClosePositionRequest, CreateOrderRequest, CreateOrdersRequest,
+    EditOrderRequest, EditOrdersRequest, Execution, GetOrderRequest, Liquidity,
+    ListExecutionsRequest, ListOpenOrdersRequest, Order, OrderTarget, SetLeverageRequest,
+    SetMarginModeRequest, SetPositionModeRequest, ValidateOrderRequest,
 };
 pub use types::{
     AggressorSide, MarginMode, MarketType, OrderStatus, OrderType, PositionDirection, PositionMode,

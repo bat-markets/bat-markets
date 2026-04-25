@@ -3,9 +3,9 @@ use std::{env, time::Duration};
 use tokio::time::{sleep, timeout};
 
 use bat_markets::{
-    BatMarketsBuilder, PublicSubscription, WatchInstrumentsRequest,
+    BatMarketsBuilder, PublicSubscription,
     errors::Result,
-    types::{FetchTradesRequest, InstrumentId, Venue},
+    types::{InstrumentId, Venue},
 };
 use bat_markets_core::{ErrorKind, MarketError, VenueAdapter};
 use bat_markets_testing::{
@@ -24,7 +24,15 @@ async fn binance_mainnet_read_flows_are_manual_and_read_only() -> Result<()> {
         .build_live()
         .await?;
 
-    assert!(!client.native().binance()?.config().endpoints.sandbox);
+    assert!(
+        !client
+            .advanced()
+            .native()
+            .binance()?
+            .config()
+            .endpoints
+            .sandbox
+    );
     let instrument = preferred_mainnet_instrument(&client);
     let public = client
         .stream()
@@ -49,33 +57,24 @@ async fn binance_mainnet_read_flows_are_manual_and_read_only() -> Result<()> {
     public.shutdown().await?;
     private.shutdown().await?;
 
-    let ticker = client.market().fetch_ticker(&instrument).await?;
-    let trades = client
-        .market()
-        .fetch_trades(&FetchTradesRequest::new(instrument.clone(), Some(10)))
-        .await?;
+    let ticker = client.fetch_ticker(&instrument).await?;
+    let trades = client.fetch_trades(&instrument, Some(10)).await?;
     let book_top = client.market().fetch_book_top(&instrument).await?;
-    let _ = client.market().refresh_open_interest(&instrument).await?;
-    let _ = client.account().refresh().await?;
-    let _ = client.position().refresh().await?;
-    let _ = client.trade().refresh_open_orders(None).await?;
-    let _ = client.trade().refresh_executions(None).await?;
-    let _ = client.stream().private().reconcile().await?;
+    let _ = client.fetch_open_interest(&instrument).await?;
+    let _ = client.fetch_balance().await?;
+    let _ = client.fetch_positions().await?;
+    let _ = client.fetch_open_orders(None).await?;
+    let _ = client.fetch_my_trades(None).await?;
+    let _ = client.advanced().reconcile().await?;
 
-    let mut ticker_watch = client
-        .stream()
-        .public()
-        .watch_ticker(WatchInstrumentsRequest::for_instrument(instrument.clone()))
-        .await?;
-    let mut trades_watch = client
-        .stream()
-        .public()
-        .watch_trades(WatchInstrumentsRequest::for_instrument(instrument.clone()))
-        .await?;
+    let mut ticker_watch = client.watch_ticker(instrument.clone()).await?;
+    let mut trades_watch = client.watch_trades(instrument.clone()).await?;
     let mut book_top_watch = client
         .stream()
         .public()
-        .watch_book_top(WatchInstrumentsRequest::for_instrument(instrument.clone()))
+        .watch_book_top(bat_markets::WatchInstrumentsRequest::for_instrument(
+            instrument.clone(),
+        ))
         .await?;
     let _ = await_live_update("ticker", ticker_watch.recv()).await?;
     let _ = await_live_update("trade", trades_watch.recv()).await?;
@@ -104,7 +103,15 @@ async fn bybit_mainnet_read_flows_are_manual_and_read_only() -> Result<()> {
         .build_live()
         .await?;
 
-    assert!(!client.native().bybit()?.config().endpoints.sandbox);
+    assert!(
+        !client
+            .advanced()
+            .native()
+            .bybit()?
+            .config()
+            .endpoints
+            .sandbox
+    );
     let instrument = preferred_mainnet_instrument(&client);
     let public = client
         .stream()
@@ -129,33 +136,24 @@ async fn bybit_mainnet_read_flows_are_manual_and_read_only() -> Result<()> {
     public.shutdown().await?;
     private.shutdown().await?;
 
-    let ticker = client.market().fetch_ticker(&instrument).await?;
-    let trades = client
-        .market()
-        .fetch_trades(&FetchTradesRequest::new(instrument.clone(), Some(10)))
-        .await?;
+    let ticker = client.fetch_ticker(&instrument).await?;
+    let trades = client.fetch_trades(&instrument, Some(10)).await?;
     let book_top = client.market().fetch_book_top(&instrument).await?;
-    let _ = client.market().refresh_open_interest(&instrument).await?;
-    let _ = client.account().refresh().await?;
-    let _ = client.position().refresh().await?;
-    let _ = client.trade().refresh_open_orders(None).await?;
-    let _ = client.trade().refresh_executions(None).await?;
-    let _ = client.stream().private().reconcile().await?;
+    let _ = client.fetch_open_interest(&instrument).await?;
+    let _ = client.fetch_balance().await?;
+    let _ = client.fetch_positions().await?;
+    let _ = client.fetch_open_orders(None).await?;
+    let _ = client.fetch_my_trades(None).await?;
+    let _ = client.advanced().reconcile().await?;
 
-    let mut ticker_watch = client
-        .stream()
-        .public()
-        .watch_ticker(WatchInstrumentsRequest::for_instrument(instrument.clone()))
-        .await?;
-    let mut trades_watch = client
-        .stream()
-        .public()
-        .watch_trades(WatchInstrumentsRequest::for_instrument(instrument.clone()))
-        .await?;
+    let mut ticker_watch = client.watch_ticker(instrument.clone()).await?;
+    let mut trades_watch = client.watch_trades(instrument.clone()).await?;
     let mut book_top_watch = client
         .stream()
         .public()
-        .watch_book_top(WatchInstrumentsRequest::for_instrument(instrument.clone()))
+        .watch_book_top(bat_markets::WatchInstrumentsRequest::for_instrument(
+            instrument.clone(),
+        ))
         .await?;
     let _ = await_live_update("ticker", ticker_watch.recv()).await?;
     let _ = await_live_update("trade", trades_watch.recv()).await?;
@@ -175,7 +173,7 @@ async fn bybit_mainnet_read_flows_are_manual_and_read_only() -> Result<()> {
 fn preferred_mainnet_instrument(client: &bat_markets::BatMarkets) -> InstrumentId {
     const PREFERRED: &[&str] = &["BTC/USDT:USDT", "ETH/USDT:USDT", "SOL/USDT:USDT"];
 
-    let specs = client.market().instrument_specs();
+    let specs = client.markets();
     for symbol in PREFERRED {
         if let Some(spec) = specs
             .iter()

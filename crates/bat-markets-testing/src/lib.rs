@@ -915,10 +915,10 @@ mod tests {
     use tokio::sync::broadcast::error::TryRecvError;
     use tokio::time::{Duration, timeout};
 
-    use bat_markets::types::CommandLifecycleEvent;
+    use bat_markets::types::{CancelAllOrdersRequest, CommandLifecycleEvent};
     use bat_markets::{BatMarkets, errors::Result};
     use bat_markets_core::{
-        CommandOperation, CommandStatus, CommandTransport, HealthStatus, OrderStatus,
+        CommandOperation, CommandStatus, CommandTransport, ErrorKind, HealthStatus, OrderStatus,
     };
 
     use super::{
@@ -943,7 +943,7 @@ mod tests {
         assert_eq!(client.position().list().len(), 1);
         assert_eq!(client.trade().open_orders().len(), 1);
         assert_eq!(client.trade().executions().len(), 1);
-        assert_eq!(client.health().snapshot().status, HealthStatus::Healthy);
+        assert_eq!(client.status().status, HealthStatus::Healthy);
 
         Ok(())
     }
@@ -966,7 +966,7 @@ mod tests {
         assert_eq!(client.position().list().len(), 1);
         assert_eq!(client.trade().open_orders().len(), 1);
         assert_eq!(client.trade().executions().len(), 1);
-        assert_eq!(client.health().snapshot().status, HealthStatus::Healthy);
+        assert_eq!(client.status().status, HealthStatus::Healthy);
 
         Ok(())
     }
@@ -994,15 +994,11 @@ mod tests {
         let client = build_binance();
         let receipt =
             client
-                .stream()
-                .command()
-                .classify_json(CommandOperation::CreateOrder, None, None)?;
+                .advanced()
+                .classify_command_json(CommandOperation::CreateOrder, None, None)?;
 
         assert_eq!(receipt.status, CommandStatus::UnknownExecution);
-        assert_eq!(
-            client.health().snapshot().status,
-            HealthStatus::CommandUncertain
-        );
+        assert_eq!(client.status().status, HealthStatus::CommandUncertain);
 
         Ok(())
     }
@@ -1010,7 +1006,7 @@ mod tests {
     #[test]
     fn reject_paths_stay_explicit() -> Result<()> {
         let binance = build_binance();
-        let receipt = binance.stream().command().classify_json(
+        let receipt = binance.advanced().classify_command_json(
             CommandOperation::CreateOrder,
             Some(binance::COMMAND_REJECT),
             None,
@@ -1019,7 +1015,7 @@ mod tests {
         assert_eq!(receipt.native_code.as_deref(), Some("-2019"));
 
         let bybit = build_bybit();
-        let receipt = bybit.stream().command().classify_json(
+        let receipt = bybit.advanced().classify_command_json(
             CommandOperation::CreateOrder,
             Some(bybit::COMMAND_REJECT),
             None,
@@ -1033,9 +1029,12 @@ mod tests {
     #[test]
     fn duplicate_private_execution_is_idempotent() -> Result<()> {
         let client = build_binance();
-        let stream = client.stream();
-        stream.private().ingest_json(binance::PRIVATE_ORDER)?;
-        stream.private().ingest_json(binance::PRIVATE_ORDER)?;
+        client
+            .advanced()
+            .ingest_private_json(binance::PRIVATE_ORDER)?;
+        client
+            .advanced()
+            .ingest_private_json(binance::PRIVATE_ORDER)?;
 
         assert_eq!(client.trade().executions().len(), 1);
         assert_eq!(client.trade().orders().len(), 1);
@@ -1047,9 +1046,8 @@ mod tests {
     fn duplicate_public_trade_is_coalesced() -> Result<()> {
         let client = build_bybit();
         let instrument = bat_markets::types::InstrumentId::from("BTC/USDT:USDT");
-        let stream = client.stream();
-        stream.public().ingest_json(bybit::PUBLIC_TRADE)?;
-        stream.public().ingest_json(bybit::PUBLIC_TRADE)?;
+        client.advanced().ingest_public_json(bybit::PUBLIC_TRADE)?;
+        client.advanced().ingest_public_json(bybit::PUBLIC_TRADE)?;
 
         let trades = client
             .market()
@@ -1065,21 +1063,16 @@ mod tests {
         let client = build_binance();
         let receipt =
             client
-                .stream()
-                .command()
-                .classify_json(CommandOperation::CreateOrder, None, None)?;
+                .advanced()
+                .classify_command_json(CommandOperation::CreateOrder, None, None)?;
         assert_eq!(receipt.status, CommandStatus::UnknownExecution);
 
         client
-            .stream()
-            .private()
-            .ingest_json(binance::PRIVATE_ORDER)?;
+            .advanced()
+            .ingest_private_json(binance::PRIVATE_ORDER)?;
 
         assert_eq!(client.trade().executions().len(), 1);
-        assert_eq!(
-            client.health().snapshot().status,
-            HealthStatus::CommandUncertain
-        );
+        assert_eq!(client.status().status, HealthStatus::CommandUncertain);
 
         Ok(())
     }
@@ -1088,9 +1081,8 @@ mod tests {
     fn liquidation_fixtures_fill_recent_market_cache() -> Result<()> {
         let binance = build_binance();
         binance
-            .stream()
-            .public()
-            .ingest_json(binance::PUBLIC_LIQUIDATION)?;
+            .advanced()
+            .ingest_public_json(binance::PUBLIC_LIQUIDATION)?;
         let liquidations = binance
             .market()
             .liquidations(&bat_markets::types::InstrumentId::from("BTC/USDT:USDT"))
@@ -1099,9 +1091,8 @@ mod tests {
 
         let bybit = build_bybit();
         bybit
-            .stream()
-            .public()
-            .ingest_json(bybit::PUBLIC_LIQUIDATION)?;
+            .advanced()
+            .ingest_public_json(bybit::PUBLIC_LIQUIDATION)?;
         let liquidations = bybit
             .market()
             .liquidations(&bat_markets::types::InstrumentId::from("BTC/USDT:USDT"))
@@ -1114,7 +1105,7 @@ mod tests {
     #[test]
     fn amend_command_classification_is_supported_on_both_venues() -> Result<()> {
         let binance = build_binance();
-        let receipt = binance.stream().command().classify_json(
+        let receipt = binance.advanced().classify_command_json(
             CommandOperation::AmendOrder,
             Some(binance::COMMAND_AMEND_OK),
             None,
@@ -1122,7 +1113,7 @@ mod tests {
         assert_eq!(receipt.status, CommandStatus::Accepted);
 
         let bybit = build_bybit();
-        let receipt = bybit.stream().command().classify_json(
+        let receipt = bybit.advanced().classify_command_json(
             CommandOperation::AmendOrder,
             Some(bybit::COMMAND_AMEND_OK),
             None,
@@ -1135,17 +1126,17 @@ mod tests {
     #[test]
     fn batch_command_surface_is_supported_on_both_venues() -> Result<()> {
         let binance = build_binance();
-        let create = binance.stream().command().classify_json(
+        let create = binance.advanced().classify_command_json(
             CommandOperation::CreateOrders,
             Some(binance::COMMAND_BATCH_CREATE_OK),
             None,
         )?;
-        let amend = binance.stream().command().classify_json(
+        let amend = binance.advanced().classify_command_json(
             CommandOperation::AmendOrders,
             Some(binance::COMMAND_BATCH_AMEND_OK),
             None,
         )?;
-        let cancel = binance.stream().command().classify_json(
+        let cancel = binance.advanced().classify_command_json(
             CommandOperation::CancelOrders,
             Some(binance::COMMAND_BATCH_CANCEL_OK),
             None,
@@ -1155,17 +1146,17 @@ mod tests {
         assert_eq!(cancel.status, CommandStatus::Accepted);
 
         let bybit = build_bybit();
-        let create = bybit.stream().command().classify_json(
+        let create = bybit.advanced().classify_command_json(
             CommandOperation::CreateOrders,
             Some(bybit::COMMAND_BATCH_CREATE_OK),
             None,
         )?;
-        let amend = bybit.stream().command().classify_json(
+        let amend = bybit.advanced().classify_command_json(
             CommandOperation::AmendOrders,
             Some(bybit::COMMAND_BATCH_AMEND_OK),
             None,
         )?;
-        let cancel = bybit.stream().command().classify_json(
+        let cancel = bybit.advanced().classify_command_json(
             CommandOperation::CancelOrders,
             Some(bybit::COMMAND_BATCH_CANCEL_OK),
             None,
@@ -1181,9 +1172,9 @@ mod tests {
     fn health_notifications_emit_only_for_structural_changes() -> Result<()> {
         let client = build_binance();
         let mut notifications = client.health().notifications();
-        let stream = client.stream();
-
-        stream.public().ingest_json(binance::PUBLIC_TICKER)?;
+        client
+            .advanced()
+            .ingest_public_json(binance::PUBLIC_TICKER)?;
         let first = notifications
             .try_recv()
             .expect("first public transition should emit a health notification");
@@ -1191,7 +1182,9 @@ mod tests {
         assert_eq!(first.current.status, HealthStatus::Healthy);
         assert!(first.current.ws_public_ok);
 
-        stream.public().ingest_json(binance::PUBLIC_BOOK_TICKER)?;
+        client
+            .advanced()
+            .ingest_public_json(binance::PUBLIC_BOOK_TICKER)?;
         assert!(matches!(notifications.try_recv(), Err(TryRecvError::Empty)));
 
         Ok(())
@@ -1200,14 +1193,15 @@ mod tests {
     #[test]
     fn late_fill_after_cancel_stays_explicit() -> Result<()> {
         let client = build_bybit();
-        let stream = client.stream();
-        stream.private().ingest_json(bybit::PRIVATE_ORDER)?;
-        stream
-            .private()
-            .ingest_json(bybit::PRIVATE_ORDER_CANCELED)?;
-        stream
-            .private()
-            .ingest_json(bybit::PRIVATE_EXECUTION_LATE_AFTER_CANCEL)?;
+        client
+            .advanced()
+            .ingest_private_json(bybit::PRIVATE_ORDER)?;
+        client
+            .advanced()
+            .ingest_private_json(bybit::PRIVATE_ORDER_CANCELED)?;
+        client
+            .advanced()
+            .ingest_private_json(bybit::PRIVATE_EXECUTION_LATE_AFTER_CANCEL)?;
 
         let orders = client.trade().orders();
         assert_eq!(orders.len(), 1);
@@ -1238,7 +1232,7 @@ mod tests {
                 .into_iter()
                 .enumerate()
             {
-                let mut handle = client.entry().validate_order(&request).await?;
+                let mut handle = client.validate_order(&request).await?;
                 assert_eq!(handle.ack().receipt.status, CommandStatus::Accepted);
                 if index == 0 {
                     let lifecycle = timeout(Duration::from_secs(1), handle.next_lifecycle())
@@ -1251,7 +1245,6 @@ mod tests {
             }
 
             let mut create_handles = client
-                .entry()
                 .create_orders(&runtime_stub_batch_create_request(venue))
                 .await?;
             assert_eq!(create_handles.len(), 2);
@@ -1270,8 +1263,17 @@ mod tests {
                 .expect("pre-subscribed command handle should not miss its lifecycle ack")?;
             assert!(matches!(lifecycle, CommandLifecycleEvent::Ack(_)));
 
+            let ws_create_handles = client
+                .create_orders_ws(&runtime_stub_batch_create_request(venue))
+                .await?;
+            assert_eq!(ws_create_handles.len(), 2);
+            assert!(
+                ws_create_handles
+                    .iter()
+                    .all(|handle| handle.ack().transport == CommandTransport::WebSocket)
+            );
+
             let mut cancel_handles = client
-                .entry()
                 .cancel_orders(&runtime_stub_batch_cancel_request(venue))
                 .await?;
             assert_eq!(cancel_handles.len(), 2);
@@ -1289,22 +1291,50 @@ mod tests {
                 .await
                 .expect("pre-subscribed cancel handle should not miss its lifecycle ack")?;
             assert!(matches!(lifecycle, CommandLifecycleEvent::Ack(_)));
+
+            let ws_cancel_handles = client
+                .cancel_orders_ws(&runtime_stub_batch_cancel_request(venue))
+                .await?;
+            assert_eq!(ws_cancel_handles.len(), 2);
+            assert!(
+                ws_cancel_handles
+                    .iter()
+                    .all(|handle| handle.ack().transport == CommandTransport::WebSocket)
+            );
         }
 
         Ok(())
     }
 
+    #[tokio::test]
+    async fn websocket_only_cancel_all_returns_unsupported_without_rest_fallback() -> Result<()> {
+        let client = build_binance();
+        let error = match client
+            .cancel_all_orders_ws(&CancelAllOrdersRequest {
+                request_id: None,
+                instrument_id: None,
+            })
+            .await
+        {
+            Ok(_) => panic!("cancel_all_orders_ws should not fall back to REST"),
+            Err(error) => error,
+        };
+
+        assert_eq!(error.kind, ErrorKind::Unsupported);
+        Ok(())
+    }
+
     fn ingest_binance(client: &BatMarkets) -> Result<()> {
-        let stream = client.stream();
-        stream.public().ingest_json(binance::PUBLIC_TICKER)?;
-        stream.public().ingest_json(binance::PUBLIC_TRADE)?;
-        stream.public().ingest_json(binance::PUBLIC_BOOK_TICKER)?;
-        stream.public().ingest_json(binance::PUBLIC_MARK_PRICE)?;
-        stream.public().ingest_json(binance::PUBLIC_KLINE)?;
-        stream.public().ingest_json(binance::OPEN_INTEREST)?;
-        stream.private().ingest_json(binance::PRIVATE_ACCOUNT)?;
-        stream.private().ingest_json(binance::PRIVATE_ORDER)?;
-        let receipt = stream.command().classify_json(
+        let advanced = client.advanced();
+        advanced.ingest_public_json(binance::PUBLIC_TICKER)?;
+        advanced.ingest_public_json(binance::PUBLIC_TRADE)?;
+        advanced.ingest_public_json(binance::PUBLIC_BOOK_TICKER)?;
+        advanced.ingest_public_json(binance::PUBLIC_MARK_PRICE)?;
+        advanced.ingest_public_json(binance::PUBLIC_KLINE)?;
+        advanced.ingest_public_json(binance::OPEN_INTEREST)?;
+        advanced.ingest_private_json(binance::PRIVATE_ACCOUNT)?;
+        advanced.ingest_private_json(binance::PRIVATE_ORDER)?;
+        let receipt = advanced.classify_command_json(
             CommandOperation::CreateOrder,
             Some(binance::COMMAND_CREATE_OK),
             None,
@@ -1314,16 +1344,16 @@ mod tests {
     }
 
     fn ingest_bybit(client: &BatMarkets) -> Result<()> {
-        let stream = client.stream();
-        stream.public().ingest_json(bybit::PUBLIC_TICKER)?;
-        stream.public().ingest_json(bybit::PUBLIC_TRADE)?;
-        stream.public().ingest_json(bybit::PUBLIC_ORDERBOOK)?;
-        stream.public().ingest_json(bybit::PUBLIC_KLINE)?;
-        stream.private().ingest_json(bybit::PRIVATE_WALLET)?;
-        stream.private().ingest_json(bybit::PRIVATE_POSITION)?;
-        stream.private().ingest_json(bybit::PRIVATE_ORDER)?;
-        stream.private().ingest_json(bybit::PRIVATE_EXECUTION)?;
-        let receipt = stream.command().classify_json(
+        let advanced = client.advanced();
+        advanced.ingest_public_json(bybit::PUBLIC_TICKER)?;
+        advanced.ingest_public_json(bybit::PUBLIC_TRADE)?;
+        advanced.ingest_public_json(bybit::PUBLIC_ORDERBOOK)?;
+        advanced.ingest_public_json(bybit::PUBLIC_KLINE)?;
+        advanced.ingest_private_json(bybit::PRIVATE_WALLET)?;
+        advanced.ingest_private_json(bybit::PRIVATE_POSITION)?;
+        advanced.ingest_private_json(bybit::PRIVATE_ORDER)?;
+        advanced.ingest_private_json(bybit::PRIVATE_EXECUTION)?;
+        let receipt = advanced.classify_command_json(
             CommandOperation::CreateOrder,
             Some(bybit::COMMAND_CREATE_OK),
             None,

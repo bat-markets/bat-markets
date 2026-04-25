@@ -23,11 +23,11 @@ use url::form_urlencoded::Serializer;
 #[cfg(feature = "binance")]
 use bat_markets_core::OrderType;
 use bat_markets_core::{
-    AmendOrderRequest, AmendOrdersRequest, BookTop, CancelAllOrdersRequest, CancelOrderRequest,
-    CancelOrdersRequest, ClientOrderId, ClosePositionRequest, CommandAck, CommandLaneEvent,
-    CommandLifecycleEvent, CommandOperation, CommandReceipt, CommandStatus, CommandTransport,
-    CreateOrderRequest, CreateOrdersRequest, DegradedReason, ErrorKind, Execution,
-    FetchOhlcvRequest, FetchOrderBookRequest, FetchTickersRequest, FetchTradesRequest,
+    AccountSnapshot, AmendOrderRequest, AmendOrdersRequest, BookTop, CancelAllOrdersRequest,
+    CancelOrderRequest, CancelOrdersRequest, ClientOrderId, ClosePositionRequest, CommandAck,
+    CommandLaneEvent, CommandLifecycleEvent, CommandOperation, CommandReceipt, CommandStatus,
+    CommandTransport, CreateOrderRequest, CreateOrdersRequest, DegradedReason, ErrorKind,
+    Execution, FetchOhlcvRequest, FetchOrderBookRequest, FetchTickersRequest, FetchTradesRequest,
     GetOrderRequest, HealthReport, InstrumentId, InstrumentSpec, Kline, KlineInterval, Liquidation,
     ListExecutionsRequest, ListOpenOrdersRequest, MarginMode, MarkPrice, MarketError, OpenInterest,
     Order, OrderBookLevel, OrderBookSnapshot, OrderId, OrderTarget, Position, Price,
@@ -94,6 +94,18 @@ struct SequenceObservation {
 enum PrivateReconcileMode {
     SnapshotOnly,
     RecentHistoryRepair,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CommandTransportMode {
+    Auto,
+    WebSocketOnly,
+}
+
+impl CommandTransportMode {
+    fn is_websocket_only(self) -> bool {
+        matches!(self, Self::WebSocketOnly)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -244,6 +256,14 @@ fn record_runtime_latency(context: &LiveContext, operation: RuntimeOperation, st
         .observe(operation, started_at.elapsed());
 }
 
+fn unsupported_ws_command(context: &LiveContext, operation: &str) -> MarketError {
+    MarketError::new(
+        ErrorKind::Unsupported,
+        format!("{operation} requires websocket command transport for this venue/path"),
+    )
+    .with_venue(context.config.venue, context.config.product)
+}
+
 pub(crate) async fn bootstrap_live(context: &LiveContext) -> Result<()> {
     sync_server_time(context).await?;
     refresh_metadata(context).await?;
@@ -298,9 +318,7 @@ pub(crate) async fn refresh_metadata(context: &LiveContext) -> Result<Vec<Instru
     result
 }
 
-pub(crate) async fn refresh_account(
-    context: &LiveContext,
-) -> Result<Option<bat_markets_core::AccountSummary>> {
+pub(crate) async fn fetch_balance(context: &LiveContext) -> Result<AccountSnapshot> {
     let started_at = Instant::now();
     let result = async {
         let snapshot = match &context.adapter {
@@ -344,11 +362,17 @@ pub(crate) async fn refresh_account(
             }
         };
 
-        Ok(snapshot.summary)
+        Ok(snapshot)
     }
     .await;
     record_runtime_latency(context, RuntimeOperation::RefreshAccount, started_at);
     result
+}
+
+pub(crate) async fn refresh_account(
+    context: &LiveContext,
+) -> Result<Option<bat_markets_core::AccountSummary>> {
+    Ok(fetch_balance(context).await?.summary)
 }
 
 pub(crate) async fn refresh_positions(
@@ -639,6 +663,9 @@ pub(crate) async fn create_order(
         AdapterHandle::Binance(adapter) => {
             let spec = require_spec(context, &request.instrument_id)?;
             if binance_create_uses_algo_order_endpoint(request) {
+                if context.command_transport_mode.is_websocket_only() {
+                    return Err(unsupported_ws_command(context, "create_order_ws"));
+                }
                 let pairs =
                     build_binance_algo_create_pairs(&spec.native_symbol, request);
                 let pairs = pairs
@@ -733,7 +760,10 @@ pub(crate) async fn create_order(
                         )?,
                         CommandTransport::WebSocket,
                     ),
-                    Err(CommandWsRequestError::Unavailable(_)) => {
+                    Err(CommandWsRequestError::Unavailable(error)) => {
+                        if context.command_transport_mode.is_websocket_only() {
+                            return Err(error);
+                        }
                         let pairs = owned
                             .iter()
                             .map(|(key, value)| (key.as_str(), value.as_str()))
@@ -768,6 +798,9 @@ pub(crate) async fn create_order(
                     }
                 }
                 } else {
+                    if context.command_transport_mode.is_websocket_only() {
+                        return Err(unsupported_ws_command(context, "create_order_ws"));
+                    }
                     let pairs = owned
                         .iter()
                         .map(|(key, value)| (key.as_str(), value.as_str()))
@@ -843,7 +876,10 @@ pub(crate) async fn create_order(
                         )?,
                         CommandTransport::WebSocket,
                     ),
-                    Err(CommandWsRequestError::Unavailable(_)) => {
+                    Err(CommandWsRequestError::Unavailable(error)) => {
+                        if context.command_transport_mode.is_websocket_only() {
+                            return Err(error);
+                        }
                         let body = serde_json::to_string(&body_value).map_err(|error| {
                             MarketError::new(
                                 ErrorKind::ConfigError,
@@ -879,6 +915,9 @@ pub(crate) async fn create_order(
                     }
                 }
             } else {
+                if context.command_transport_mode.is_websocket_only() {
+                    return Err(unsupported_ws_command(context, "create_order_ws"));
+                }
                 let body = serde_json::to_string(&body_value).map_err(|error| {
                     MarketError::new(
                         ErrorKind::ConfigError,
@@ -971,6 +1010,9 @@ pub(crate) async fn create_orders(
                         }
                     }
                 } else {
+                    if context.command_transport_mode.is_websocket_only() {
+                        return Err(unsupported_ws_command(context, "create_orders_ws"));
+                    }
                     for chunk in request
                         .orders
                         .iter()
@@ -1133,7 +1175,10 @@ pub(crate) async fn create_orders(
                                         .collect(),
                                     CommandTransport::WebSocket,
                                 ),
-                                Err(CommandWsRequestError::Unavailable(_)) => {
+                                Err(CommandWsRequestError::Unavailable(error)) => {
+                                    if context.command_transport_mode.is_websocket_only() {
+                                        return Err(error);
+                                    }
                                     match bybit_signed_post_text(
                                         context,
                                         "/v5/order/create-batch",
@@ -1172,6 +1217,9 @@ pub(crate) async fn create_orders(
                                 }
                             }
                         } else {
+                            if context.command_transport_mode.is_websocket_only() {
+                                return Err(unsupported_ws_command(context, "create_orders_ws"));
+                            }
                             match bybit_signed_post_text(
                                 context,
                                 "/v5/order/create-batch",
@@ -1377,7 +1425,10 @@ pub(crate) async fn amend_order(
                             )?,
                             CommandTransport::WebSocket,
                         ),
-                        Err(CommandWsRequestError::Unavailable(_)) => {
+                        Err(CommandWsRequestError::Unavailable(error)) => {
+                            if context.command_transport_mode.is_websocket_only() {
+                                return Err(error);
+                            }
                             let pairs = owned
                                 .iter()
                                 .map(|(key, value)| (key.as_str(), value.as_str()))
@@ -1412,6 +1463,9 @@ pub(crate) async fn amend_order(
                         }
                     }
                 } else {
+                    if context.command_transport_mode.is_websocket_only() {
+                        return Err(unsupported_ws_command(context, "edit_order_ws"));
+                    }
                     let pairs = owned
                         .iter()
                         .map(|(key, value)| (key.as_str(), value.as_str()))
@@ -1492,7 +1546,10 @@ pub(crate) async fn amend_order(
                             )?,
                             CommandTransport::WebSocket,
                         ),
-                        Err(CommandWsRequestError::Unavailable(_)) => {
+                        Err(CommandWsRequestError::Unavailable(error)) => {
+                            if context.command_transport_mode.is_websocket_only() {
+                                return Err(error);
+                            }
                             let body = serde_json::to_string(&body).map_err(|error| {
                                 MarketError::new(
                                     ErrorKind::ConfigError,
@@ -1528,6 +1585,9 @@ pub(crate) async fn amend_order(
                         }
                     }
                 } else {
+                    if context.command_transport_mode.is_websocket_only() {
+                        return Err(unsupported_ws_command(context, "edit_order_ws"));
+                    }
                     let body = serde_json::to_string(&body).map_err(|error| {
                         MarketError::new(
                             ErrorKind::ConfigError,
@@ -1625,6 +1685,9 @@ pub(crate) async fn amend_orders(
                         }
                     }
                 } else {
+                    if context.command_transport_mode.is_websocket_only() {
+                        return Err(unsupported_ws_command(context, "edit_orders_ws"));
+                    }
                     for chunk in indexed.chunks(5) {
                         context.command_limiter.acquire().await;
                         let chunk_requests = chunk
@@ -1776,7 +1839,10 @@ pub(crate) async fn amend_orders(
                                         .collect(),
                                     CommandTransport::WebSocket,
                                 ),
-                                Err(CommandWsRequestError::Unavailable(_)) => {
+                                Err(CommandWsRequestError::Unavailable(error)) => {
+                                    if context.command_transport_mode.is_websocket_only() {
+                                        return Err(error);
+                                    }
                                     match bybit_signed_post_text(
                                         context,
                                         "/v5/order/amend-batch",
@@ -1815,6 +1881,9 @@ pub(crate) async fn amend_orders(
                                 }
                             }
                         } else {
+                            if context.command_transport_mode.is_websocket_only() {
+                                return Err(unsupported_ws_command(context, "edit_orders_ws"));
+                            }
                             match bybit_signed_post_text(
                                 context,
                                 "/v5/order/amend-batch",
@@ -1894,6 +1963,9 @@ pub(crate) async fn cancel_order(
             #[cfg(feature = "binance")]
             AdapterHandle::Binance(adapter) => {
                 if is_binance_algo_order_id(request.order_id.as_ref()) {
+                    if context.command_transport_mode.is_websocket_only() {
+                        return Err(unsupported_ws_command(context, "cancel_order_ws"));
+                    }
                     let pairs = binance_algo_identity_query(
                         request.order_id.as_ref(),
                         request.client_order_id.as_ref(),
@@ -1960,7 +2032,10 @@ pub(crate) async fn cancel_order(
                                 )?,
                                 CommandTransport::WebSocket,
                             ),
-                            Err(CommandWsRequestError::Unavailable(_)) => {
+                            Err(CommandWsRequestError::Unavailable(error)) => {
+                                if context.command_transport_mode.is_websocket_only() {
+                                    return Err(error);
+                                }
                                 let pairs = query
                                     .iter()
                                     .map(|(key, value)| (key.as_str(), value.as_str()))
@@ -1995,6 +2070,9 @@ pub(crate) async fn cancel_order(
                             }
                         }
                     } else {
+                        if context.command_transport_mode.is_websocket_only() {
+                            return Err(unsupported_ws_command(context, "cancel_order_ws"));
+                        }
                         let pairs = query
                             .iter()
                             .map(|(key, value)| (key.as_str(), value.as_str()))
@@ -2066,7 +2144,10 @@ pub(crate) async fn cancel_order(
                             )?,
                             CommandTransport::WebSocket,
                         ),
-                        Err(CommandWsRequestError::Unavailable(_)) => {
+                        Err(CommandWsRequestError::Unavailable(error)) => {
+                            if context.command_transport_mode.is_websocket_only() {
+                                return Err(error);
+                            }
                             let body = serde_json::to_string(&body).map_err(|error| {
                                 MarketError::new(
                                     ErrorKind::ConfigError,
@@ -2102,6 +2183,9 @@ pub(crate) async fn cancel_order(
                         }
                     }
                 } else {
+                    if context.command_transport_mode.is_websocket_only() {
+                        return Err(unsupported_ws_command(context, "cancel_order_ws"));
+                    }
                     let body = serde_json::to_string(&body).map_err(|error| {
                         MarketError::new(
                             ErrorKind::ConfigError,
@@ -2204,6 +2288,9 @@ pub(crate) async fn cancel_orders(
                         }
                     }
                 } else {
+                    if context.command_transport_mode.is_websocket_only() {
+                        return Err(unsupported_ws_command(context, "cancel_orders_ws"));
+                    }
                     let mut order_id_groups =
                         BTreeMap::<InstrumentId, Vec<(usize, &OrderTarget)>>::new();
                     let mut client_id_groups =
@@ -2400,7 +2487,10 @@ pub(crate) async fn cancel_orders(
                                     .collect(),
                                 CommandTransport::WebSocket,
                             ),
-                            Err(CommandWsRequestError::Unavailable(_)) => {
+                            Err(CommandWsRequestError::Unavailable(error)) => {
+                                if context.command_transport_mode.is_websocket_only() {
+                                    return Err(error);
+                                }
                                 match bybit_signed_post_text(
                                     context,
                                     "/v5/order/cancel-batch",
@@ -2439,6 +2529,9 @@ pub(crate) async fn cancel_orders(
                             }
                         }
                     } else {
+                        if context.command_transport_mode.is_websocket_only() {
+                            return Err(unsupported_ws_command(context, "cancel_orders_ws"));
+                        }
                         match bybit_signed_post_text(
                             context,
                             "/v5/order/cancel-batch",
@@ -2508,6 +2601,9 @@ pub(crate) async fn cancel_all_orders(
 ) -> Result<CommandReceipt> {
     let started_at = Instant::now();
     let result = async {
+        if context.command_transport_mode.is_websocket_only() {
+            return Err(unsupported_ws_command(context, "cancel_all_orders_ws"));
+        }
         context.command_limiter.acquire().await;
         let receipt = match (&context.adapter, &request.instrument_id) {
             #[cfg(feature = "binance")]

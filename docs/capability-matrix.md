@@ -1,6 +1,6 @@
 # Capability Matrix
 
-This matrix documents the current `0.1.x` futures-first surface after live transport integration and the WS-first command/runtime pass.
+This matrix documents the current `0.2.x` CCXT-style root surface after live transport integration and the WS-first command/runtime pass.
 
 ## Unified Surface
 
@@ -8,55 +8,54 @@ This matrix documents the current `0.1.x` futures-first surface after live trans
 | --- | --- | --- | --- |
 | metadata bootstrap | yes | yes | `build_live().await` refreshes `InstrumentSpec` from venue snapshots |
 | server time / clock skew | yes | yes | health snapshot stores the latest observed skew |
-| shared public websocket hub | yes | yes | exposed through `stream().public().watch_*()` and `subscribe_fast(...)` |
-| shared private websocket hub | yes | yes | exposed through `stream().private().watch_*()` |
+| shared public websocket hub | yes | yes | exposed through root `watch_*` methods |
+| shared private websocket hub | yes | yes | exposed through root private `watch_*` methods |
 | transport watermark / gap detection | foundation | foundation | native sequence or monotonic watermarks trip reconnect and divergence handling |
-| manual private reconcile | yes | yes | exposed through `stream().private().reconcile().await` |
-| health snapshot | yes | yes | cheap synchronous snapshot |
-| health subscriptions | yes | yes | watch + broadcast notifications on structural health transitions |
-| ticker fetch | yes | yes | REST-backed latest ticker snapshot via `market().fetch_ticker(...)` |
-| tickers fetch | yes | yes | batched latest ticker snapshots via `market().fetch_tickers(...)` |
-| mark price fetch | yes | yes | REST-backed mark price via `market().fetch_mark_price(...)` |
-| funding rate fetch | yes | yes | REST-backed funding rate via `market().fetch_funding_rate(...)` |
-| recent trades fetch | yes | yes | REST-backed recent public trades via `market().fetch_trades(...)` |
-| book top fetch | yes | yes | REST-backed best bid/ask snapshot via `market().fetch_book_top(...)` |
-| focused order book fetch | yes | yes | REST-backed depth snapshot via `market().fetch_order_book(...)` |
-| liquidation fetch | yes | yes | cache-backed via `market().fetch_liquidations(...)` after live liquidation flow warms the cache |
-| OHLCV fetch | yes | yes | REST-backed unified candles via `market().fetch_ohlcv(...)`; intervals use ccxt-style strings such as `1m`, `5m`, `1h`, `1d`, and each call can batch `1..=30` instruments |
-| OHLCV full-window fetch | yes | yes | `market().fetch_ohlcv(...)` fully paginates a bounded `start_time..end_time` range across the requested symbol batch; `fetch_ohlcv_window(...)` / `fetch_ohlcv_all(...)` remain compatibility aliases |
-| ticker watch | yes | yes | typed live ticker snapshots via `stream().public().watch_ticker(...)` |
-| fast multi-topic feed | yes | yes | compact shared-feed surface via `stream().public().subscribe_fast(...)` / `watch_fast(...)` |
-| trades watch | yes | yes | typed live trades via `stream().public().watch_trades(...)` |
-| book top watch | yes | yes | typed live best bid/ask via `stream().public().watch_book_top(...)` |
-| mark price watch | yes | yes | typed live mark price via `stream().public().watch_mark_prices(...)` |
-| funding rate watch | yes | yes | typed live funding-rate updates via `stream().public().watch_funding_rates(...)` |
-| open interest watch | yes | yes | typed live open-interest updates via `stream().public().watch_open_interest(...)` |
-| focused order book watch | yes | yes | typed focused-symbol depth via `stream().public().watch_order_book(...)` |
-| liquidations watch | yes | yes | typed liquidation flow via `stream().public().watch_liquidations(...)` |
-| OHLCV watch | yes | yes | typed live candles via `stream().public().watch_ohlcv(...)`; one or many symbols per watcher, same ccxt-style interval surface |
-| orders watch | yes | yes | typed private order updates via `stream().private().watch_orders()` |
-| executions watch | yes | yes | typed private execution updates via `stream().private().watch_executions()` |
-| positions watch | yes | yes | typed private position updates via `stream().private().watch_positions()` |
-| balances watch | yes | yes | typed private balance updates via `stream().private().watch_balances()` |
-| account watch | yes | yes | typed private account-summary updates via `stream().private().watch_account()` |
-| account refresh | yes | yes | REST snapshot-backed |
-| position refresh | yes | yes | REST snapshot-backed |
-| open orders refresh | yes | yes | REST snapshot-backed |
-| execution history refresh | yes | yes | exposed through `trade().refresh_executions(...)` |
-| get order | yes | yes | REST-backed unified order snapshot |
-| create order | yes | yes | `entry()` returns low-latency handles; deprecated `trade()` compatibility returns receipts |
-| create orders | yes | yes | batch create through `entry().create_orders(...)` |
-| amend order | yes | yes | `entry().amend_order(...)` |
-| amend orders | yes | yes | `entry().amend_orders(...)` |
-| cancel order | yes | yes | `entry()` returns low-latency handles; deprecated `trade()` compatibility returns receipts |
-| cancel orders | yes | yes | batch cancel through `entry().cancel_orders(...)` |
-| cancel all orders | yes | yes | `entry().cancel_all_orders(...)` |
-| close position | yes | yes | `entry().close_position(...)` |
-| validate order | yes | yes | `entry().validate_order(...)` |
-| set leverage | yes | yes | `entry().set_leverage(...)`; venue-native REST flow |
-| set margin mode | yes | yes | `entry().set_margin_mode(...)`; Binance symbol-level, Bybit account-level |
-| set position mode | yes | yes | `entry().set_position_mode(...)`; deprecated compatibility path through `position()` |
-| command lifecycle bus | yes | yes | `entry().subscribe()` and `PendingCommandHandle::next_lifecycle()` |
+| manual private reconcile | yes | yes | exposed through `advanced().reconcile().await` |
+| health snapshot | yes | yes | cheap synchronous `status()` snapshot |
+| health subscriptions | yes | yes | `watch_status()` plus advanced broadcast notifications |
+| ticker fetch | yes | yes | REST-backed latest ticker snapshot via `fetch_ticker(...)` |
+| tickers fetch | yes | yes | batched latest ticker snapshots via `fetch_tickers(...)` |
+| mark price fetch | yes | yes | REST-backed mark price via `fetch_mark_price(...)` |
+| funding rate fetch | yes | yes | REST-backed funding rate via `fetch_funding_rate(...)` |
+| recent trades fetch | yes | yes | REST-backed recent public trades via `fetch_trades(...)` |
+| book top fetch | yes | yes | compatibility REST-backed best bid/ask snapshot remains available on `market().fetch_book_top(...)` |
+| focused order book fetch | yes | yes | REST-backed depth snapshot via `fetch_order_book(...)` |
+| liquidation fetch | yes | yes | cache-backed via `fetch_liquidations(...)` after live liquidation flow warms the cache |
+| OHLCV fetch | yes | yes | REST-backed unified candles via `fetch_ohlcv(...)`; intervals use ccxt-style strings such as `1m`, `5m`, `1h`, `1d`, and each call can batch `1..=30` instruments |
+| OHLCV full-window fetch | yes | yes | `fetch_ohlcv(...)` fully paginates a bounded `start_time..end_time` range across the requested symbol batch |
+| ticker watch | yes | yes | typed live ticker snapshots via `watch_ticker(...)` / `watch_tickers(...)` |
+| fast multi-topic feed | yes | yes | advanced compact shared-feed surface remains available on `stream().public().subscribe_fast(...)` / `watch_fast(...)` |
+| trades watch | yes | yes | typed live trades via `watch_trades(...)` / `watch_trades_for_symbols(...)` |
+| mark price watch | yes | yes | typed live mark price via `watch_mark_price(...)` |
+| funding rate watch | yes | yes | typed live funding-rate updates via `watch_funding_rate(...)` |
+| open interest watch | yes | yes | typed live open-interest updates via `watch_open_interest(...)` |
+| focused order book watch | yes | yes | typed focused-symbol depth via `watch_order_book(...)` |
+| liquidations watch | yes | yes | typed liquidation flow via `watch_liquidations(...)` |
+| OHLCV watch | yes | yes | typed live candles via `watch_ohlcv(...)` / `watch_ohlcv_for_symbols(...)`; one or many symbols per watcher, same ccxt-style interval surface |
+| orders watch | yes | yes | typed private order updates via `watch_orders()` |
+| executions watch | yes | yes | typed private execution updates via `watch_my_trades()` |
+| positions watch | yes | yes | typed private position updates via `watch_positions()` |
+| balances watch | yes | yes | typed private balance updates via `watch_balance()` |
+| account watch | yes | yes | advanced typed account-summary updates remain available on `stream().private().watch_account()` |
+| account fetch | yes | yes | REST snapshot-backed `fetch_balance()` returns balances and summary |
+| position fetch | yes | yes | REST snapshot-backed `fetch_positions()` |
+| open orders fetch | yes | yes | REST snapshot-backed `fetch_open_orders(...)` |
+| execution history fetch | yes | yes | exposed through `fetch_my_trades(...)` |
+| get order | yes | yes | REST-backed unified order snapshot via `fetch_order(...)` |
+| create order | yes | yes | `create_order(...)` returns lifecycle handles |
+| create orders | yes | yes | batch create through `create_orders(...)` |
+| edit order | yes | yes | `edit_order(...)` |
+| edit orders | yes | yes | `edit_orders(...)` |
+| cancel order | yes | yes | `cancel_order(...)` returns lifecycle handles |
+| cancel orders | yes | yes | batch cancel through `cancel_orders(...)` |
+| cancel all orders | yes | yes | `cancel_all_orders(...)` |
+| close position | yes | yes | `close_position(...)` |
+| validate order | yes | yes | `validate_order(...)` |
+| set leverage | yes | yes | `set_leverage(...)`; venue-native REST flow |
+| set margin mode | yes | yes | `set_margin_mode(...)`; Binance symbol-level, Bybit account-level |
+| set position mode | yes | yes | `set_position_mode(...)` |
+| command lifecycle bus | yes | yes | `PendingCommandHandle::next_lifecycle()` and `advanced().subscribe_command_events()` |
 | periodic reconcile / metadata maintenance | yes | yes | live stream runners perform background health checks and periodic repair/metadata refresh |
 | reconcile after reconnect / unknown execution | foundation+ | foundation+ | snapshots plus order/execution history are used where venue allows it; unresolved outcomes stay explicit |
 
@@ -73,7 +72,7 @@ This matrix documents the current `0.1.x` futures-first surface after live trans
 ## Honest Limits
 
 - Command writes do not pretend transport errors are harmless: they return `UnknownExecution` receipts and trigger reconcile attempts.
-- `entry()` is the hot-path command surface; `trade()` remains for compatibility and read-side workflows.
+- Root command methods are the hot-path command surface; nested clients remain for compatibility and low-level workflows.
 - Reconcile now repairs balances, positions, open orders, and recent execution evidence; it first resolves pending `UnknownExecution` outcomes from local state, then recent-history repair batches the remaining checks per instrument instead of repeating identical REST calls.
 - Periodic private reconcile now stays snapshot-only for simple freshness maintenance and escalates to recent-history repair only when uncertainty or divergence signals are present.
 - Heavy reconcile prefetches recent execution history only for local active/recent instruments when the trigger or health state points to a private gap or divergence.

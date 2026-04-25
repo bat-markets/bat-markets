@@ -1,44 +1,23 @@
 //! Public facade crate for `bat-markets`.
 //!
-//! `bat-markets` is a futures-first, headless exchange engine for Binance
-//! USD-M and Bybit USDT linear futures. The facade keeps application code on a
-//! small, typed surface while preserving venue-specific escape hatches when the
-//! exchanges do not share identical semantics.
+//! `bat-markets` is a futures-first, headless exchange engine for Binance USD-M
+//! and Bybit USDT linear futures.
+//!
+//! The v0.2 facade follows the CCXT mental model: `fetch_*` is REST/read,
+//! `watch_*` is websocket/live, `create/edit/cancel/set_*` are commands, and
+//! [`BatMarkets::advanced`] is the low-level escape hatch.
 //!
 //! # API map
 //!
-//! | Surface | Owner | Use it for |
+//! | Family | Primary methods | Responsibility |
 //! | --- | --- | --- |
-//! | [`BatMarkets`] / [`BatMarketsBuilder`] | engine construction | choose venue, product, config, and live/static mode |
-//! | [`MarketClient`] | market read side | cached snapshots, public REST fetches, metadata refresh |
-//! | [`StreamClient`] / [`PublicLaneClient`] | public data lane | fixture ingest, local event subscriptions, shared public WS watchers |
-//! | [`StreamClient`] / [`PrivateLaneClient`] | private state lane | private feed ingest, account-stream watchers, manual reconcile |
-//! | [`CommandLaneClient`] | command event lane | command lifecycle observation and low-level command classification |
-//! | [`EntryClient`] | write side | order-entry and account-setting commands with [`PendingCommandHandle`] |
-//! | [`TradeClient`] | order/execution read side | cached orders, open orders, executions, and REST refreshes |
-//! | [`PositionClient`] | position read side | cached positions and REST refresh |
-//! | [`AccountClient`] | account read side | balances, account summary, and account refresh |
-//! | [`HealthClient`] | runtime health | cheap health snapshots and health-change subscriptions |
-//! | [`DiagnosticsClient`] | local diagnostics | lock and runtime latency snapshots |
-//! | [`NativeClient`] | venue-specific access | adapter details that should not be forced into a fake unified API |
-//!
-//! # Method families
-//!
-//! - [`BatMarketsBuilder::build`] creates an offline/static client and never
-//!   performs network I/O.
-//! - [`BatMarketsBuilder::build_live`] bootstraps live transport with server
-//!   time, metadata, HTTP, and optional environment-backed auth.
-//! - Snapshot getters such as [`MarketClient::ticker`],
-//!   [`TradeClient::orders`], and [`AccountClient::summary`] are synchronous
-//!   cached-state reads.
-//! - `fetch_*` methods perform public REST reads.
-//! - `refresh_*` methods perform REST reads and merge the result back into
-//!   engine state.
-//! - `subscribe_*` methods read events already flowing through the local bus.
-//! - `watch_*` methods acquire a shared live websocket lease and return typed
-//!   updates.
-//! - [`EntryClient`] owns write commands and exposes acknowledgement,
-//!   lifecycle, and recovery through [`PendingCommandHandle`].
+//! | Metadata/cache | [`BatMarkets::markets`], [`BatMarkets::load_markets`] | local bundled metadata and live venue metadata refresh |
+//! | Public REST | `fetch_ticker`, `fetch_tickers`, `fetch_order_book`, `fetch_ohlcv`, `fetch_trades`, `fetch_mark_price`, `fetch_funding_rate`, `fetch_open_interest`, `fetch_liquidations` | unauthenticated market reads |
+//! | Private REST | `fetch_balance`, `fetch_positions`, `fetch_open_orders`, `fetch_order`, `fetch_my_trades` | authenticated account, position, order, and execution reads |
+//! | Public WS | `watch_ticker`, `watch_tickers`, `watch_trades`, `watch_trades_for_symbols`, `watch_order_book`, `watch_ohlcv`, `watch_ohlcv_for_symbols`, `watch_mark_price`, `watch_funding_rate`, `watch_open_interest`, `watch_liquidations`, `watch_status` | typed live updates over shared websocket hubs |
+//! | Private WS | `watch_balance`, `watch_orders`, `watch_my_trades`, `watch_positions` | authenticated account-stream updates over one shared private hub |
+//! | Commands | `create_order`, `create_orders`, `edit_order`, `edit_orders`, `cancel_order`, `cancel_orders`, `cancel_all_orders`, `close_position`, `validate_order`, `set_leverage`, `set_margin_mode`, `set_position_mode` | write operations with lifecycle-aware [`PendingCommandHandle`] results |
+//! | Advanced | [`BatMarkets::advanced`] | raw lane ingest, subscriptions, command classification, reconcile, diagnostics, and native access |
 //!
 //! # Safety model
 //!
@@ -61,8 +40,7 @@
 //!         .product(Product::LinearUsdt)
 //!         .build()?;
 //!
-//!     let capabilities = client.capabilities();
-//!     assert!(capabilities.market.ticker);
+//!     assert!(!client.markets().is_empty());
 //!     Ok(())
 //! }
 //! ```
@@ -80,7 +58,7 @@
 //!     .build_live()
 //!     .await?;
 //!
-//! println!("{} instruments", client.market().instrument_specs().len());
+//! println!("{} instruments", client.markets().len());
 //! # Ok(())
 //! # }
 //! ```
@@ -89,6 +67,8 @@
 
 /// Account balances and account summary facade.
 pub mod account;
+/// Low-level advanced facade for custom transports and diagnostics.
+pub mod advanced;
 /// Re-exported capability contracts from `bat-markets-core`.
 pub mod capabilities;
 /// Engine facade and builder.
@@ -101,6 +81,7 @@ pub mod diagnostics;
 pub mod entry;
 /// Re-exported error contracts from `bat-markets-core`.
 pub mod errors;
+mod facade;
 /// Runtime health facade.
 pub mod health;
 /// Market-data snapshot and REST facade.
@@ -120,10 +101,11 @@ mod transport;
 pub mod types;
 
 pub use account::AccountClient;
+pub use advanced::AdvancedClient;
 pub use client::{BatMarkets, BatMarketsBuilder};
 pub use diagnostics::{DiagnosticsClient, LockDiagnosticsSnapshot, RuntimeDiagnosticsSnapshot};
 pub use entry::{EntryClient, PendingCommandHandle};
-pub use health::HealthClient;
+pub use health::{HealthClient, StatusWatch};
 pub use market::MarketClient;
 pub use native::NativeClient;
 pub use position::PositionClient;

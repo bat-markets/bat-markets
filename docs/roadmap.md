@@ -2,9 +2,9 @@
 
 ## Current Milestone
 
-Ship a minimal, registry-ready `0.1.x` foundation for Binance and Bybit linear
-futures without bundling operator demos, unpublished harnesses, or broad venue
-promises into the public package surface.
+Ship a registry-ready `0.2.x` facade for Binance and Bybit linear futures with
+a CCXT-style root API, clean documentation, shared websocket hubs, explicit
+command lifecycle semantics, and no bundled operator demos.
 
 ## In Scope
 
@@ -13,8 +13,9 @@ promises into the public package surface.
 - reconnect-aware shared public/private stream runners
 - sequence-aware transport gap detection and snapshot-driven repair foundations
 - recent execution and order-history repair where a venue makes it available
-- low-latency `entry()` command plane with lifecycle tracking
+- low-latency root command plane with lifecycle tracking
 - websocket-first command routing where the venue supports it
+- websocket-only command variants that never fall back to REST silently
 - env-gated sandbox and mainnet validation in the unpublished testing crate
 - crates.io package metadata, package checks, and release documentation
 - public rustdoc and concise package README documentation
@@ -36,6 +37,6 @@ promises into the public package surface.
 1. tighten local realtime account and position projection when Binance omits `ACCOUNT_UPDATE`
 2. reduce allocation and serialization cost in the command hot path
 3. keep fixture/static mode stable while live/runtime coverage expands
-4. expand rustdoc around `entry()` and stream surfaces
+4. keep root rustdoc examples aligned with README and migration docs
 5. add more venue-native stress and latency probes inside `bat-markets-testing`
 6. add release automation once manual crates.io publication is proven

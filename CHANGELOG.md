@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.2.0 - 2026-04-25
+
+- redesign the primary facade around CCXT-style root methods: `fetch_*`, `watch_*`, command verbs, and `advanced()`
+- add root metadata, public REST, private REST, public WS, private WS, command, status, and advanced methods on `BatMarkets`
+- add public `EditOrderRequest` and `EditOrdersRequest` names while keeping internal amend semantics compatible
+- make `fetch_balance()` return a full `AccountSnapshot` with balances and summary
+- add websocket-only command variants that return `Unsupported` instead of silently falling back to REST
+- move raw lane ingestion, raw event subscriptions, command JSON classification, manual reconcile, diagnostics, and native adapter access under `advanced()`
+- document the new API map in README and crate rustdoc
+- add `docs/migration-v0.2.md` with direct v0.1-to-v0.2 method mappings
+- update architecture, capability, and roadmap docs for the root API shape
+
 ## 0.1.1 - 2026-04-25
 
 - bootstrap workspace structure from the blueprint

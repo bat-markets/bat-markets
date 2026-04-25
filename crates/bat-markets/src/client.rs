@@ -235,6 +235,7 @@ pub(crate) struct LiveContext {
     pub(crate) signer: Option<Arc<dyn Signer>>,
     pub(crate) command_limiter: Arc<runtime::CommandRateLimiter>,
     pub(crate) command_transport: Arc<CommandTransportHub>,
+    pub(crate) command_transport_mode: runtime::CommandTransportMode,
 }
 
 /// Public facade for a single venue/product engine instance.
@@ -250,7 +251,7 @@ pub(crate) struct LiveContext {
 ///     .build_live()
 ///     .await?;
 ///
-/// println!("loaded {} instruments", client.market().instrument_specs().len());
+/// println!("loaded {} instruments", client.markets().len());
 /// # Ok(())
 /// # }
 /// ```
@@ -384,6 +385,17 @@ impl BatMarkets {
             signer: self.signer.clone(),
             command_limiter: Arc::clone(&self.command_limiter),
             command_transport: Arc::clone(&self.command_transport),
+            command_transport_mode: runtime::CommandTransportMode::Auto,
+        }
+    }
+
+    pub(crate) fn live_context_with_command_transport(
+        &self,
+        command_transport_mode: runtime::CommandTransportMode,
+    ) -> LiveContext {
+        LiveContext {
+            command_transport_mode,
+            ..self.live_context()
         }
     }
 
@@ -430,6 +442,7 @@ impl BatMarkets {
             signer: signer.clone(),
             command_limiter: Arc::clone(&command_limiter),
             command_transport: Arc::clone(&command_transport),
+            command_transport_mode: runtime::CommandTransportMode::Auto,
         }));
 
         Ok(Self {
