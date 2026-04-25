@@ -18,53 +18,65 @@ impl<'a> MarketClient<'a> {
         Self { inner }
     }
 
+    /// Return the current cached instrument metadata.
     #[must_use]
     pub fn instrument_specs(&self) -> Vec<InstrumentSpec> {
         self.inner.instrument_specs()
     }
 
+    /// Return the latest cached ticker for an instrument.
+    ///
+    /// This is a local snapshot read. Use [`Self::fetch_ticker`] when fresh REST
+    /// data is required.
     #[must_use]
     pub fn ticker(&self, instrument_id: &InstrumentId) -> Option<Ticker> {
         self.inner
             .read_state(|state| state.ticker(instrument_id).cloned())
     }
 
+    /// Return cached recent trades for an instrument.
     #[must_use]
     pub fn recent_trades(&self, instrument_id: &InstrumentId) -> Option<Vec<TradeTick>> {
         self.inner
             .read_state(|state| state.recent_trades(instrument_id))
     }
 
+    /// Return the latest cached top-of-book snapshot for an instrument.
     #[must_use]
     pub fn book_top(&self, instrument_id: &InstrumentId) -> Option<bat_markets_core::BookTop> {
         self.inner
             .read_state(|state| state.book_top(instrument_id).cloned())
     }
 
+    /// Return the latest cached funding-rate snapshot for an instrument.
     #[must_use]
     pub fn funding_rate(&self, instrument_id: &InstrumentId) -> Option<FundingRate> {
         self.inner
             .read_state(|state| state.funding_rate(instrument_id).cloned())
     }
 
+    /// Return the latest cached mark-price snapshot for an instrument.
     #[must_use]
     pub fn mark_price(&self, instrument_id: &InstrumentId) -> Option<MarkPrice> {
         self.inner
             .read_state(|state| state.mark_price(instrument_id).cloned())
     }
 
+    /// Return the latest cached open-interest snapshot for an instrument.
     #[must_use]
     pub fn open_interest(&self, instrument_id: &InstrumentId) -> Option<OpenInterest> {
         self.inner
             .read_state(|state| state.open_interest(instrument_id).cloned())
     }
 
+    /// Return cached liquidation events for an instrument.
     #[must_use]
     pub fn liquidations(&self, instrument_id: &InstrumentId) -> Option<Vec<Liquidation>> {
         self.inner
             .read_state(|state| state.liquidations(instrument_id))
     }
 
+    /// Return metadata for a known instrument or an `Unsupported` error.
     pub fn require_instrument(&self, instrument_id: &InstrumentId) -> Result<InstrumentSpec> {
         self.instrument_specs()
             .into_iter()
@@ -99,6 +111,7 @@ impl<'a> MarketClient<'a> {
         runtime::refresh_metadata(&self.inner.live_context()).await
     }
 
+    /// Refresh live open interest for one instrument and merge it into state.
     pub async fn refresh_open_interest(
         &self,
         instrument_id: &InstrumentId,

@@ -73,8 +73,9 @@ Run a workflow dry-run from GitHub Actions first. A manual dispatch with
 To publish, tag the exact workspace version:
 
 ```bash
-git tag -a v0.1.1 -m "v0.1.1"
-git push origin v0.1.1
+VERSION="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "bat-markets") | .version')"
+git tag -a "v${VERSION}" -m "v${VERSION}"
+git push origin "v${VERSION}"
 ```
 
 The publish workflow verifies the repository, publishes in dependency order, and

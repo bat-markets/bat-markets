@@ -22,19 +22,34 @@ use crate::{
 /// Public market-data subscription plan for live websocket runners.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PublicSubscription {
+    /// Instruments included in the public subscription.
     pub instrument_ids: Vec<InstrumentId>,
+    /// Subscribe to ticker updates.
     pub ticker: bool,
+    /// Subscribe to public trade updates.
     pub trades: bool,
+    /// Subscribe to top-of-book updates.
     pub book_top: bool,
+    /// Subscribe to full order-book delta updates.
     pub order_book: bool,
+    /// Subscribe to mark-price updates.
     pub mark_price: bool,
+    /// Subscribe to funding-rate updates.
     pub funding_rate: bool,
+    /// Subscribe to open-interest updates.
     pub open_interest: bool,
+    /// Subscribe to liquidation updates.
     pub liquidations: bool,
+    /// OHLCV intervals to subscribe to.
     pub kline_intervals: Vec<Box<str>>,
 }
 
 impl PublicSubscription {
+    /// Build a balanced default public subscription for common market-data feeds.
+    ///
+    /// This enables ticker, trades, book top, mark price, funding rate, and
+    /// open interest. Full order-book deltas, liquidations, and OHLCV intervals
+    /// remain opt-in because they can be higher-volume feeds.
     #[must_use]
     pub fn all_for(instrument_ids: Vec<InstrumentId>) -> Self {
         Self {
@@ -55,10 +70,12 @@ impl PublicSubscription {
 /// Typed market-data watch request for one or many instruments.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WatchInstrumentsRequest {
+    /// Instruments to watch.
     pub instrument_ids: Vec<InstrumentId>,
 }
 
 impl WatchInstrumentsRequest {
+    /// Build a watch request for a single instrument.
     #[must_use]
     pub fn for_instrument(instrument_id: InstrumentId) -> Self {
         Self {
@@ -66,6 +83,7 @@ impl WatchInstrumentsRequest {
         }
     }
 
+    /// Build a watch request for one or many instruments.
     #[must_use]
     pub fn for_instruments(instrument_ids: Vec<InstrumentId>) -> Self {
         Self { instrument_ids }
@@ -75,11 +93,14 @@ impl WatchInstrumentsRequest {
 /// Typed OHLCV watch request for one or many instruments.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WatchOhlcvRequest {
+    /// Instruments to watch.
     pub instrument_ids: Vec<InstrumentId>,
+    /// OHLCV interval in unified notation, such as `1m`, `5m`, or `1h`.
     pub interval: Box<str>,
 }
 
 impl WatchOhlcvRequest {
+    /// Build an OHLCV watch request for a single instrument and interval.
     #[must_use]
     pub fn for_instrument(instrument_id: InstrumentId, interval: impl Into<Box<str>>) -> Self {
         Self {
@@ -88,6 +109,7 @@ impl WatchOhlcvRequest {
         }
     }
 
+    /// Build an OHLCV watch request for one or many instruments and one interval.
     #[must_use]
     pub fn for_instruments(
         instrument_ids: Vec<InstrumentId>,
@@ -122,6 +144,7 @@ pub struct LiveStreamHandle {
 }
 
 impl LiveStreamHandle {
+    /// Ask the stream task to shut down and wait for it to finish.
     pub async fn shutdown(mut self) -> Result<()> {
         if let Some(shutdown) = self.shutdown.take() {
             let _ = shutdown.send(());
@@ -134,10 +157,14 @@ impl LiveStreamHandle {
         })?
     }
 
+    /// Abort the stream task immediately.
+    ///
+    /// Prefer [`Self::shutdown`] when graceful stream closure matters.
     pub fn abort(&self) {
         self.join.abort();
     }
 
+    /// Wait until the stream task exits on its own.
     pub async fn wait(self) -> Result<()> {
         self.join.await.map_err(|error| {
             bat_markets_core::MarketError::new(
@@ -224,6 +251,7 @@ impl<'a> OhlcvUpdates<'a> {
         }
     }
 
+    /// Wait for the next matching OHLCV candle.
     pub async fn recv(&mut self) -> Result<Kline> {
         loop {
             let requested_interval = parse_watch_interval(self.interval.as_ref())?;
@@ -269,16 +297,23 @@ pub struct OhlcvWatch<'a> {
 }
 
 impl<'a> OhlcvWatch<'a> {
+    /// Wait for the next matching OHLCV candle from the live watcher.
     pub async fn recv(&mut self) -> Result<Kline> {
         self.updates.recv().await
     }
 
+    /// Release the shared subscription lease.
     pub async fn shutdown(self) -> Result<()> {
         Ok(())
     }
 
+    /// No-op for shared-hub watchers.
+    ///
+    /// The underlying socket is owned by the subscription hub and may be shared
+    /// with other watchers.
     pub fn abort(&self) {}
 
+    /// Release the shared subscription lease.
     pub async fn wait(self) -> Result<()> {
         Ok(())
     }
@@ -304,6 +339,7 @@ impl<'a> TickerUpdates<'a> {
         }
     }
 
+    /// Wait for the next matching ticker update.
     pub async fn recv(&mut self) -> Result<Ticker> {
         loop {
             let event = recv_public_event(&mut self.receiver, "ticker subscription").await?;
@@ -328,16 +364,20 @@ pub struct TickerWatch<'a> {
 }
 
 impl<'a> TickerWatch<'a> {
+    /// Wait for the next matching ticker update from the live watcher.
     pub async fn recv(&mut self) -> Result<Ticker> {
         self.updates.recv().await
     }
 
+    /// Release the shared subscription lease.
     pub async fn shutdown(self) -> Result<()> {
         Ok(())
     }
 
+    /// No-op for shared-hub watchers.
     pub fn abort(&self) {}
 
+    /// Release the shared subscription lease.
     pub async fn wait(self) -> Result<()> {
         Ok(())
     }
@@ -363,6 +403,7 @@ impl<'a> TradeUpdates<'a> {
         }
     }
 
+    /// Wait for the next matching public trade update.
     pub async fn recv(&mut self) -> Result<TradeTick> {
         loop {
             let event = recv_public_event(&mut self.receiver, "trade subscription").await?;
@@ -387,16 +428,20 @@ pub struct TradesWatch<'a> {
 }
 
 impl<'a> TradesWatch<'a> {
+    /// Wait for the next matching public trade update from the live watcher.
     pub async fn recv(&mut self) -> Result<TradeTick> {
         self.updates.recv().await
     }
 
+    /// Release the shared subscription lease.
     pub async fn shutdown(self) -> Result<()> {
         Ok(())
     }
 
+    /// No-op for shared-hub watchers.
     pub fn abort(&self) {}
 
+    /// Release the shared subscription lease.
     pub async fn wait(self) -> Result<()> {
         Ok(())
     }
@@ -422,6 +467,7 @@ impl<'a> BookTopUpdates<'a> {
         }
     }
 
+    /// Wait for the next matching top-of-book update.
     pub async fn recv(&mut self) -> Result<BookTop> {
         loop {
             let event = recv_public_event(&mut self.receiver, "book_top subscription").await?;
@@ -446,16 +492,20 @@ pub struct BookTopWatch<'a> {
 }
 
 impl<'a> BookTopWatch<'a> {
+    /// Wait for the next matching top-of-book update from the live watcher.
     pub async fn recv(&mut self) -> Result<BookTop> {
         self.updates.recv().await
     }
 
+    /// Release the shared subscription lease.
     pub async fn shutdown(self) -> Result<()> {
         Ok(())
     }
 
+    /// No-op for shared-hub watchers.
     pub fn abort(&self) {}
 
+    /// Release the shared subscription lease.
     pub async fn wait(self) -> Result<()> {
         Ok(())
     }
@@ -481,6 +531,7 @@ impl<'a> MarkPriceUpdates<'a> {
         }
     }
 
+    /// Wait for the next matching mark-price update.
     pub async fn recv(&mut self) -> Result<MarkPrice> {
         loop {
             let event = recv_public_event(&mut self.receiver, "mark_price subscription").await?;
@@ -498,16 +549,19 @@ impl<'a> MarkPriceUpdates<'a> {
     }
 }
 
+/// Live mark-price watcher with typed updates and stream lifecycle control.
 pub struct MarkPriceWatch<'a> {
     updates: MarkPriceUpdates<'a>,
     _lease: PublicSubscriptionLease,
 }
 
 impl<'a> MarkPriceWatch<'a> {
+    /// Wait for the next matching mark-price update from the live watcher.
     pub async fn recv(&mut self) -> Result<MarkPrice> {
         self.updates.recv().await
     }
 
+    /// Release the shared subscription lease.
     pub async fn shutdown(self) -> Result<()> {
         Ok(())
     }
@@ -530,6 +584,7 @@ impl FundingRateUpdates {
         }
     }
 
+    /// Wait for the next matching funding-rate update.
     pub async fn recv(&mut self) -> Result<FundingRate> {
         loop {
             let event = recv_public_event(&mut self.receiver, "funding_rate subscription").await?;
@@ -545,6 +600,7 @@ impl FundingRateUpdates {
     }
 }
 
+/// Live funding-rate watcher with typed updates and stream lifecycle control.
 pub struct FundingRateWatch<'a> {
     updates: FundingRateUpdates,
     _lease: PublicSubscriptionLease,
@@ -552,10 +608,12 @@ pub struct FundingRateWatch<'a> {
 }
 
 impl<'a> FundingRateWatch<'a> {
+    /// Wait for the next matching funding-rate update from the live watcher.
     pub async fn recv(&mut self) -> Result<FundingRate> {
         self.updates.recv().await
     }
 
+    /// Release the shared subscription lease.
     pub async fn shutdown(self) -> Result<()> {
         Ok(())
     }
@@ -578,6 +636,7 @@ impl OpenInterestUpdates {
         }
     }
 
+    /// Wait for the next matching open-interest update.
     pub async fn recv(&mut self) -> Result<OpenInterest> {
         loop {
             let event = recv_public_event(&mut self.receiver, "open_interest subscription").await?;
@@ -593,6 +652,7 @@ impl OpenInterestUpdates {
     }
 }
 
+/// Live open-interest watcher with typed updates and stream lifecycle control.
 pub struct OpenInterestWatch<'a> {
     updates: OpenInterestUpdates,
     _lease: PublicSubscriptionLease,
@@ -600,10 +660,12 @@ pub struct OpenInterestWatch<'a> {
 }
 
 impl<'a> OpenInterestWatch<'a> {
+    /// Wait for the next matching open-interest update from the live watcher.
     pub async fn recv(&mut self) -> Result<OpenInterest> {
         self.updates.recv().await
     }
 
+    /// Release the shared subscription lease.
     pub async fn shutdown(self) -> Result<()> {
         Ok(())
     }
@@ -629,6 +691,7 @@ impl<'a> LiquidationUpdates<'a> {
         }
     }
 
+    /// Wait for the next matching liquidation update.
     pub async fn recv(&mut self) -> Result<Liquidation> {
         loop {
             let event = recv_public_event(&mut self.receiver, "liquidation subscription").await?;
@@ -646,16 +709,19 @@ impl<'a> LiquidationUpdates<'a> {
     }
 }
 
+/// Live liquidation watcher with typed updates and stream lifecycle control.
 pub struct LiquidationWatch<'a> {
     updates: LiquidationUpdates<'a>,
     _lease: PublicSubscriptionLease,
 }
 
 impl<'a> LiquidationWatch<'a> {
+    /// Wait for the next matching liquidation update from the live watcher.
     pub async fn recv(&mut self) -> Result<Liquidation> {
         self.updates.recv().await
     }
 
+    /// Release the shared subscription lease.
     pub async fn shutdown(self) -> Result<()> {
         Ok(())
     }
@@ -681,6 +747,7 @@ impl<'a> OrderBookUpdates<'a> {
         }
     }
 
+    /// Wait for the next matching order-book delta.
     pub async fn recv(&mut self) -> Result<OrderBookDelta> {
         loop {
             let event = recv_public_event(&mut self.receiver, "order_book subscription").await?;
@@ -698,16 +765,19 @@ impl<'a> OrderBookUpdates<'a> {
     }
 }
 
+/// Live order-book watcher with typed updates and stream lifecycle control.
 pub struct OrderBookWatch<'a> {
     updates: OrderBookUpdates<'a>,
     _lease: PublicSubscriptionLease,
 }
 
 impl<'a> OrderBookWatch<'a> {
+    /// Wait for the next matching order-book delta from the live watcher.
     pub async fn recv(&mut self) -> Result<OrderBookDelta> {
         self.updates.recv().await
     }
 
+    /// Release the shared subscription lease.
     pub async fn shutdown(self) -> Result<()> {
         Ok(())
     }
@@ -729,6 +799,7 @@ impl FastFeedUpdates {
         }
     }
 
+    /// Wait for the next public-lane event enabled by the fast-feed request.
     pub async fn recv(&mut self) -> Result<PublicLaneEvent> {
         loop {
             let event = recv_public_event(&mut self.receiver, "fast feed").await?;
@@ -786,6 +857,7 @@ impl FastFeedUpdates {
     }
 }
 
+/// Live compact fast-feed watcher with typed events and stream lifecycle control.
 pub struct FastFeedWatch<'a> {
     updates: FastFeedUpdates,
     _lease: PublicSubscriptionLease,
@@ -793,10 +865,12 @@ pub struct FastFeedWatch<'a> {
 }
 
 impl<'a> FastFeedWatch<'a> {
+    /// Wait for the next public-lane event from the live fast-feed watcher.
     pub async fn recv(&mut self) -> Result<PublicLaneEvent> {
         self.updates.recv().await
     }
 
+    /// Release the shared subscription lease.
     pub async fn shutdown(self) -> Result<()> {
         Ok(())
     }
@@ -812,6 +886,7 @@ impl OrderUpdates {
         Self { receiver }
     }
 
+    /// Wait for the next private order update.
     pub async fn recv(&mut self) -> Result<Order> {
         loop {
             let event = recv_private_event(&mut self.receiver, "order subscription").await?;
@@ -822,6 +897,7 @@ impl OrderUpdates {
     }
 }
 
+/// Live private order watcher with typed updates and stream lifecycle control.
 pub struct OrdersWatch<'a> {
     updates: OrderUpdates,
     _lease: PrivateSubscriptionLease,
@@ -829,15 +905,18 @@ pub struct OrdersWatch<'a> {
 }
 
 impl<'a> OrdersWatch<'a> {
+    /// Wait for the next private order update from the live watcher.
     pub async fn recv(&mut self) -> Result<Order> {
         self.updates.recv().await
     }
 
+    /// Release the shared private-stream lease.
     pub async fn shutdown(self) -> Result<()> {
         Ok(())
     }
 }
 
+/// Typed execution subscription receiver over the shared private event bus.
 pub struct ExecutionUpdates {
     receiver: broadcast::Receiver<PrivateLaneEvent>,
 }
@@ -847,6 +926,7 @@ impl ExecutionUpdates {
         Self { receiver }
     }
 
+    /// Wait for the next private execution update.
     pub async fn recv(&mut self) -> Result<Execution> {
         loop {
             let event = recv_private_event(&mut self.receiver, "execution subscription").await?;
@@ -857,6 +937,7 @@ impl ExecutionUpdates {
     }
 }
 
+/// Live private execution watcher with typed updates and stream lifecycle control.
 pub struct ExecutionsWatch<'a> {
     updates: ExecutionUpdates,
     _lease: PrivateSubscriptionLease,
@@ -864,15 +945,18 @@ pub struct ExecutionsWatch<'a> {
 }
 
 impl<'a> ExecutionsWatch<'a> {
+    /// Wait for the next private execution update from the live watcher.
     pub async fn recv(&mut self) -> Result<Execution> {
         self.updates.recv().await
     }
 
+    /// Release the shared private-stream lease.
     pub async fn shutdown(self) -> Result<()> {
         Ok(())
     }
 }
 
+/// Typed position subscription receiver over the shared private event bus.
 pub struct PositionUpdates {
     receiver: broadcast::Receiver<PrivateLaneEvent>,
 }
@@ -882,6 +966,7 @@ impl PositionUpdates {
         Self { receiver }
     }
 
+    /// Wait for the next private position update.
     pub async fn recv(&mut self) -> Result<Position> {
         loop {
             let event = recv_private_event(&mut self.receiver, "position subscription").await?;
@@ -892,6 +977,7 @@ impl PositionUpdates {
     }
 }
 
+/// Live private position watcher with typed updates and stream lifecycle control.
 pub struct PositionsWatch<'a> {
     updates: PositionUpdates,
     _lease: PrivateSubscriptionLease,
@@ -899,15 +985,18 @@ pub struct PositionsWatch<'a> {
 }
 
 impl<'a> PositionsWatch<'a> {
+    /// Wait for the next private position update from the live watcher.
     pub async fn recv(&mut self) -> Result<Position> {
         self.updates.recv().await
     }
 
+    /// Release the shared private-stream lease.
     pub async fn shutdown(self) -> Result<()> {
         Ok(())
     }
 }
 
+/// Typed balance subscription receiver over the shared private event bus.
 pub struct BalanceUpdates {
     receiver: broadcast::Receiver<PrivateLaneEvent>,
 }
@@ -917,6 +1006,7 @@ impl BalanceUpdates {
         Self { receiver }
     }
 
+    /// Wait for the next private balance update.
     pub async fn recv(&mut self) -> Result<Balance> {
         loop {
             let event = recv_private_event(&mut self.receiver, "balance subscription").await?;
@@ -927,6 +1017,7 @@ impl BalanceUpdates {
     }
 }
 
+/// Live private balance watcher with typed updates and stream lifecycle control.
 pub struct BalancesWatch<'a> {
     updates: BalanceUpdates,
     _lease: PrivateSubscriptionLease,
@@ -934,15 +1025,18 @@ pub struct BalancesWatch<'a> {
 }
 
 impl<'a> BalancesWatch<'a> {
+    /// Wait for the next private balance update from the live watcher.
     pub async fn recv(&mut self) -> Result<Balance> {
         self.updates.recv().await
     }
 
+    /// Release the shared private-stream lease.
     pub async fn shutdown(self) -> Result<()> {
         Ok(())
     }
 }
 
+/// Typed account-summary receiver derived from the shared private event bus.
 pub struct AccountUpdates<'a> {
     inner: &'a BatMarkets,
     receiver: broadcast::Receiver<PrivateLaneEvent>,
@@ -953,6 +1047,7 @@ impl<'a> AccountUpdates<'a> {
         Self { inner, receiver }
     }
 
+    /// Wait for the next account summary changed by private balance activity.
     pub async fn recv(&mut self) -> Result<AccountSummary> {
         loop {
             let event = recv_private_event(&mut self.receiver, "account subscription").await?;
@@ -966,16 +1061,19 @@ impl<'a> AccountUpdates<'a> {
     }
 }
 
+/// Live account-summary watcher with typed updates and stream lifecycle control.
 pub struct AccountWatch<'a> {
     updates: AccountUpdates<'a>,
     _lease: PrivateSubscriptionLease,
 }
 
 impl<'a> AccountWatch<'a> {
+    /// Wait for the next account summary update from the live watcher.
     pub async fn recv(&mut self) -> Result<AccountSummary> {
         self.updates.recv().await
     }
 
+    /// Release the shared private-stream lease.
     pub async fn shutdown(self) -> Result<()> {
         Ok(())
     }
@@ -1023,16 +1121,19 @@ impl<'a> StreamClient<'a> {
         Self { inner }
     }
 
+    /// Access the public market-data lane.
     #[must_use]
     pub fn public(&self) -> PublicLaneClient<'a> {
         PublicLaneClient { inner: self.inner }
     }
 
+    /// Access the private account/order/position lane.
     #[must_use]
     pub fn private(&self) -> PrivateLaneClient<'a> {
         PrivateLaneClient { inner: self.inner }
     }
 
+    /// Access command-lifecycle events and low-level command classification.
     #[must_use]
     pub fn command(&self) -> CommandLaneClient<'a> {
         CommandLaneClient { inner: self.inner }
@@ -1045,6 +1146,10 @@ pub struct PublicLaneClient<'a> {
 }
 
 impl<'a> PublicLaneClient<'a> {
+    /// Decode a venue public websocket payload, publish events, and update state.
+    ///
+    /// This is primarily for fixtures, replay tools, and custom transports. Live
+    /// applications usually prefer `watch_*` methods.
     pub fn ingest_json(&self, payload: &str) -> Result<Vec<PublicLaneEvent>> {
         let events = self.inner.adapter.as_adapter().parse_public(payload)?;
         self.inner.shared.apply_public_events(&events);
@@ -1447,6 +1552,10 @@ pub struct PrivateLaneClient<'a> {
 }
 
 impl<'a> PrivateLaneClient<'a> {
+    /// Decode a venue private websocket payload, publish events, and update state.
+    ///
+    /// This is primarily for fixtures, replay tools, and custom transports. Live
+    /// applications usually prefer `watch_*` methods.
     pub fn ingest_json(&self, payload: &str) -> Result<Vec<PrivateLaneEvent>> {
         let events = self.inner.adapter.as_adapter().parse_private(payload)?;
         self.inner.shared.apply_private_events(&events);
@@ -1459,26 +1568,31 @@ impl<'a> PrivateLaneClient<'a> {
         self.inner.shared.subscribe_private_events()
     }
 
+    /// Subscribe to typed order updates already flowing through the private lane.
     #[must_use]
     pub fn subscribe_orders(&self) -> OrderUpdates {
         OrderUpdates::new(self.subscribe())
     }
 
+    /// Subscribe to typed execution updates already flowing through the private lane.
     #[must_use]
     pub fn subscribe_executions(&self) -> ExecutionUpdates {
         ExecutionUpdates::new(self.subscribe())
     }
 
+    /// Subscribe to typed position updates already flowing through the private lane.
     #[must_use]
     pub fn subscribe_positions(&self) -> PositionUpdates {
         PositionUpdates::new(self.subscribe())
     }
 
+    /// Subscribe to typed balance updates already flowing through the private lane.
     #[must_use]
     pub fn subscribe_balances(&self) -> BalanceUpdates {
         BalanceUpdates::new(self.subscribe())
     }
 
+    /// Subscribe to account-summary updates derived from private balance events.
     #[must_use]
     pub fn subscribe_account(&self) -> AccountUpdates<'a> {
         AccountUpdates::new(self.inner, self.subscribe())
@@ -1492,6 +1606,7 @@ impl<'a> PrivateLaneClient<'a> {
         runtime::spawn_private_stream(self.inner.live_context()).await
     }
 
+    /// Acquire the shared private stream and receive typed order updates.
     pub async fn watch_orders(&self) -> Result<OrdersWatch<'a>> {
         let updates = self.subscribe_orders();
         let lease = self.inner.subscription_hubs.private.acquire().await?;
@@ -1502,6 +1617,7 @@ impl<'a> PrivateLaneClient<'a> {
         })
     }
 
+    /// Acquire the shared private stream and receive typed execution updates.
     pub async fn watch_executions(&self) -> Result<ExecutionsWatch<'a>> {
         let updates = self.subscribe_executions();
         let lease = self.inner.subscription_hubs.private.acquire().await?;
@@ -1512,6 +1628,7 @@ impl<'a> PrivateLaneClient<'a> {
         })
     }
 
+    /// Acquire the shared private stream and receive typed position updates.
     pub async fn watch_positions(&self) -> Result<PositionsWatch<'a>> {
         let updates = self.subscribe_positions();
         let lease = self.inner.subscription_hubs.private.acquire().await?;
@@ -1522,6 +1639,7 @@ impl<'a> PrivateLaneClient<'a> {
         })
     }
 
+    /// Acquire the shared private stream and receive typed balance updates.
     pub async fn watch_balances(&self) -> Result<BalancesWatch<'a>> {
         let updates = self.subscribe_balances();
         let lease = self.inner.subscription_hubs.private.acquire().await?;
@@ -1532,6 +1650,7 @@ impl<'a> PrivateLaneClient<'a> {
         })
     }
 
+    /// Acquire the shared private stream and receive derived account summaries.
     pub async fn watch_account(&self) -> Result<AccountWatch<'a>> {
         let updates = self.subscribe_account();
         let lease = self.inner.subscription_hubs.private.acquire().await?;
@@ -1570,11 +1689,13 @@ pub struct CommandLaneClient<'a> {
 }
 
 impl<'a> CommandLaneClient<'a> {
+    /// Subscribe to raw command-lane events.
     #[must_use]
     pub fn subscribe(&self) -> broadcast::Receiver<CommandLaneEvent> {
         self.inner.shared.subscribe_command_events()
     }
 
+    /// Wait for the next command lifecycle event.
     pub async fn next_lifecycle(&self) -> Result<CommandLifecycleEvent> {
         let mut receiver = self.subscribe();
         loop {
@@ -1585,6 +1706,10 @@ impl<'a> CommandLaneClient<'a> {
         }
     }
 
+    /// Classify a raw command response payload and apply the resulting state hint.
+    ///
+    /// This is a low-level integration hook for custom transports. Normal order
+    /// entry should use [`EntryClient`](crate::EntryClient).
     pub fn classify_json(
         &self,
         operation: CommandOperation,

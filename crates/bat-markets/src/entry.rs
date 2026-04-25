@@ -44,11 +44,16 @@ impl PendingCommandHandle {
         )
     }
 
+    /// Return the immediate acknowledgement captured when the command was sent.
     #[must_use]
     pub const fn ack(&self) -> &CommandAck {
         &self.ack
     }
 
+    /// Return the initial receipt, then subsequent matching receipts from the command bus.
+    ///
+    /// The first call is always the receipt embedded in [`Self::ack`]. Later
+    /// calls wait for matching command-lane receipt events.
     pub async fn receipt(&mut self) -> Result<CommandReceipt> {
         if self.initial_receipt_pending {
             self.initial_receipt_pending = false;
@@ -72,6 +77,10 @@ impl PendingCommandHandle {
         }
     }
 
+    /// Wait for the next lifecycle event matching this command.
+    ///
+    /// This observes acknowledgement, recovery scheduling, recovery completion,
+    /// and follow-up receipt events emitted by the command lane.
     pub async fn next_lifecycle(&mut self) -> Result<CommandLifecycleEvent> {
         loop {
             let event = self.receiver_mut().recv().await.map_err(|error| {
@@ -90,6 +99,11 @@ impl PendingCommandHandle {
         }
     }
 
+    /// Return a receipt that is resolved as far as local evidence allows.
+    ///
+    /// Non-uncertain receipts are returned immediately. `UnknownExecution`
+    /// receipts wait for a matching recovery completion and then map the
+    /// reconcile report into the best known final status.
     pub async fn resolved(&mut self) -> Result<CommandReceipt> {
         if self.ack.receipt.status != CommandStatus::UnknownExecution {
             return Ok(self.ack.receipt.clone());
@@ -118,17 +132,25 @@ impl<'a> EntryClient<'a> {
         Self { inner }
     }
 
+    /// Subscribe to the raw command lane.
+    ///
+    /// Use [`PendingCommandHandle`] for per-command tracking; this method is for
+    /// operators or integrations that need all command events.
     #[must_use]
     pub fn subscribe(&self) -> broadcast::Receiver<CommandLaneEvent> {
         self.inner.shared.subscribe_command_events()
     }
 
+    /// Submit a create-order command and return a lifecycle-aware handle.
     pub async fn create_order(&self, request: &CreateOrderRequest) -> Result<PendingCommandHandle> {
         let receiver = self.inner.shared.subscribe_command_events();
         let ack = runtime::create_order(&self.inner.live_context(), request).await?;
         Ok(PendingCommandHandle::from_ack(ack, receiver))
     }
 
+    /// Submit a batch of create-order commands.
+    ///
+    /// One [`PendingCommandHandle`] is returned per requested order.
     pub async fn create_orders(
         &self,
         request: &CreateOrdersRequest,
@@ -142,12 +164,14 @@ impl<'a> EntryClient<'a> {
             .collect())
     }
 
+    /// Submit an amend-order command and return a lifecycle-aware handle.
     pub async fn amend_order(&self, request: &AmendOrderRequest) -> Result<PendingCommandHandle> {
         let receiver = self.inner.shared.subscribe_command_events();
         let ack = runtime::amend_order(&self.inner.live_context(), request).await?;
         Ok(PendingCommandHandle::from_ack(ack, receiver))
     }
 
+    /// Submit a batch of amend-order commands.
     pub async fn amend_orders(
         &self,
         request: &AmendOrdersRequest,
@@ -161,12 +185,14 @@ impl<'a> EntryClient<'a> {
             .collect())
     }
 
+    /// Submit a cancel-order command and return a lifecycle-aware handle.
     pub async fn cancel_order(&self, request: &CancelOrderRequest) -> Result<PendingCommandHandle> {
         let receiver = self.inner.shared.subscribe_command_events();
         let ack = runtime::cancel_order(&self.inner.live_context(), request).await?;
         Ok(PendingCommandHandle::from_ack(ack, receiver))
     }
 
+    /// Submit a batch of cancel-order commands.
     pub async fn cancel_orders(
         &self,
         request: &CancelOrdersRequest,
@@ -180,6 +206,7 @@ impl<'a> EntryClient<'a> {
             .collect())
     }
 
+    /// Cancel all open orders matching the request scope.
     pub async fn cancel_all_orders(
         &self,
         request: &CancelAllOrdersRequest,
@@ -193,6 +220,7 @@ impl<'a> EntryClient<'a> {
         ))
     }
 
+    /// Submit a close-position command using the venue-supported reduce-only path.
     pub async fn close_position(
         &self,
         request: &ClosePositionRequest,
@@ -202,6 +230,7 @@ impl<'a> EntryClient<'a> {
         Ok(PendingCommandHandle::from_ack(ack, receiver))
     }
 
+    /// Validate an order request without intentionally opening a position.
     pub async fn validate_order(
         &self,
         request: &ValidateOrderRequest,
@@ -215,6 +244,7 @@ impl<'a> EntryClient<'a> {
         ))
     }
 
+    /// Set leverage for the requested instrument/scope.
     pub async fn set_leverage(&self, request: &SetLeverageRequest) -> Result<PendingCommandHandle> {
         let receiver = self.inner.shared.subscribe_command_events();
         let receipt = runtime::set_leverage(&self.inner.live_context(), request).await?;
@@ -225,6 +255,7 @@ impl<'a> EntryClient<'a> {
         ))
     }
 
+    /// Set margin mode for the requested instrument/scope.
     pub async fn set_margin_mode(
         &self,
         request: &SetMarginModeRequest,
@@ -238,6 +269,7 @@ impl<'a> EntryClient<'a> {
         ))
     }
 
+    /// Set one-way or hedge position mode where the venue supports it.
     pub async fn set_position_mode(
         &self,
         request: &SetPositionModeRequest,

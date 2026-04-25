@@ -14,6 +14,7 @@ impl<'a> NativeClient<'a> {
         Self { inner }
     }
 
+    /// Return the Binance adapter when this client was built for Binance.
     #[cfg(feature = "binance")]
     pub fn binance(&self) -> Result<&bat_markets_binance::BinanceLinearFuturesAdapter> {
         match self.inner {
@@ -26,6 +27,7 @@ impl<'a> NativeClient<'a> {
         }
     }
 
+    /// Return the Bybit adapter when this client was built for Bybit.
     #[cfg(feature = "bybit")]
     pub fn bybit(&self) -> Result<&bat_markets_bybit::BybitLinearFuturesAdapter> {
         match self.inner {

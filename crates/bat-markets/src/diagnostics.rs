@@ -8,14 +8,20 @@ use crate::client::BatMarkets;
 /// Snapshot of observed lock wait/hold costs for shared engine state.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct LockDiagnosticsSnapshot {
+    /// Number of lock observations included in this snapshot.
     pub operations: u64,
+    /// Total observed time waiting to acquire the lock.
     pub wait_total_ns: u64,
+    /// Maximum observed time waiting to acquire the lock.
     pub wait_max_ns: u64,
+    /// Total observed time holding the lock.
     pub hold_total_ns: u64,
+    /// Maximum observed time holding the lock.
     pub hold_max_ns: u64,
 }
 
 impl LockDiagnosticsSnapshot {
+    /// Return the average lock wait time in nanoseconds.
     #[must_use]
     pub const fn average_wait_ns(&self) -> u64 {
         if self.operations == 0 {
@@ -25,6 +31,7 @@ impl LockDiagnosticsSnapshot {
         }
     }
 
+    /// Return the average lock hold time in nanoseconds.
     #[must_use]
     pub const fn average_hold_ns(&self) -> u64 {
         if self.operations == 0 {
@@ -38,12 +45,16 @@ impl LockDiagnosticsSnapshot {
 /// Snapshot of accumulated runtime latency for a named operation.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct LatencyDiagnosticsSnapshot {
+    /// Number of operation observations included in this snapshot.
     pub operations: u64,
+    /// Total observed operation latency.
     pub total_ns: u64,
+    /// Maximum observed operation latency.
     pub max_ns: u64,
 }
 
 impl LatencyDiagnosticsSnapshot {
+    /// Return the average observed latency in nanoseconds.
     #[must_use]
     pub const fn average_ns(&self) -> u64 {
         if self.operations == 0 {
@@ -57,35 +68,65 @@ impl LatencyDiagnosticsSnapshot {
 /// Cheap runtime and lock diagnostics for live operator inspection.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct RuntimeDiagnosticsSnapshot {
+    /// Shared-state read lock wait/hold costs.
     pub state_reads: LockDiagnosticsSnapshot,
+    /// Shared-state write lock wait/hold costs.
     pub state_writes: LockDiagnosticsSnapshot,
+    /// Live metadata refresh latency.
     pub refresh_metadata: LatencyDiagnosticsSnapshot,
+    /// Public REST ticker fetch latency.
     pub fetch_ticker: LatencyDiagnosticsSnapshot,
+    /// Public REST mark-price fetch latency.
     pub fetch_mark_price: LatencyDiagnosticsSnapshot,
+    /// Public REST funding-rate fetch latency.
     pub fetch_funding_rate: LatencyDiagnosticsSnapshot,
+    /// Public REST trade fetch latency.
     pub fetch_trades: LatencyDiagnosticsSnapshot,
+    /// Public REST top-of-book fetch latency.
     pub fetch_book_top: LatencyDiagnosticsSnapshot,
+    /// Public REST order-book fetch latency.
     pub fetch_order_book: LatencyDiagnosticsSnapshot,
+    /// Public liquidation cache/fetch latency.
     pub fetch_liquidations: LatencyDiagnosticsSnapshot,
+    /// Public REST OHLCV fetch latency.
     pub fetch_ohlcv: LatencyDiagnosticsSnapshot,
+    /// Account refresh latency.
     pub refresh_account: LatencyDiagnosticsSnapshot,
+    /// Position refresh latency.
     pub refresh_positions: LatencyDiagnosticsSnapshot,
+    /// Open-order refresh latency.
     pub refresh_open_orders: LatencyDiagnosticsSnapshot,
+    /// Execution-history refresh latency.
     pub refresh_executions: LatencyDiagnosticsSnapshot,
+    /// Single-order REST lookup latency.
     pub get_order: LatencyDiagnosticsSnapshot,
+    /// Create-order command latency.
     pub create_order: LatencyDiagnosticsSnapshot,
+    /// Batch create-order command latency.
     pub create_orders: LatencyDiagnosticsSnapshot,
+    /// Amend-order command latency.
     pub amend_order: LatencyDiagnosticsSnapshot,
+    /// Batch amend-order command latency.
     pub amend_orders: LatencyDiagnosticsSnapshot,
+    /// Cancel-order command latency.
     pub cancel_order: LatencyDiagnosticsSnapshot,
+    /// Batch cancel-order command latency.
     pub cancel_orders: LatencyDiagnosticsSnapshot,
+    /// Cancel-all-orders command latency.
     pub cancel_all_orders: LatencyDiagnosticsSnapshot,
+    /// Close-position command latency.
     pub close_position: LatencyDiagnosticsSnapshot,
+    /// Validate-order command latency.
     pub validate_order: LatencyDiagnosticsSnapshot,
+    /// Set-leverage command latency.
     pub set_leverage: LatencyDiagnosticsSnapshot,
+    /// Set-margin-mode command latency.
     pub set_margin_mode: LatencyDiagnosticsSnapshot,
+    /// Set-position-mode command latency.
     pub set_position_mode: LatencyDiagnosticsSnapshot,
+    /// Private reconcile cycle latency.
     pub reconcile_private: LatencyDiagnosticsSnapshot,
+    /// Open-interest refresh latency.
     pub refresh_open_interest: LatencyDiagnosticsSnapshot,
 }
 
@@ -99,6 +140,10 @@ impl<'a> DiagnosticsClient<'a> {
         Self { inner }
     }
 
+    /// Return a point-in-time diagnostics snapshot.
+    ///
+    /// The snapshot combines shared-state lock diagnostics with live runtime
+    /// operation latency counters.
     #[must_use]
     pub fn snapshot(&self) -> RuntimeDiagnosticsSnapshot {
         let mut snapshot = self.inner.runtime_state.diagnostics.snapshot();

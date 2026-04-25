@@ -14,6 +14,7 @@ impl<'a> HealthClient<'a> {
         Self { inner }
     }
 
+    /// Return the current health snapshot.
     #[must_use]
     pub fn snapshot(&self) -> HealthReport {
         self.inner.shared.health_snapshot()

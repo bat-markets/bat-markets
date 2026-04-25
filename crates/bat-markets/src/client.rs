@@ -268,76 +268,98 @@ pub struct BatMarkets {
 }
 
 impl BatMarkets {
+    /// Start configuring a single venue/product engine instance.
     #[must_use]
     pub fn builder() -> BatMarketsBuilder {
         BatMarketsBuilder::default()
     }
 
+    /// Return the venue selected for this engine instance.
     #[must_use]
     pub fn venue(&self) -> Venue {
         self.adapter.as_adapter().venue()
     }
 
+    /// Return the product family selected for this engine instance.
     #[must_use]
     pub fn product(&self) -> Product {
         self.adapter.as_adapter().product()
     }
 
+    /// Return the adapter capability matrix for this venue/product pair.
     #[must_use]
     pub fn capabilities(&self) -> CapabilitySet {
         self.adapter.capabilities()
     }
 
+    /// Return the public/private/command lane support advertised by the adapter.
     #[must_use]
     pub fn lane_set(&self) -> LaneSet {
         self.adapter.lane_set()
     }
 
+    /// Return the current cached instrument metadata.
+    ///
+    /// This is a local snapshot read. In live mode use
+    /// [`MarketClient::refresh_metadata`](crate::MarketClient::refresh_metadata)
+    /// when fresh venue metadata is required.
     #[must_use]
     pub fn instrument_specs(&self) -> Vec<InstrumentSpec> {
         self.shared.read(EngineState::instrument_specs)
     }
 
+    /// Access market snapshots and public REST reads.
     #[must_use]
     pub fn market(&self) -> MarketClient<'_> {
         MarketClient::new(self)
     }
 
+    /// Access public, private, and command stream lanes.
     #[must_use]
     pub fn stream(&self) -> StreamClient<'_> {
         StreamClient::new(self)
     }
 
+    /// Access read-side order and execution state.
     #[must_use]
     pub fn trade(&self) -> TradeClient<'_> {
         TradeClient::new(self)
     }
 
+    /// Access write-side order-entry and account-setting commands.
     #[must_use]
     pub fn entry(&self) -> EntryClient<'_> {
         EntryClient::new(self)
     }
 
+    /// Access position snapshots and compatibility position settings methods.
     #[must_use]
     pub fn position(&self) -> PositionClient<'_> {
         PositionClient::new(self)
     }
 
+    /// Access account balances and summary state.
     #[must_use]
     pub fn account(&self) -> AccountClient<'_> {
         AccountClient::new(self)
     }
 
+    /// Access cheap health snapshots and health-change subscriptions.
     #[must_use]
     pub fn health(&self) -> HealthClient<'_> {
         HealthClient::new(self)
     }
 
+    /// Access local runtime and shared-state diagnostics.
     #[must_use]
     pub fn diagnostics(&self) -> DiagnosticsClient<'_> {
         DiagnosticsClient::new(self)
     }
 
+    /// Access venue-specific adapter functionality.
+    ///
+    /// Use this only when unified facade methods would hide important
+    /// exchange-specific behavior.
     #[must_use]
     pub fn native(&self) -> NativeClient<'_> {
         NativeClient::new(&self.adapter)
@@ -434,18 +456,25 @@ pub struct BatMarketsBuilder {
 }
 
 impl BatMarketsBuilder {
+    /// Select the exchange venue for the engine instance.
     #[must_use]
     pub fn venue(mut self, venue: Venue) -> Self {
         self.venue = Some(venue);
         self
     }
 
+    /// Select the product family.
+    ///
+    /// The default is [`Product::LinearUsdt`] when omitted.
     #[must_use]
     pub fn product(mut self, product: Product) -> Self {
         self.product = Some(product);
         self
     }
 
+    /// Replace the full runtime config.
+    ///
+    /// The config venue/product become the builder venue/product.
     #[must_use]
     pub fn config(mut self, config: BatMarketsConfig) -> Self {
         self.venue = Some(config.venue);
@@ -454,6 +483,10 @@ impl BatMarketsBuilder {
         self
     }
 
+    /// Build an offline/static client without live REST or websocket bootstrap.
+    ///
+    /// This constructor is intended for fixtures, tests, local payload ingestion,
+    /// and applications that only need adapter metadata bundled with the crate.
     pub fn build(self) -> Result<BatMarkets> {
         let config = self.resolve_config(false)?;
         let adapter = build_adapter_handle(config.clone())?;

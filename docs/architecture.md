@@ -34,6 +34,38 @@ The public facade must stay:
 Unified APIs exist only where semantics are actually stable.
 Venue-specific behavior stays in `native()`.
 
+## Public Facade Ownership
+
+Each public surface owns one job. If a new method does not fit one row, the API
+boundary should be reconsidered before it is added.
+
+| Surface | Responsibility | Avoid putting here |
+| --- | --- | --- |
+| `BatMarkets` | construct and route one venue/product engine instance | venue-specific protocol details |
+| `market()` | cached market snapshots and public REST reads | account state or command writes |
+| `stream().public()` | public feed ingest, local subscriptions, and shared live watchers | synchronous REST fetches |
+| `stream().private()` | private feed ingest, account-stream watchers, and manual reconcile | order-entry submission |
+| `stream().command()` | command-bus observation and low-level command classification | user-facing write orchestration |
+| `entry()` | low-latency write commands with lifecycle handles | read-side order history |
+| `trade()` | read-side order and execution snapshots/refreshes | new write APIs |
+| `position()` | position snapshots and compatibility settings methods | market data |
+| `account()` | balances and account summary | order lifecycle tracking |
+| `health()` | cheap health snapshots and health-change subscriptions | metrics aggregation |
+| `diagnostics()` | local runtime and lock latency snapshots | external telemetry exporters |
+| `native()` | explicit venue-specific escape hatch | fake unified guarantees |
+
+## Method Contract Rules
+
+- `build()` is offline/static and must not perform network I/O.
+- `build_live().await` performs live bootstrap before returning the facade.
+- Snapshot getters are synchronous reads from cached `EngineState`.
+- `fetch_*` is reserved for public REST reads that do not imply account state repair.
+- `refresh_*` is reserved for REST reads that merge results into engine state.
+- `subscribe_*` attaches to an existing local event bus.
+- `watch_*` acquires a shared websocket-hub lease and returns typed updates.
+- `entry().*` owns new write flows; read-side compatibility write methods should
+  remain deprecated until they are removed in a breaking release.
+
 ## Three API Layers
 
 ### Native
