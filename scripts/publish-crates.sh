@@ -2,6 +2,8 @@
 
 set -euo pipefail
 
+cd "$(dirname "${BASH_SOURCE[0]}")/.."
+
 dry_run=false
 
 while [[ $# -gt 0 ]]; do
@@ -16,6 +18,8 @@ while [[ $# -gt 0 ]]; do
   esac
   shift
 done
+
+./scripts/verify-release.sh
 
 workspace_version="$(
   awk '
@@ -40,13 +44,21 @@ if [[ -n "${release_tag}" && "${release_tag}" == v* && "${release_tag}" != "v${w
   exit 1
 fi
 
+require_clean_worktree() {
+  if [[ -n "$(git status --porcelain)" ]]; then
+    echo "publishing requires a clean git worktree" >&2
+    git status --short >&2
+    exit 1
+  fi
+}
+
 if [[ "${dry_run}" == "true" ]]; then
-  cargo package --workspace --exclude bat-markets-testing --allow-dirty
-  cargo publish -p bat-markets-core --dry-run --allow-dirty
+  cargo package --workspace --exclude bat-markets-testing
   echo "dry run complete for v${workspace_version}"
-  echo "downstream publish dry-runs require bat-markets-core v${workspace_version} to exist in crates.io first"
   exit 0
 fi
+
+require_clean_worktree
 
 if [[ "${release_tag}" != v* ]]; then
   echo "publishing requires a v-prefixed release tag; set BAT_MARKETS_RELEASE_TAG or run from a v* GitHub ref" >&2

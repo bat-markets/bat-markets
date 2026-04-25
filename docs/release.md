@@ -20,7 +20,9 @@ Workspace-only crate:
 
 All runtime crates share the workspace version. For `0.x`, public API changes can
 still happen, but each published crate must keep dependency versions aligned with
-the workspace release.
+the workspace release. Release automation treats the workspace version as the
+single source of truth and refuses to publish when any internal dependency,
+`Cargo.lock`, changelog entry, or `v*` tag is out of sync.
 
 Dependency order:
 
@@ -35,21 +37,29 @@ Run:
 
 ```bash
 ./scripts/check.sh
-cargo audit
 ```
 
-Before publishing the first crate, run local package verification for the whole
-runtime graph:
+This gate runs:
+
+- release consistency verification,
+- formatting,
+- all-target/all-feature clippy,
+- workspace tests and doctests,
+- workspace docs,
+- single-venue clippy,
+- `cargo audit`,
+- strict workspace packaging,
+- benchmark compilation.
+
+Before publishing, run package verification for the whole runtime graph:
 
 ```bash
-cargo package --workspace --exclude bat-markets-testing --allow-dirty
 ./scripts/publish-crates.sh --dry-run
 ```
 
-Downstream dry-runs resolve dependencies from the crates.io index. Before
-`bat-markets-core` is published, adapter dry-runs are expected to fail with
-`no matching package named bat-markets-core found`. Publish each dependency,
-wait for the index to update, then dry-run and publish the next crate.
+The dry-run packages all publishable runtime crates together and verifies the
+same dependency graph that crates.io will receive. It does not rely on expected
+downstream failures.
 
 ## Publishing
 
@@ -80,6 +90,8 @@ git push origin "v${VERSION}"
 
 The publish workflow verifies the repository, publishes in dependency order, and
 waits for each crate version to become visible before publishing dependants.
+It runs with workflow concurrency so only one crates.io publication can happen at
+a time.
 
 Manual fallback:
 
@@ -87,7 +99,9 @@ Manual fallback:
 CARGO_REGISTRY_TOKEN=... ./scripts/publish-crates.sh
 ```
 
-Never commit tokens, write them into scripts, or paste them into logs.
+The manual fallback also refuses dirty worktrees, mismatched tags, stale
+lockfiles, and internal dependency version drift. Never commit tokens, write
+them into scripts, or paste them into logs.
 
 ## Trusted Publishing
 
