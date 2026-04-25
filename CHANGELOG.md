@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 0.3.1 - 2026-04-25
+
+- remove non-essential docs pages (`capability-matrix`, `error-model`, migration guides, roadmap) and keep docs focused on architecture and release flow
+- simplify the README documentation block to only stable, working links
+- add automatic GitHub Release creation in the publish workflow so tag-driven publishing remains consistent across Releases and crates.io
+
 ## 0.3.0 - 2026-04-25
 
 - remove legacy nested facade accessors and lane-client exports from the public crate surface

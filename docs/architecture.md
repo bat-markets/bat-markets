@@ -22,7 +22,7 @@ Measured on 2026-04-25 from commit `fcc2597` tagged `v0.3.0`.
 | Rust source files in `crates/` | 51 |
 | Fixture JSON files | 39 |
 | Test and doctest entries | 105 |
-| Documentation Markdown files | 14 regular files plus `docs/blueprint.md` symlink |
+| Documentation Markdown files | 9 regular files plus `docs/blueprint.md` symlink |
 
 Package footprint from the release gate:
 
@@ -101,7 +101,7 @@ everything.
 | `scripts/check.sh` | One local/CI quality gate |
 | `scripts/verify-release.sh` | Version, changelog, lockfile, and tag consistency |
 | `scripts/publish-crates.sh` | Dependency-ordered crates.io publish |
-| `docs/` | Architecture, capability, error, release, migration, roadmap docs |
+| `docs/` | Architecture, release process, and ADRs |
 | `fixtures/binance/` | Binance deterministic protocol fixtures |
 | `fixtures/bybit/` | Bybit deterministic protocol fixtures |
 

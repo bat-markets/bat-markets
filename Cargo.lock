@@ -77,7 +77,7 @@ checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 
 [[package]]
 name = "bat-markets"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "bat-markets-binance",
  "bat-markets-bybit",
@@ -94,7 +94,7 @@ dependencies = [
 
 [[package]]
 name = "bat-markets-binance"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "bat-markets-core",
  "parking_lot",
@@ -106,7 +106,7 @@ dependencies = [
 
 [[package]]
 name = "bat-markets-bybit"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "bat-markets-core",
  "parking_lot",
@@ -118,7 +118,7 @@ dependencies = [
 
 [[package]]
 name = "bat-markets-core"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "hex",
  "hmac",
@@ -133,7 +133,7 @@ dependencies = [
 
 [[package]]
 name = "bat-markets-testing"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "bat-markets",
  "bat-markets-binance",

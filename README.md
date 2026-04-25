@@ -306,9 +306,4 @@ environment variables. Never commit tokens.
 ## Documentation
 
 - [Architecture](https://github.com/bat-markets/bat-markets/blob/main/docs/architecture.md)
-- [Capability matrix](https://github.com/bat-markets/bat-markets/blob/main/docs/capability-matrix.md)
-- [Error model](https://github.com/bat-markets/bat-markets/blob/main/docs/error-model.md)
-- [v0.3 migration guide](https://github.com/bat-markets/bat-markets/blob/main/docs/migration-v0.3.md)
-- [v0.2 migration guide](https://github.com/bat-markets/bat-markets/blob/main/docs/migration-v0.2.md)
 - [Release process](https://github.com/bat-markets/bat-markets/blob/main/docs/release.md)
-- [Roadmap](https://github.com/bat-markets/bat-markets/blob/main/docs/roadmap.md)
