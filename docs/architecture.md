@@ -41,7 +41,7 @@ The code footprint by source area:
 | `crates/bat-markets-binance` | 3 | 2 | 0 | 0 | 2,480 |
 | `crates/bat-markets-bybit` | 3 | 2 | 0 | 0 | 2,203 |
 | `crates/bat-markets-testing` | 11 | 10 | 0 | 0 | 5,856 |
-| `docs` | 14 regular files | 0 | 14 | 0 | 1,360 |
+| `docs` | 14 regular files | 0 | 14 | 0 | 1,438 |
 | `fixtures` | 39 | 0 | 0 | 39 | 58 |
 | `scripts` | 3 | 0 | 0 | 0 | 229 |
 | `.github/workflows` | 2 | 0 | 0 | 0 | 95 |
@@ -65,6 +65,15 @@ cargo bench -p bat-markets-testing --bench engine -- --sample-size 10 --measurem
 
 These numbers are a local engineering baseline, not a public SLA. They cover
 fixture/stub paths and should be compared on the same machine and command line.
+
+Package footprint from the release gate:
+
+| Package | Packaged files | Uncompressed | Compressed |
+| --- | ---: | ---: | ---: |
+| `bat-markets-core` | 26 | 130.3 KiB | 27.8 KiB |
+| `bat-markets-binance` | 7 | 111.6 KiB | 20.8 KiB |
+| `bat-markets-bybit` | 7 | 101.1 KiB | 20.1 KiB |
+| `bat-markets` | 21 | 546.2 KiB | 80.1 KiB |
 
 ## Product Shape
 
@@ -276,6 +285,55 @@ Fixtures are grouped by venue:
 
 The fixture set is intentionally checked in. It gives deterministic protocol
 coverage without requiring live credentials for normal CI.
+
+Binance fixture inventory:
+
+| File | Covers |
+| --- | --- |
+| `fixtures/binance/command_amend_ok.json` | Single edit-order success response |
+| `fixtures/binance/command_batch_amend_ok.json` | Batch edit-order success response |
+| `fixtures/binance/command_batch_cancel_ok.json` | Batch cancel success response |
+| `fixtures/binance/command_batch_create_ok.json` | Batch create-order success response |
+| `fixtures/binance/command_create_ok.json` | Single create-order success response |
+| `fixtures/binance/command_leverage_ok.json` | Leverage setting response |
+| `fixtures/binance/command_margin_mode_ok.json` | Margin-mode setting response |
+| `fixtures/binance/command_reject.json` | Exchange rejection response |
+| `fixtures/binance/open_interest.json` | REST open-interest snapshot |
+| `fixtures/binance/order_history.json` | REST order-history snapshot |
+| `fixtures/binance/private_account_update.json` | Private account update stream payload |
+| `fixtures/binance/private_order_trade_update.json` | Private order/trade stream payload |
+| `fixtures/binance/public_book_ticker.json` | Public top-of-book stream payload |
+| `fixtures/binance/public_kline.json` | Public kline stream payload |
+| `fixtures/binance/public_liquidation.json` | Public liquidation stream payload |
+| `fixtures/binance/public_mark_price.json` | Public mark-price stream payload |
+| `fixtures/binance/public_ticker.json` | Public ticker stream payload |
+| `fixtures/binance/public_trade.json` | Public trade stream payload |
+| `fixtures/binance/user_trades.json` | REST user-trade history snapshot |
+
+Bybit fixture inventory:
+
+| File | Covers |
+| --- | --- |
+| `fixtures/bybit/command_amend_ok.json` | Single edit-order success response |
+| `fixtures/bybit/command_batch_amend_ok.json` | Batch edit-order success response |
+| `fixtures/bybit/command_batch_cancel_ok.json` | Batch cancel success response |
+| `fixtures/bybit/command_batch_create_ok.json` | Batch create-order success response |
+| `fixtures/bybit/command_create_ok.json` | Single create-order success response |
+| `fixtures/bybit/command_reject.json` | Exchange rejection response |
+| `fixtures/bybit/execution_history.json` | REST execution-history snapshot |
+| `fixtures/bybit/order_history.json` | REST order-history snapshot |
+| `fixtures/bybit/private_execution.json` | Private execution stream payload |
+| `fixtures/bybit/private_execution_late_after_cancel.json` | Late fill after cancel edge case |
+| `fixtures/bybit/private_order.json` | Private order stream payload |
+| `fixtures/bybit/private_order_canceled.json` | Private canceled-order stream payload |
+| `fixtures/bybit/private_position.json` | Private position stream payload |
+| `fixtures/bybit/private_wallet.json` | Private wallet stream payload |
+| `fixtures/bybit/public_kline.json` | Public kline stream payload |
+| `fixtures/bybit/public_liquidation.json` | Public liquidation stream payload |
+| `fixtures/bybit/public_orderbook.json` | Public order-book stream payload |
+| `fixtures/bybit/public_orderbook_gap.json` | Public order-book sequence-gap edge case |
+| `fixtures/bybit/public_ticker.json` | Public ticker stream payload |
+| `fixtures/bybit/public_trade.json` | Public trade stream payload |
 
 ## Runtime Architecture
 
