@@ -1,8 +1,8 @@
 # Migration to v0.3
 
 v0.3 removes the legacy nested facade that was kept as a hidden compatibility
-bridge during the v0.2 transition. New code should use the root CCXT-style API
-and reserve `advanced()` for raw/custom integration points.
+bridge during the v0.2 transition. New code should use root methods and reserve
+`advanced()` for raw/custom integration points.
 
 ## Direct Replacements
 

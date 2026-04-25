@@ -200,7 +200,7 @@ pub struct Liquidation {
     pub event_time: TimestampMs,
 }
 
-/// Unified OHLCV interval in ccxt-style notation.
+/// Canonical OHLCV interval.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum KlineInterval {
     Minute1,
@@ -242,7 +242,7 @@ impl KlineInterval {
     }
 
     #[must_use]
-    pub const fn as_ccxt_str(self) -> &'static str {
+    pub const fn as_interval_str(self) -> &'static str {
         match self {
             Self::Minute1 => "1m",
             Self::Minute3 => "3m",
@@ -263,7 +263,7 @@ impl KlineInterval {
 
     #[must_use]
     pub const fn as_binance_str(self) -> &'static str {
-        self.as_ccxt_str()
+        self.as_interval_str()
     }
 
     #[must_use]
@@ -323,7 +323,7 @@ impl KlineInterval {
 
 impl From<KlineInterval> for Box<str> {
     fn from(value: KlineInterval) -> Self {
-        value.as_ccxt_str().into()
+        value.as_interval_str().into()
     }
 }
 

@@ -103,13 +103,13 @@ pub struct AmendOrdersRequest {
     pub orders: Vec<AmendOrderRequest>,
 }
 
-/// Edit-order request for the public CCXT-style API.
+/// Edit-order request for the public root API.
 ///
 /// This is the public v0.2 name for an order amendment. The wire behavior is
 /// identical to [`AmendOrderRequest`].
 pub type EditOrderRequest = AmendOrderRequest;
 
-/// Batch edit-order request for the public CCXT-style API.
+/// Batch edit-order request for the public root API.
 ///
 /// This is the public v0.2 name for a batch order amendment. The wire behavior
 /// is identical to [`AmendOrdersRequest`].

@@ -4,8 +4,8 @@ use bat_markets_core::{ErrorKind, HealthReport, MarketError, Result};
 
 /// RAII-style watcher for runtime status changes.
 ///
-/// Dropping the watcher releases the local subscription. There is no global
-/// `un_watch` method because Rust ownership already scopes the subscription.
+/// Dropping the watcher releases the local subscription. Rust ownership scopes
+/// the subscription without a global stop method.
 pub struct StatusWatch {
     receiver: watch::Receiver<HealthReport>,
 }

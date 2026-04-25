@@ -14,7 +14,7 @@
 
 ## 0.2.0 - 2026-04-25
 
-- redesign the primary facade around CCXT-style root methods: `fetch_*`, `watch_*`, command verbs, and `advanced()`
+- redesign the primary facade around root methods: `fetch_*`, `watch_*`, command verbs, and `advanced()`
 - add root metadata, public REST, private REST, public WS, private WS, command, status, and advanced methods on `BatMarkets`
 - add public `EditOrderRequest` and `EditOrdersRequest` names while keeping internal amend semantics compatible
 - make `fetch_balance()` return a full `AccountSnapshot` with balances and summary
@@ -40,12 +40,12 @@
 - prepare `0.1.x` as a crates.io release with publishable runtime crates, package checks, and registry documentation
 - add live diagnostics snapshots for shared-state lock wait/hold costs and key runtime latencies to guide future perf decisions
 - add unified `market().fetch_ohlcv(...)` for Binance and Bybit REST kline history
-- allow unified `market().fetch_ohlcv(...)` to batch `1..=30` instruments per call while preserving ccxt-style intervals and per-candle `instrument_id`
+- allow `market().fetch_ohlcv(...)` to batch `1..=30` instruments per call while preserving canonical intervals and per-candle `instrument_id`
 - make `market().fetch_ohlcv(...)` fully paginate bounded OHLCV ranges whenever both `start_time` and `end_time` are provided; `fetch_ohlcv_window(...)` and `fetch_ohlcv_all(...)` remain compatibility aliases
 - add typed `stream().public().watch_ohlcv(...)` for one or many symbols on Binance and Bybit
 - add unified `market().fetch_ticker(...)`, `market().fetch_trades(...)`, and `market().fetch_book_top(...)` for public market snapshots
 - add typed `stream().public().watch_ticker(...)`, `watch_trades(...)`, and `watch_book_top(...)` for one or many symbols
-- normalize OHLCV intervals to ccxt-style values like `1m`, `5m`, `1h`, and `1d` across REST fetches and websocket watches
+- normalize OHLCV intervals to canonical values like `1m`, `5m`, `1h`, and `1d` across REST fetches and websocket watches
 - fix live Bybit `watch_ohlcv()` parsing when websocket kline payloads omit per-row `symbol` and only surface it in the topic name
 - add realistic OHLCV stress harness coverage for multi-symbol live fetch/watch flows and frontend-style `30 symbols x 3 days x 1m` paging
 - remove bundled examples and the Bun realtime operator panel from the public package surface

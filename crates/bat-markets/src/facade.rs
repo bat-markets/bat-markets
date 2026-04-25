@@ -30,7 +30,7 @@ use crate::{
 impl BatMarkets {
     /// Return the cached market metadata currently known to the engine.
     ///
-    /// This is the CCXT-style local metadata accessor. It never performs
+    /// This is the local metadata accessor. It never performs
     /// network I/O. Use [`Self::load_markets`] when live venue metadata should
     /// be refreshed first.
     #[must_use]
@@ -73,7 +73,7 @@ impl BatMarkets {
     /// Fetch historical OHLCV candles through REST.
     ///
     /// `FetchOhlcvRequest` keeps the time-window and multi-symbol parameters
-    /// explicit while preserving the CCXT `fetch_ohlcv` method family.
+    /// explicit while preserving the root `fetch_ohlcv` method family.
     pub async fn fetch_ohlcv(&self, request: &FetchOhlcvRequest) -> Result<Vec<Kline>> {
         fetch_ohlcv(self, request).await
     }

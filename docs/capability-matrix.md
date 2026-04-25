@@ -1,8 +1,9 @@
 # Capability Matrix
 
-This matrix documents the current `0.3.x` CCXT-style root surface after the legacy facade cleanup, live transport integration, and WS-first command/runtime pass.
+This matrix documents the current `0.3.x` root API after the legacy facade
+cleanup, live transport integration, and WS-first command/runtime pass.
 
-## Unified Surface
+## Root Surface
 
 | Area | Binance Linear Futures | Bybit Linear Futures | Notes |
 | --- | --- | --- | --- |
@@ -21,7 +22,7 @@ This matrix documents the current `0.3.x` CCXT-style root surface after the lega
 | recent trades fetch | yes | yes | REST-backed recent public trades via `fetch_trades(...)` |
 | focused order book fetch | yes | yes | REST-backed depth snapshot via `fetch_order_book(...)` |
 | liquidation fetch | yes | yes | cache-backed via `fetch_liquidations(...)` after live liquidation flow warms the cache |
-| OHLCV fetch | yes | yes | REST-backed unified candles via `fetch_ohlcv(...)`; intervals use ccxt-style strings such as `1m`, `5m`, `1h`, `1d`, and each call can batch `1..=30` instruments |
+| OHLCV fetch | yes | yes | REST-backed candles via `fetch_ohlcv(...)`; intervals use canonical strings such as `1m`, `5m`, `1h`, `1d`, and each call can batch `1..=30` instruments |
 | OHLCV full-window fetch | yes | yes | `fetch_ohlcv(...)` fully paginates a bounded `start_time..end_time` range across the requested symbol batch |
 | ticker watch | yes | yes | typed live ticker snapshots via `watch_ticker(...)` / `watch_tickers(...)` |
 | trades watch | yes | yes | typed live trades via `watch_trades(...)` / `watch_trades_for_symbols(...)` |
@@ -30,7 +31,7 @@ This matrix documents the current `0.3.x` CCXT-style root surface after the lega
 | open interest watch | yes | yes | typed live open-interest updates via `watch_open_interest(...)` |
 | focused order book watch | yes | yes | typed focused-symbol depth via `watch_order_book(...)` |
 | liquidations watch | yes | yes | typed liquidation flow via `watch_liquidations(...)` |
-| OHLCV watch | yes | yes | typed live candles via `watch_ohlcv(...)` / `watch_ohlcv_for_symbols(...)`; one or many symbols per watcher, same ccxt-style interval surface |
+| OHLCV watch | yes | yes | typed live candles via `watch_ohlcv(...)` / `watch_ohlcv_for_symbols(...)`; one or many symbols per watcher, same interval surface |
 | orders watch | yes | yes | typed private order updates via `watch_orders()` |
 | executions watch | yes | yes | typed private execution updates via `watch_my_trades()` |
 | positions watch | yes | yes | typed private position updates via `watch_positions()` |

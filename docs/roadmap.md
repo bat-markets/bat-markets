@@ -3,8 +3,8 @@
 ## Current Milestone
 
 Ship a registry-ready `0.3.x` facade for Binance and Bybit linear futures with
-a CCXT-style root API, clean documentation, shared websocket hubs, explicit
-command lifecycle semantics, and no legacy nested facade surface.
+a root-level API, clean documentation, shared websocket hubs, explicit command
+lifecycle semantics, and no legacy nested facade surface.
 
 ## In Scope
 

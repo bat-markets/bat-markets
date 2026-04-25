@@ -1541,7 +1541,7 @@ fn parse_binance_kline_row(
 
     Ok(Kline {
         instrument_id: spec.instrument_id.clone(),
-        interval: interval.as_ccxt_str().into(),
+        interval: interval.as_interval_str().into(),
         open: spec.price_from_fast(
             Price::new(parse_decimal(parse_str_value(&row[1], "open")?)?)
                 .quantize(spec.price_scale)?,

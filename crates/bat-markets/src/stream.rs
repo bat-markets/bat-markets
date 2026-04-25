@@ -225,7 +225,7 @@ impl<'a> OhlcvUpdates<'a> {
                     )
                 })?;
             let mut unified = kline.to_unified(&spec);
-            unified.interval = requested_interval.as_ccxt_str().into();
+            unified.interval = requested_interval.as_interval_str().into();
             return Ok(unified);
         }
     }
@@ -1261,7 +1261,7 @@ impl<'a> PublicLaneClient<'a> {
 
     /// Spawn a reconnecting live OHLCV watcher for one or many instruments.
     ///
-    /// Intervals are accepted in unified ccxt-style notation such as `1m`, `5m`, `1h`,
+    /// Intervals are accepted in canonical notation such as `1m`, `5m`, `1h`,
     /// `1d`, `1w`, and `1M`.
     ///
     /// ```no_run

@@ -418,7 +418,7 @@ async fn recv_kline(
                 let spec = client.advanced().require_instrument(&kline.instrument_id)?;
                 let mut kline = kline.to_unified(&spec);
                 if let Some(interval) = KlineInterval::parse(kline.interval.as_ref()) {
-                    kline.interval = interval.as_ccxt_str().into();
+                    kline.interval = interval.as_interval_str().into();
                 }
                 return Ok(kline);
             }

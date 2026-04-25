@@ -13,8 +13,8 @@ now lives directly on `BatMarkets`.
 | `create_*`, `edit_*`, `cancel_*`, `close_*`, `set_*` | command operation |
 | `advanced()` | raw lanes, diagnostics, manual reconcile, native adapter access |
 
-Rust does not need CCXT-style global `un_watch`. Watch handles own their lease:
-call `shutdown().await` when you want an explicit stop, or drop the handle.
+Rust does not need a global stop method. Watch handles own their lease: call
+`shutdown().await` when you want an explicit stop, or drop the handle.
 
 ## Direct Mappings
 
@@ -80,7 +80,7 @@ Public docs and root APIs use `edit_*` naming:
 
 `bat_markets::types` re-exports the `Edit*` names only. The lower-level core
 crate may still use amend terminology internally while the facade keeps the
-public contract CCXT-style.
+public contract root-level and edit-oriented.
 
 ## Websocket-Only Commands
 

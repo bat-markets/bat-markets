@@ -12,7 +12,7 @@ database layer, or custody/compliance platform.
 
 Provide a small, typed, futures-first Rust alternative to unified exchange APIs:
 
-- CCXT-style user ergonomics where semantics are stable.
+- Root-level user ergonomics where semantics are stable.
 - No fake unification where venues behave differently.
 - Low-latency websocket sharing and command handling.
 - Explicit reconciliation when an order outcome is uncertain.
