@@ -68,34 +68,61 @@
 
 #![deny(missing_docs)]
 
+#[cfg(not(any(feature = "binance", feature = "bybit")))]
+compile_error!(
+    "bat-markets requires at least one venue feature: enable `binance`, `bybit`, or default features."
+);
+
 /// Low-level advanced facade for custom transports and diagnostics.
+#[cfg(any(feature = "binance", feature = "bybit"))]
 pub mod advanced;
 /// Re-exported capability contracts from `bat-markets-core`.
+#[cfg(any(feature = "binance", feature = "bybit"))]
 pub mod capabilities;
 /// Engine facade and builder.
+#[cfg(any(feature = "binance", feature = "bybit"))]
 pub mod client;
 /// Re-exported runtime config contracts from `bat-markets-core`.
+#[cfg(any(feature = "binance", feature = "bybit"))]
 pub mod config;
+#[cfg(any(feature = "binance", feature = "bybit"))]
 mod diagnostics;
+#[cfg(any(feature = "binance", feature = "bybit"))]
 mod entry;
 /// Re-exported error contracts from `bat-markets-core`.
+#[cfg(any(feature = "binance", feature = "bybit"))]
 pub mod errors;
+#[cfg(any(feature = "binance", feature = "bybit"))]
 mod facade;
+#[cfg(any(feature = "binance", feature = "bybit"))]
 mod health;
+#[cfg(any(feature = "binance", feature = "bybit"))]
 mod native;
+#[cfg(any(feature = "binance", feature = "bybit"))]
 mod runtime;
+#[cfg(any(feature = "binance", feature = "bybit"))]
 mod stream;
+#[cfg(any(feature = "binance", feature = "bybit"))]
 mod subscriptions;
+#[cfg(any(feature = "binance", feature = "bybit"))]
 mod transport;
 /// Re-exported domain and request/response types from `bat-markets-core`.
+#[cfg(any(feature = "binance", feature = "bybit"))]
 pub mod types;
 
+#[cfg(any(feature = "binance", feature = "bybit"))]
 pub use advanced::AdvancedClient;
+#[cfg(any(feature = "binance", feature = "bybit"))]
 pub use client::{BatMarkets, BatMarketsBuilder};
+#[cfg(any(feature = "binance", feature = "bybit"))]
 pub use diagnostics::{LockDiagnosticsSnapshot, RuntimeDiagnosticsSnapshot};
+#[cfg(any(feature = "binance", feature = "bybit"))]
 pub use entry::PendingCommandHandle;
+#[cfg(any(feature = "binance", feature = "bybit"))]
 pub use health::StatusWatch;
+#[cfg(any(feature = "binance", feature = "bybit"))]
 pub use native::NativeClient;
+#[cfg(any(feature = "binance", feature = "bybit"))]
 pub use stream::{
     BalancesWatch, ExecutionsWatch, FundingRateWatch, LiquidationWatch, MarkPriceWatch, OhlcvWatch,
     OpenInterestWatch, OrderBookWatch, OrdersWatch, PositionsWatch, TickerWatch, TradesWatch,

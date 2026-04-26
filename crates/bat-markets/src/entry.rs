@@ -88,7 +88,7 @@ impl PendingCommandHandle {
             let CommandLaneEvent::Lifecycle(lifecycle) = event else {
                 continue;
             };
-            if matches_lifecycle(&self.ack.receipt, &lifecycle) {
+            if matches_lifecycle(&self.ack, &lifecycle) {
                 return Ok(lifecycle);
             }
         }
@@ -117,14 +117,12 @@ impl PendingCommandHandle {
     }
 }
 
-fn matches_lifecycle(receipt: &CommandReceipt, lifecycle: &CommandLifecycleEvent) -> bool {
+fn matches_lifecycle(ack: &CommandAck, lifecycle: &CommandLifecycleEvent) -> bool {
     match lifecycle {
-        CommandLifecycleEvent::Ack(ack)
-        | CommandLifecycleEvent::RecoveryScheduled(ack)
-        | CommandLifecycleEvent::RecoveryCompleted { ack, .. } => {
-            matches_receipt(receipt, &ack.receipt)
-        }
-        CommandLifecycleEvent::Receipt(other) => matches_receipt(receipt, other),
+        CommandLifecycleEvent::Ack(other)
+        | CommandLifecycleEvent::RecoveryScheduled(other)
+        | CommandLifecycleEvent::RecoveryCompleted { ack: other, .. } => ack == other,
+        CommandLifecycleEvent::Receipt(other) => matches_receipt(&ack.receipt, other),
     }
 }
 
@@ -143,7 +141,7 @@ fn matches_receipt(left: &CommandReceipt, right: &CommandReceipt) -> bool {
         return left_id == right_id;
     }
 
-    left.instrument_id == right.instrument_id
+    false
 }
 
 fn receipt_after_recovery(receipt: &CommandReceipt, report: &ReconcileReport) -> CommandReceipt {
@@ -183,8 +181,9 @@ fn timestamp_now_ms() -> bat_markets_core::TimestampMs {
 #[cfg(test)]
 mod tests {
     use bat_markets_core::{
-        CommandOperation, CommandReceipt, CommandStatus, Product, ReconcileOutcome,
-        ReconcileReport, ReconcileTrigger, TimestampMs, Venue,
+        CommandAck, CommandLifecycleEvent, CommandOperation, CommandReceipt, CommandStatus,
+        CommandTransport, InstrumentId, Product, ReconcileOutcome, ReconcileReport,
+        ReconcileTrigger, TimestampMs, Venue,
     };
 
     #[test]
@@ -221,6 +220,41 @@ mod tests {
             resolved.message.as_deref(),
             Some("1 pending command outcomes still unresolved")
         );
+    }
+
+    #[test]
+    fn receipts_without_explicit_identity_do_not_match_by_instrument_only() {
+        let left = receipt_for_instrument(TimestampMs::new(1));
+        let right = receipt_for_instrument(TimestampMs::new(2));
+
+        assert!(!super::matches_receipt(&left, &right));
+    }
+
+    #[test]
+    fn lifecycle_matching_requires_the_same_ack() {
+        let left = ack_for_instrument(TimestampMs::new(1));
+        let right = ack_for_instrument(TimestampMs::new(2));
+        let lifecycle = CommandLifecycleEvent::RecoveryCompleted {
+            ack: right,
+            report: report(ReconcileOutcome::Synchronized, "resolved"),
+        };
+
+        assert!(!super::matches_lifecycle(&left, &lifecycle));
+    }
+
+    fn receipt_for_instrument(acknowledged_at: TimestampMs) -> CommandReceipt {
+        let mut receipt = unknown_receipt();
+        receipt.instrument_id = Some(InstrumentId::from("BTC/USDT:USDT"));
+        receipt.message = Some(format!("ack at {}", acknowledged_at.value()).into());
+        receipt
+    }
+
+    fn ack_for_instrument(acknowledged_at: TimestampMs) -> CommandAck {
+        CommandAck {
+            receipt: receipt_for_instrument(acknowledged_at),
+            transport: CommandTransport::WebSocket,
+            acknowledged_at,
+        }
     }
 
     fn unknown_receipt() -> CommandReceipt {

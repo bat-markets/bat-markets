@@ -35,6 +35,10 @@ Feature flags:
 | `metrics` | Reserved for metrics integrations |
 | `serde` | Reserved for serde-facing API expansion |
 
+At least one venue feature must be enabled. The default build enables both
+venues; use `default-features = false` with `features = ["binance"]` or
+`features = ["bybit"]` for a single-venue build.
+
 ## Quick Start
 
 Offline/static client:

@@ -29,7 +29,7 @@ impl<'a> AdvancedClient<'a> {
     /// Decode a venue public websocket payload and merge its events into state.
     pub fn ingest_public_json(&self, payload: &str) -> Result<Vec<PublicLaneEvent>> {
         let events = self.inner.adapter.as_adapter().parse_public(payload)?;
-        self.inner.shared.apply_public_events(&events);
+        self.inner.shared.apply_public_events(&events)?;
         Ok(events)
     }
 

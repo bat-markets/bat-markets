@@ -9,8 +9,8 @@ use tokio::sync::{broadcast, watch};
 
 use bat_markets_core::{
     AuthConfig, BatMarketsConfig, CapabilitySet, CommandLaneEvent, EngineState, ErrorKind,
-    HealthNotification, HealthReport, InstrumentSpec, LaneSet, MarketError, MemorySigner,
-    PrivateLaneEvent, Product, PublicLaneEvent, Result, Signer, Venue, VenueAdapter,
+    HealthNotification, HealthReport, InstrumentId, InstrumentSpec, LaneSet, MarketError,
+    MemorySigner, PrivateLaneEvent, Product, PublicLaneEvent, Result, Signer, Venue, VenueAdapter,
 };
 
 #[cfg(feature = "binance")]
@@ -151,27 +151,42 @@ impl SharedState {
         self.health_notifications.subscribe()
     }
 
-    pub(crate) fn apply_public_events(&self, events: &[PublicLaneEvent]) {
+    pub(crate) fn apply_public_events(&self, events: &[PublicLaneEvent]) -> Result<()> {
         if events.is_empty() {
-            return;
+            return Ok(());
         }
+
+        self.write(|state| {
+            if events.len() > 1 {
+                let mut instruments = None;
+                for event in events {
+                    if let Some(instrument_id) = fallible_public_event_instrument_id(event)
+                        && !instruments
+                            .get_or_insert_with(|| state.instrument_specs())
+                            .iter()
+                            .any(|spec| &spec.instrument_id == instrument_id)
+                    {
+                        return Err(unknown_public_event_error(state, instrument_id));
+                    }
+                }
+            }
+            for event in events.iter().cloned() {
+                state.apply_public_event(event)?;
+            }
+            Ok(())
+        })?;
 
         for event in events.iter().cloned() {
             let _ = self.public_events.send(event);
         }
 
-        self.write(|state| {
-            for event in events.iter().cloned() {
-                let _ = state.apply_public_event(event);
-            }
-        });
+        Ok(())
     }
 
-    pub(crate) fn apply_public_event(&self, event: PublicLaneEvent) {
-        let _ = self.public_events.send(event.clone());
-        self.write(|state| {
-            let _ = state.apply_public_event(event.clone());
-        });
+    pub(crate) fn apply_public_event(&self, event: PublicLaneEvent) -> Result<()> {
+        self.write(|state| state.apply_public_event(event.clone()))?;
+        let _ = self.public_events.send(event);
+        Ok(())
     }
 
     pub(crate) fn subscribe_public_events(&self) -> broadcast::Receiver<PublicLaneEvent> {
@@ -553,10 +568,40 @@ fn should_publish_health_change(before: &HealthReport, after: &HealthReport) -> 
         || before.degraded_reason != after.degraded_reason
 }
 
+fn fallible_public_event_instrument_id(event: &PublicLaneEvent) -> Option<&InstrumentId> {
+    match event {
+        PublicLaneEvent::Ticker(ticker) => Some(&ticker.instrument_id),
+        PublicLaneEvent::Trade(trade) => Some(&trade.instrument_id),
+        PublicLaneEvent::BookTop(book_top) => Some(&book_top.instrument_id),
+        PublicLaneEvent::Kline(kline) => Some(&kline.instrument_id),
+        PublicLaneEvent::MarkPrice(mark_price) => Some(&mark_price.instrument_id),
+        PublicLaneEvent::Liquidation(liquidation) => Some(&liquidation.instrument_id),
+        PublicLaneEvent::OrderBookDelta(_)
+        | PublicLaneEvent::FundingRate(_)
+        | PublicLaneEvent::OpenInterest(_)
+        | PublicLaneEvent::Divergence(_) => None,
+    }
+}
+
+fn unknown_public_event_error(state: &EngineState, instrument_id: &InstrumentId) -> MarketError {
+    MarketError::new(
+        ErrorKind::ConfigError,
+        format!(
+            "unknown instrument {instrument_id} for {} {}",
+            state.venue(),
+            state.product()
+        ),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::resolve_auth;
-    use bat_markets_core::{AuthConfig, BatMarketsConfig, MemorySigner, Product, Signer, Venue};
+    use bat_markets_core::{
+        AuthConfig, BatMarketsConfig, EngineState, FastPrice, FastTicker, InstrumentId,
+        MemorySigner, Product, PublicLaneEvent, Signer, TimestampMs, Venue,
+    };
+    use tokio::sync::broadcast::error::TryRecvError;
 
     #[test]
     fn resolve_auth_supports_inline_credentials() {
@@ -579,5 +624,35 @@ mod tests {
             .sign_hex(b"payload")
             .expect("memory signer should sign deterministically");
         assert_eq!(signature, expected);
+    }
+
+    #[test]
+    fn rejected_public_event_is_not_published() {
+        let config = BatMarketsConfig::new(Venue::Binance, Product::LinearUsdt);
+        let shared = super::SharedState::new(EngineState::new(
+            Venue::Binance,
+            Product::LinearUsdt,
+            config.state,
+            Vec::new(),
+        ));
+        let mut receiver = shared.subscribe_public_events();
+        let instrument_id = InstrumentId::from("UNKNOWN/USDT:USDT");
+        let event = PublicLaneEvent::Ticker(FastTicker {
+            instrument_id: instrument_id.clone(),
+            last_price: FastPrice::new(1),
+            mark_price: None,
+            index_price: None,
+            volume_24h: None,
+            turnover_24h: None,
+            event_time: TimestampMs::new(1),
+        });
+
+        let error = shared
+            .apply_public_event(event)
+            .expect_err("unknown-instrument public event must be rejected");
+
+        assert!(error.message.contains(instrument_id.as_ref()));
+        assert!(shared.read(|state| state.ticker(&instrument_id).is_none()));
+        assert!(matches!(receiver.try_recv(), Err(TryRecvError::Empty)));
     }
 }
