@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.3.2 - 2026-04-26
+
 - keep public event broadcasts consistent with accepted engine state and reject unknown-instrument public events before subscribers see them
 - tighten command lifecycle matching so concurrent same-operation commands without shared explicit ids cannot consume each other's events
 - fail zero-venue builds with an explicit feature-selection error instead of cfg-related compiler fallout

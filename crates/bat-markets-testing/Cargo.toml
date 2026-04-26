@@ -11,10 +11,10 @@ publish = false
 description = "Fixtures, smoke helpers, and benches for bat-markets"
 
 [dependencies]
-bat-markets = { path = "../bat-markets", version = "0.3.1" }
-bat-markets-binance = { path = "../bat-markets-binance", version = "0.3.1" }
-bat-markets-bybit = { path = "../bat-markets-bybit", version = "0.3.1" }
-bat-markets-core = { path = "../bat-markets-core", version = "0.3.1" }
+bat-markets = { path = "../bat-markets", version = "0.3.2" }
+bat-markets-binance = { path = "../bat-markets-binance", version = "0.3.2" }
+bat-markets-bybit = { path = "../bat-markets-bybit", version = "0.3.2" }
+bat-markets-core = { path = "../bat-markets-core", version = "0.3.2" }
 rust_decimal.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
