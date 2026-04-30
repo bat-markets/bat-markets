@@ -51,6 +51,17 @@ pub(crate) struct PublicSubscription {
     pub kline_intervals: Vec<Box<str>>,
 }
 
+/// Venue-specific public websocket route for shared live subscriptions.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum PublicStreamRoute {
+    /// One public websocket carries every public topic for this venue.
+    Default,
+    /// Binance USD-M market-data websocket.
+    BinanceMarket,
+    /// Binance USD-M public-data websocket.
+    BinancePublic,
+}
+
 /// Typed market-data watch request for one or many instruments.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct WatchInstrumentsRequest {

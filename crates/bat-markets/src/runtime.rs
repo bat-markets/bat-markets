@@ -49,7 +49,7 @@ use bat_markets_bybit::native as bybit_native;
 use crate::{
     client::{AdapterHandle, LiveContext},
     diagnostics::{RuntimeDiagnosticsState, RuntimeOperation},
-    stream::{LiveStreamHandle, PublicSubscription},
+    stream::{LiveStreamHandle, PublicStreamRoute, PublicSubscription},
     transport::CommandWsRequestError,
 };
 
@@ -116,6 +116,12 @@ enum ExecutionRepairScope {
 
 const HISTORY_REPAIR_REWIND_MS: i64 = 60_000;
 const HISTORY_REPAIR_MAX_LOOKBACK_MS: i64 = 7 * 24 * 60 * 60 * 1_000;
+#[cfg(feature = "binance")]
+const BINANCE_MAINNET_MARKET_WS_BASE: &str = "wss://fstream.binance.com/market/ws";
+#[cfg(feature = "binance")]
+const BINANCE_MAINNET_PUBLIC_WS_BASE: &str = "wss://fstream.binance.com/public/ws";
+#[cfg(feature = "binance")]
+const BINANCE_LEGACY_MAINNET_WS_BASE: &str = "wss://fstream.binance.com/ws";
 
 #[derive(Debug)]
 pub(crate) struct LiveRuntimeState {
@@ -4403,11 +4409,14 @@ fn execution_repair_scope(
 
 pub(crate) async fn spawn_public_stream(
     context: LiveContext,
+    route: PublicStreamRoute,
     subscription: PublicSubscription,
 ) -> Result<LiveStreamHandle> {
     let (shutdown, shutdown_rx) = oneshot::channel();
     let join =
-        tokio::spawn(async move { run_public_stream(context, subscription, shutdown_rx).await });
+        tokio::spawn(
+            async move { run_public_stream(context, route, subscription, shutdown_rx).await },
+        );
     Ok(LiveStreamHandle {
         _shutdown: shutdown,
         join,
@@ -4497,6 +4506,7 @@ async fn sync_server_time(context: &LiveContext) -> Result<()> {
 
 async fn run_public_stream(
     context: LiveContext,
+    route: PublicStreamRoute,
     subscription: PublicSubscription,
     mut shutdown: oneshot::Receiver<()>,
 ) -> Result<()> {
@@ -4505,7 +4515,7 @@ async fn run_public_stream(
         let loop_result = match &context.adapter {
             #[cfg(feature = "binance")]
             AdapterHandle::Binance(_) => {
-                run_binance_public_stream(&context, &subscription, &mut shutdown).await
+                run_binance_public_stream(&context, route, &subscription, &mut shutdown).await
             }
             #[cfg(feature = "bybit")]
             AdapterHandle::Bybit(_) => {
@@ -4572,6 +4582,7 @@ async fn run_private_stream(
 #[cfg(feature = "binance")]
 async fn run_binance_public_stream(
     context: &LiveContext,
+    route: PublicStreamRoute,
     subscription: &PublicSubscription,
     shutdown: &mut oneshot::Receiver<()>,
 ) -> Result<()> {
@@ -4607,12 +4618,11 @@ async fn run_binance_public_stream(
         }
     }
 
-    let (mut ws, _) =
-        tokio_tungstenite::connect_async(context.config.endpoints.public_ws_base.as_ref())
-            .await
-            .map_err(|error| {
-                transport_error(context.config.venue, "binance.public_ws.connect", error)
-            })?;
+    let (mut ws, _) = tokio_tungstenite::connect_async(binance_public_ws_base(context, route))
+        .await
+        .map_err(|error| {
+            transport_error(context.config.venue, "binance.public_ws.connect", error)
+        })?;
     let subscribe = serde_json::to_string(&json!({
         "method": "SUBSCRIBE",
         "params": streams,
@@ -4697,6 +4707,24 @@ async fn run_binance_public_stream(
                     last_frame_at = Instant::now();
                 }
             }
+        }
+    }
+}
+
+#[cfg(feature = "binance")]
+fn binance_public_ws_base(context: &LiveContext, route: PublicStreamRoute) -> &str {
+    let configured = context.config.endpoints.public_ws_base.as_ref();
+    if context.config.endpoints.sandbox {
+        return configured;
+    }
+    if configured != BINANCE_MAINNET_MARKET_WS_BASE && configured != BINANCE_LEGACY_MAINNET_WS_BASE
+    {
+        return configured;
+    }
+    match route {
+        PublicStreamRoute::BinancePublic => BINANCE_MAINNET_PUBLIC_WS_BASE,
+        PublicStreamRoute::Default | PublicStreamRoute::BinanceMarket => {
+            BINANCE_MAINNET_MARKET_WS_BASE
         }
     }
 }
@@ -7366,7 +7394,7 @@ mod tests {
         unresolved_pending_after_orders, unresolved_pending_after_state, validate_create_orders,
     };
     use crate::client::{AdapterHandle, BatMarketsBuilder};
-    use crate::stream::PublicSubscription;
+    use crate::stream::{PublicStreamRoute, PublicSubscription};
     use bat_markets_core::{
         ClientOrderId, ClosePositionRequest, CommandLifecycleEvent, CommandOperation,
         CommandReceipt, CommandStatus, CreateOrderRequest, CreateOrdersRequest, DegradedReason,
@@ -7398,6 +7426,46 @@ mod tests {
         env!("CARGO_MANIFEST_DIR"),
         "/../../fixtures/bybit/private_execution.json"
     ));
+
+    #[cfg(feature = "binance")]
+    #[test]
+    fn binance_public_ws_base_routes_default_endpoints() {
+        let mut config =
+            bat_markets_core::BatMarketsConfig::new(Venue::Binance, Product::LinearUsdt);
+        config.endpoints = bat_markets_core::EndpointConfig::mainnet_defaults(Venue::Binance);
+        let client = BatMarketsBuilder::default()
+            .config(config)
+            .build()
+            .expect("fixture binance client should build");
+        let context = client.live_context();
+
+        assert_eq!(
+            super::binance_public_ws_base(&context, PublicStreamRoute::BinanceMarket),
+            super::BINANCE_MAINNET_MARKET_WS_BASE
+        );
+        assert_eq!(
+            super::binance_public_ws_base(&context, PublicStreamRoute::BinancePublic),
+            super::BINANCE_MAINNET_PUBLIC_WS_BASE
+        );
+    }
+
+    #[cfg(feature = "binance")]
+    #[test]
+    fn binance_public_ws_base_preserves_custom_endpoint() {
+        let mut config =
+            bat_markets_core::BatMarketsConfig::new(Venue::Binance, Product::LinearUsdt);
+        config.endpoints.public_ws_base = "ws://127.0.0.1:9001/ws".into();
+        let client = BatMarketsBuilder::default()
+            .config(config)
+            .build()
+            .expect("fixture binance client should build");
+        let context = client.live_context();
+
+        assert_eq!(
+            super::binance_public_ws_base(&context, PublicStreamRoute::BinancePublic),
+            "ws://127.0.0.1:9001/ws"
+        );
+    }
 
     #[cfg(feature = "bybit")]
     #[test]

@@ -165,7 +165,7 @@ impl EndpointConfig {
         match venue {
             Venue::Binance => Self {
                 rest_base: "https://fapi.binance.com".into(),
-                public_ws_base: "wss://fstream.binance.com/ws".into(),
+                public_ws_base: "wss://fstream.binance.com/market/ws".into(),
                 private_ws_base: "wss://fstream.binance.com/ws".into(),
                 command_ws_base: "wss://ws-fapi.binance.com/ws-fapi/v1".into(),
                 sandbox: false,

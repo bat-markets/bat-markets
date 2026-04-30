@@ -5,12 +5,13 @@ use std::{
 
 use tokio::sync::{mpsc, oneshot};
 
+use bat_markets_core::Venue;
 use bat_markets_core::{ErrorKind, MarketError, Result};
 
 use crate::{
     client::LiveContext,
     runtime,
-    stream::{LiveStreamHandle, PublicSubscription},
+    stream::{LiveStreamHandle, PublicStreamRoute, PublicSubscription},
 };
 
 enum PublicHubCommand {
@@ -160,8 +161,8 @@ async fn run_public_hub(
     mut rx: mpsc::UnboundedReceiver<PublicHubCommand>,
 ) -> Result<()> {
     let mut active = BTreeMap::<u64, PublicSubscription>::new();
-    let mut current_subscription: Option<PublicSubscription> = None;
-    let mut current_stream: Option<LiveStreamHandle> = None;
+    let mut current_subscriptions = BTreeMap::<PublicStreamRoute, PublicSubscription>::new();
+    let mut current_streams = BTreeMap::<PublicStreamRoute, LiveStreamHandle>::new();
 
     while let Some(command) = rx.recv().await {
         match command {
@@ -172,11 +173,11 @@ async fn run_public_hub(
             } => {
                 let mut candidate = active.clone();
                 candidate.insert(lease_id, subscription.clone());
-                let desired = merge_public_subscriptions(candidate.values());
+                let desired = route_public_subscriptions(context.config.venue, candidate.values());
                 match switch_public_stream(
                     &context,
-                    &mut current_stream,
-                    &mut current_subscription,
+                    &mut current_streams,
+                    &mut current_subscriptions,
                     desired.clone(),
                 )
                 .await
@@ -194,11 +195,11 @@ async fn run_public_hub(
                 if active.remove(&lease_id).is_none() {
                     continue;
                 }
-                let desired = merge_public_subscriptions(active.values());
+                let desired = route_public_subscriptions(context.config.venue, active.values());
                 let _ = switch_public_stream(
                     &context,
-                    &mut current_stream,
-                    &mut current_subscription,
+                    &mut current_streams,
+                    &mut current_subscriptions,
                     desired,
                 )
                 .await;
@@ -206,7 +207,7 @@ async fn run_public_hub(
         }
     }
 
-    if let Some(stream) = current_stream.take() {
+    for (_, stream) in current_streams {
         stream.abort();
     }
     Ok(())
@@ -214,32 +215,52 @@ async fn run_public_hub(
 
 async fn switch_public_stream(
     context: &LiveContext,
-    current_stream: &mut Option<LiveStreamHandle>,
-    current_subscription: &mut Option<PublicSubscription>,
-    desired: Option<PublicSubscription>,
+    current_streams: &mut BTreeMap<PublicStreamRoute, LiveStreamHandle>,
+    current_subscriptions: &mut BTreeMap<PublicStreamRoute, PublicSubscription>,
+    desired: BTreeMap<PublicStreamRoute, PublicSubscription>,
 ) -> Result<()> {
-    if *current_subscription == desired {
+    if *current_subscriptions == desired {
         return Ok(());
     }
 
-    match desired {
-        None => {
-            if let Some(stream) = current_stream.take() {
-                stream.abort();
-            }
-            *current_subscription = None;
-            Ok(())
+    let mut replacements = Vec::new();
+    for (route, subscription) in &desired {
+        if current_subscriptions.get(route) == Some(subscription) {
+            continue;
         }
-        Some(subscription) => {
-            let next_stream =
-                runtime::spawn_public_stream(context.clone(), subscription.clone()).await?;
-            if let Some(stream) = current_stream.replace(next_stream) {
-                stream.abort();
+        match runtime::spawn_public_stream(context.clone(), *route, subscription.clone()).await {
+            Ok(stream) => replacements.push((*route, stream)),
+            Err(error) => {
+                for (_, stream) in replacements {
+                    stream.abort();
+                }
+                return Err(error);
             }
-            *current_subscription = Some(subscription);
-            Ok(())
         }
     }
+
+    let stale_routes: Vec<_> = current_subscriptions
+        .iter()
+        .filter_map(|(route, subscription)| {
+            if desired.get(route) == Some(subscription) {
+                None
+            } else {
+                Some(*route)
+            }
+        })
+        .collect();
+    for route in stale_routes {
+        if let Some(stream) = current_streams.remove(&route) {
+            stream.abort();
+        }
+    }
+    for (route, stream) in replacements {
+        if let Some(existing) = current_streams.insert(route, stream) {
+            existing.abort();
+        }
+    }
+    *current_subscriptions = desired;
+    Ok(())
 }
 
 async fn run_private_hub(
@@ -331,6 +352,71 @@ fn merge_public_subscriptions<'a>(
     Some(merged)
 }
 
+fn route_public_subscriptions<'a>(
+    venue: Venue,
+    subscriptions: impl IntoIterator<Item = &'a PublicSubscription>,
+) -> BTreeMap<PublicStreamRoute, PublicSubscription> {
+    let Some(subscription) = merge_public_subscriptions(subscriptions) else {
+        return BTreeMap::new();
+    };
+
+    match venue {
+        Venue::Binance => split_binance_public_subscription(subscription),
+        Venue::Bybit => BTreeMap::from([(PublicStreamRoute::Default, subscription)]),
+    }
+}
+
+fn split_binance_public_subscription(
+    subscription: PublicSubscription,
+) -> BTreeMap<PublicStreamRoute, PublicSubscription> {
+    let mut routes = BTreeMap::new();
+
+    if subscription.ticker
+        || subscription.trades
+        || subscription.mark_price
+        || subscription.funding_rate
+        || subscription.open_interest
+        || subscription.liquidations
+        || !subscription.kline_intervals.is_empty()
+    {
+        routes.insert(
+            PublicStreamRoute::BinanceMarket,
+            PublicSubscription {
+                instrument_ids: subscription.instrument_ids.clone(),
+                ticker: subscription.ticker,
+                trades: subscription.trades,
+                book_top: false,
+                order_book: false,
+                mark_price: subscription.mark_price,
+                funding_rate: subscription.funding_rate,
+                open_interest: subscription.open_interest,
+                liquidations: subscription.liquidations,
+                kline_intervals: subscription.kline_intervals.clone(),
+            },
+        );
+    }
+
+    if subscription.book_top || subscription.order_book {
+        routes.insert(
+            PublicStreamRoute::BinancePublic,
+            PublicSubscription {
+                instrument_ids: subscription.instrument_ids,
+                ticker: false,
+                trades: false,
+                book_top: subscription.book_top,
+                order_book: subscription.order_book,
+                mark_price: false,
+                funding_rate: false,
+                open_interest: false,
+                liquidations: false,
+                kline_intervals: Vec::new(),
+            },
+        );
+    }
+
+    routes
+}
+
 fn hub_closed_error(name: &str) -> MarketError {
     MarketError::new(
         ErrorKind::TransportError,
@@ -347,9 +433,12 @@ fn hub_runtime_error() -> MarketError {
 
 #[cfg(test)]
 mod tests {
-    use bat_markets_core::InstrumentId;
+    use bat_markets_core::{InstrumentId, Venue};
 
-    use super::{PublicSubscription, merge_public_subscriptions, normalize_public_subscription};
+    use super::{
+        PublicStreamRoute, PublicSubscription, merge_public_subscriptions,
+        normalize_public_subscription, route_public_subscriptions,
+    };
 
     #[test]
     fn normalize_public_subscription_dedupes_symbols_and_intervals() {
@@ -425,5 +514,67 @@ mod tests {
         assert!(merged.order_book);
         assert!(merged.liquidations);
         assert_eq!(merged.kline_intervals, vec!["1m".into(), "5m".into()]);
+    }
+
+    #[test]
+    fn route_public_subscriptions_splits_binance_market_and_public_topics() {
+        let subscription = PublicSubscription {
+            instrument_ids: vec![InstrumentId::from("BTC/USDT:USDT")],
+            ticker: true,
+            trades: true,
+            book_top: true,
+            order_book: true,
+            mark_price: true,
+            funding_rate: true,
+            open_interest: true,
+            liquidations: true,
+            kline_intervals: vec!["5m".into()],
+        };
+
+        let routes = route_public_subscriptions(Venue::Binance, [&subscription]);
+
+        let market = routes
+            .get(&PublicStreamRoute::BinanceMarket)
+            .expect("market route should exist");
+        assert!(market.ticker);
+        assert!(market.trades);
+        assert!(market.mark_price);
+        assert!(market.funding_rate);
+        assert!(market.open_interest);
+        assert!(market.liquidations);
+        assert_eq!(market.kline_intervals, vec!["5m".into()]);
+        assert!(!market.book_top);
+        assert!(!market.order_book);
+
+        let public = routes
+            .get(&PublicStreamRoute::BinancePublic)
+            .expect("public route should exist");
+        assert!(public.book_top);
+        assert!(public.order_book);
+        assert!(!public.ticker);
+        assert!(!public.trades);
+        assert!(!public.mark_price);
+        assert!(public.kline_intervals.is_empty());
+    }
+
+    #[test]
+    fn route_public_subscriptions_keeps_bybit_on_default_route() {
+        let subscription = PublicSubscription {
+            instrument_ids: vec![InstrumentId::from("BTC/USDT:USDT")],
+            ticker: true,
+            trades: true,
+            book_top: true,
+            order_book: true,
+            mark_price: true,
+            funding_rate: true,
+            open_interest: true,
+            liquidations: true,
+            kline_intervals: vec!["5m".into()],
+        };
+
+        let routes = route_public_subscriptions(Venue::Bybit, [&subscription]);
+
+        assert_eq!(routes.len(), 1);
+        assert_eq!(routes.get(&PublicStreamRoute::Default), Some(&subscription));
     }
 }
