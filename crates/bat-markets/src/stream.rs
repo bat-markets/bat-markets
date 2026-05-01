@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::HashSet;
 
 use tokio::{
     sync::{broadcast, oneshot},
@@ -132,6 +132,36 @@ impl WatchOhlcvRequest {
     }
 }
 
+#[derive(Clone, Debug)]
+enum InstrumentFilter {
+    Single(InstrumentId),
+    Many(HashSet<InstrumentId>),
+}
+
+impl InstrumentFilter {
+    fn from_vec(instrument_ids: Vec<InstrumentId>) -> Self {
+        match instrument_ids.as_slice() {
+            [instrument_id] => Self::Single(instrument_id.clone()),
+            _ => Self::Many(instrument_ids.into_iter().collect()),
+        }
+    }
+
+    #[cfg(test)]
+    fn from_slice(instrument_ids: &[InstrumentId]) -> Self {
+        match instrument_ids {
+            [instrument_id] => Self::Single(instrument_id.clone()),
+            _ => Self::Many(instrument_ids.iter().cloned().collect()),
+        }
+    }
+
+    fn contains(&self, instrument_id: &InstrumentId) -> bool {
+        match self {
+            Self::Single(candidate) => candidate == instrument_id,
+            Self::Many(candidates) => candidates.contains(instrument_id),
+        }
+    }
+}
+
 /// Handle for a running live stream task.
 pub(crate) struct LiveStreamHandle {
     pub(crate) _shutdown: oneshot::Sender<()>,
@@ -185,7 +215,7 @@ async fn recv_private_event(
 pub(crate) struct OhlcvUpdates<'a> {
     inner: &'a BatMarkets,
     receiver: broadcast::Receiver<PublicLaneEvent>,
-    instrument_ids: BTreeSet<InstrumentId>,
+    instrument_ids: InstrumentFilter,
     interval: Box<str>,
 }
 
@@ -198,15 +228,15 @@ impl<'a> OhlcvUpdates<'a> {
         Self {
             inner,
             receiver,
-            instrument_ids: request.instrument_ids.into_iter().collect(),
+            instrument_ids: InstrumentFilter::from_vec(request.instrument_ids),
             interval: request.interval,
         }
     }
 
     /// Wait for the next matching OHLCV candle.
     pub async fn recv(&mut self) -> Result<Kline> {
+        let requested_interval = parse_watch_interval(self.interval.as_ref())?;
         loop {
-            let requested_interval = parse_watch_interval(self.interval.as_ref())?;
             let event = recv_public_event(&mut self.receiver, "ohlcv subscription").await?;
 
             let PublicLaneEvent::Kline(kline) = event else {
@@ -275,7 +305,7 @@ impl<'a> OhlcvWatch<'a> {
 pub(crate) struct TickerUpdates<'a> {
     inner: &'a BatMarkets,
     receiver: broadcast::Receiver<PublicLaneEvent>,
-    instrument_ids: BTreeSet<InstrumentId>,
+    instrument_ids: InstrumentFilter,
 }
 
 impl<'a> TickerUpdates<'a> {
@@ -287,7 +317,7 @@ impl<'a> TickerUpdates<'a> {
         Self {
             inner,
             receiver,
-            instrument_ids: request.instrument_ids.into_iter().collect(),
+            instrument_ids: InstrumentFilter::from_vec(request.instrument_ids),
         }
     }
 
@@ -339,7 +369,7 @@ impl<'a> TickerWatch<'a> {
 pub(crate) struct TradeUpdates<'a> {
     inner: &'a BatMarkets,
     receiver: broadcast::Receiver<PublicLaneEvent>,
-    instrument_ids: BTreeSet<InstrumentId>,
+    instrument_ids: InstrumentFilter,
 }
 
 impl<'a> TradeUpdates<'a> {
@@ -351,7 +381,7 @@ impl<'a> TradeUpdates<'a> {
         Self {
             inner,
             receiver,
-            instrument_ids: request.instrument_ids.into_iter().collect(),
+            instrument_ids: InstrumentFilter::from_vec(request.instrument_ids),
         }
     }
 
@@ -404,7 +434,7 @@ impl<'a> TradesWatch<'a> {
 pub(crate) struct BookTopUpdates<'a> {
     inner: &'a BatMarkets,
     receiver: broadcast::Receiver<PublicLaneEvent>,
-    instrument_ids: BTreeSet<InstrumentId>,
+    instrument_ids: InstrumentFilter,
 }
 
 #[cfg(test)]
@@ -417,7 +447,7 @@ impl<'a> BookTopUpdates<'a> {
         Self {
             inner,
             receiver,
-            instrument_ids: request.instrument_ids.into_iter().collect(),
+            instrument_ids: InstrumentFilter::from_vec(request.instrument_ids),
         }
     }
 
@@ -443,7 +473,7 @@ impl<'a> BookTopUpdates<'a> {
 pub(crate) struct MarkPriceUpdates<'a> {
     inner: &'a BatMarkets,
     receiver: broadcast::Receiver<PublicLaneEvent>,
-    instrument_ids: BTreeSet<InstrumentId>,
+    instrument_ids: InstrumentFilter,
 }
 
 impl<'a> MarkPriceUpdates<'a> {
@@ -455,7 +485,7 @@ impl<'a> MarkPriceUpdates<'a> {
         Self {
             inner,
             receiver,
-            instrument_ids: request.instrument_ids.into_iter().collect(),
+            instrument_ids: InstrumentFilter::from_vec(request.instrument_ids),
         }
     }
 
@@ -498,7 +528,7 @@ impl<'a> MarkPriceWatch<'a> {
 /// Typed funding-rate subscription receiver over the shared public event bus.
 pub(crate) struct FundingRateUpdates {
     receiver: broadcast::Receiver<PublicLaneEvent>,
-    instrument_ids: BTreeSet<InstrumentId>,
+    instrument_ids: InstrumentFilter,
 }
 
 impl FundingRateUpdates {
@@ -508,7 +538,7 @@ impl FundingRateUpdates {
     ) -> Self {
         Self {
             receiver,
-            instrument_ids: request.instrument_ids.into_iter().collect(),
+            instrument_ids: InstrumentFilter::from_vec(request.instrument_ids),
         }
     }
 
@@ -550,7 +580,7 @@ impl<'a> FundingRateWatch<'a> {
 /// Typed open-interest subscription receiver over the shared public event bus.
 pub(crate) struct OpenInterestUpdates {
     receiver: broadcast::Receiver<PublicLaneEvent>,
-    instrument_ids: BTreeSet<InstrumentId>,
+    instrument_ids: InstrumentFilter,
 }
 
 impl OpenInterestUpdates {
@@ -560,7 +590,7 @@ impl OpenInterestUpdates {
     ) -> Self {
         Self {
             receiver,
-            instrument_ids: request.instrument_ids.into_iter().collect(),
+            instrument_ids: InstrumentFilter::from_vec(request.instrument_ids),
         }
     }
 
@@ -603,7 +633,7 @@ impl<'a> OpenInterestWatch<'a> {
 pub(crate) struct LiquidationUpdates<'a> {
     inner: &'a BatMarkets,
     receiver: broadcast::Receiver<PublicLaneEvent>,
-    instrument_ids: BTreeSet<InstrumentId>,
+    instrument_ids: InstrumentFilter,
 }
 
 impl<'a> LiquidationUpdates<'a> {
@@ -615,7 +645,7 @@ impl<'a> LiquidationUpdates<'a> {
         Self {
             inner,
             receiver,
-            instrument_ids: request.instrument_ids.into_iter().collect(),
+            instrument_ids: InstrumentFilter::from_vec(request.instrument_ids),
         }
     }
 
@@ -716,7 +746,7 @@ impl<'a> OrderBookWatch<'a> {
 pub(crate) struct FastFeedUpdates {
     receiver: broadcast::Receiver<PublicLaneEvent>,
     request: WatchFastFeedRequest,
-    instrument_ids: BTreeSet<InstrumentId>,
+    instrument_ids: InstrumentFilter,
 }
 
 #[cfg(test)]
@@ -724,7 +754,7 @@ impl FastFeedUpdates {
     fn new(receiver: broadcast::Receiver<PublicLaneEvent>, request: WatchFastFeedRequest) -> Self {
         Self {
             receiver,
-            instrument_ids: request.instrument_ids.iter().cloned().collect(),
+            instrument_ids: InstrumentFilter::from_slice(&request.instrument_ids),
             request,
         }
     }
@@ -1433,49 +1463,50 @@ mod tests {
     use bat_markets_core::{WatchFastFeedRequest, WatchOrderBookRequest};
 
     use super::{
-        WatchInstrumentsRequest, WatchOhlcvRequest, private_lane, public_lane, recv_public_event,
+        InstrumentFilter, WatchInstrumentsRequest, WatchOhlcvRequest, private_lane, public_lane,
+        recv_public_event,
     };
 
-    const BINANCE_PUBLIC_TRADE: &str = include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../fixtures/binance/public_trade.json"
-    ));
-    const BINANCE_PUBLIC_TICKER: &str = include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../fixtures/binance/public_ticker.json"
-    ));
-    const BINANCE_PUBLIC_BOOK_TICKER: &str = include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../fixtures/binance/public_book_ticker.json"
-    ));
-    const BINANCE_PUBLIC_KLINE: &str = include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../fixtures/binance/public_kline.json"
-    ));
-    const BINANCE_PUBLIC_MARK_PRICE: &str = include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../fixtures/binance/public_mark_price.json"
-    ));
-    const BINANCE_PUBLIC_LIQUIDATION: &str = include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../fixtures/binance/public_liquidation.json"
-    ));
-    const BYBIT_PUBLIC_ORDERBOOK: &str = include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../fixtures/bybit/public_orderbook.json"
-    ));
-    const BYBIT_PRIVATE_ORDER: &str = include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../fixtures/bybit/private_order.json"
-    ));
-    const BYBIT_PRIVATE_EXECUTION: &str = include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../fixtures/bybit/private_execution.json"
-    ));
-    const BYBIT_PRIVATE_WALLET: &str = include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../fixtures/bybit/private_wallet.json"
-    ));
+    macro_rules! fixture {
+        ($venue:literal, $file:literal) => {
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../fixtures/",
+                $venue,
+                "/",
+                $file
+            ))
+        };
+    }
+
+    const BINANCE_PUBLIC_TRADE: &str = fixture!("binance", "public_trade.json");
+    const BINANCE_PUBLIC_TICKER: &str = fixture!("binance", "public_ticker.json");
+    const BINANCE_PUBLIC_BOOK_TICKER: &str = fixture!("binance", "public_book_ticker.json");
+    const BINANCE_PUBLIC_KLINE: &str = fixture!("binance", "public_kline.json");
+    const BINANCE_PUBLIC_MARK_PRICE: &str = fixture!("binance", "public_mark_price.json");
+    const BINANCE_PUBLIC_LIQUIDATION: &str = fixture!("binance", "public_liquidation.json");
+    const BYBIT_PUBLIC_ORDERBOOK: &str = fixture!("bybit", "public_orderbook.json");
+    const BYBIT_PRIVATE_ORDER: &str = fixture!("bybit", "private_order.json");
+    const BYBIT_PRIVATE_EXECUTION: &str = fixture!("bybit", "private_execution.json");
+    const BYBIT_PRIVATE_WALLET: &str = fixture!("bybit", "private_wallet.json");
+
+    #[test]
+    fn instrument_filter_uses_single_fast_path_and_many_membership() {
+        let btc = InstrumentId::from("BTC/USDT:USDT");
+        let eth = InstrumentId::from("ETH/USDT:USDT");
+        let sol = InstrumentId::from("SOL/USDT:USDT");
+
+        let single = InstrumentFilter::from_vec(vec![btc.clone()]);
+        assert!(matches!(single, InstrumentFilter::Single(_)));
+        assert!(single.contains(&btc));
+        assert!(!single.contains(&eth));
+
+        let many = InstrumentFilter::from_vec(vec![btc.clone(), eth.clone()]);
+        assert!(matches!(many, InstrumentFilter::Many(_)));
+        assert!(many.contains(&btc));
+        assert!(many.contains(&eth));
+        assert!(!many.contains(&sol));
+    }
 
     #[tokio::test]
     async fn public_subscribe_receives_fixture_ingest_events() {

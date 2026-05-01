@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 0.3.3 - 2026-05-01
+
+- align Binance public websocket routing with the split market/public mainnet endpoints
+- centralize shared linear-futures capability and lane defaults across venue adapters
+- refresh compatible transitive dependencies and keep release checks cwd-independent
+- reduce multi-symbol subscription startup allocations and fixture-test boilerplate
+
 ## 0.3.2 - 2026-04-26
 
 - keep public event broadcasts consistent with accepted engine state and reject unknown-instrument public events before subscribers see them

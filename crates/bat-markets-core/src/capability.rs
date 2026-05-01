@@ -78,8 +78,83 @@ pub struct CapabilitySet {
 }
 
 impl CapabilitySet {
+    /// Standard capability profile shared by current linear futures adapters.
+    #[must_use]
+    pub const fn linear_futures_defaults() -> Self {
+        Self {
+            market: MarketCapabilities {
+                ticker: true,
+                recent_trades: true,
+                book_top: true,
+                order_book: true,
+                klines: true,
+                mark_price: true,
+                funding_rate: true,
+                open_interest: true,
+                liquidations: false,
+                public_streams: true,
+                multi_symbol_streams: true,
+            },
+            trade: TradeCapabilities {
+                create: true,
+                batch_create: true,
+                amend: true,
+                cancel: true,
+                batch_cancel: true,
+                cancel_all: true,
+                get: true,
+                list_open: true,
+                history: true,
+                validate: true,
+            },
+            position: PositionCapabilities {
+                read: true,
+                leverage_set: true,
+                margin_mode_set: true,
+                position_mode_set: true,
+                hedge_mode: true,
+            },
+            account: AccountCapabilities {
+                read_balances: true,
+                read_summary: true,
+                private_streams: true,
+            },
+            asset: AssetCapabilities {
+                read: false,
+                transfer: false,
+                withdraw: false,
+                convert: false,
+            },
+            native: NativeCapabilities {
+                fast_stream: true,
+                special_orders: true,
+                ws_order_entry: true,
+            },
+        }
+    }
+
     #[must_use]
     pub fn supports_private_trading(self) -> bool {
         self.trade.create && self.account.private_streams
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn linear_futures_defaults_cover_current_adapter_contract() {
+        let capabilities = CapabilitySet::linear_futures_defaults();
+
+        assert!(capabilities.supports_private_trading());
+        assert!(capabilities.market.ticker);
+        assert!(capabilities.market.multi_symbol_streams);
+        assert!(!capabilities.market.liquidations);
+        assert!(capabilities.trade.batch_create);
+        assert!(capabilities.position.hedge_mode);
+        assert!(capabilities.account.private_streams);
+        assert_eq!(capabilities.asset, AssetCapabilities::default());
+        assert!(capabilities.native.ws_order_entry);
     }
 }

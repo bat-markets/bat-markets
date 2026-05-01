@@ -4519,6 +4519,7 @@ async fn run_public_stream(
             }
             #[cfg(feature = "bybit")]
             AdapterHandle::Bybit(_) => {
+                debug_assert_eq!(route, PublicStreamRoute::Default);
                 run_bybit_public_stream(&context, &subscription, &mut shutdown).await
             }
         };
@@ -4586,7 +4587,7 @@ async fn run_binance_public_stream(
     subscription: &PublicSubscription,
     shutdown: &mut oneshot::Receiver<()>,
 ) -> Result<()> {
-    let mut streams = Vec::new();
+    let mut streams = Vec::with_capacity(binance_public_stream_topic_capacity(subscription));
     for instrument_id in &subscription.instrument_ids {
         let spec = require_spec(context, instrument_id)?;
         let symbol = spec.native_symbol.to_ascii_lowercase();
@@ -4709,6 +4710,30 @@ async fn run_binance_public_stream(
             }
         }
     }
+}
+
+#[cfg(feature = "binance")]
+fn binance_public_stream_topic_capacity(subscription: &PublicSubscription) -> usize {
+    let mut per_instrument = subscription.kline_intervals.len();
+    if subscription.ticker {
+        per_instrument += 1;
+    }
+    if subscription.trades {
+        per_instrument += 1;
+    }
+    if subscription.book_top {
+        per_instrument += 1;
+    }
+    if subscription.order_book {
+        per_instrument += 1;
+    }
+    if subscription.liquidations {
+        per_instrument += 1;
+    }
+    if subscription.mark_price || subscription.funding_rate {
+        per_instrument += 1;
+    }
+    subscription.instrument_ids.len() * per_instrument
 }
 
 #[cfg(feature = "binance")]
@@ -4840,7 +4865,7 @@ async fn run_bybit_public_stream(
     subscription: &PublicSubscription,
     shutdown: &mut oneshot::Receiver<()>,
 ) -> Result<()> {
-    let mut args = Vec::new();
+    let mut args = Vec::with_capacity(bybit_public_stream_topic_capacity(subscription));
     for instrument_id in &subscription.instrument_ids {
         let spec = require_spec(context, instrument_id)?;
         if subscription.ticker
@@ -4982,6 +5007,31 @@ async fn run_bybit_public_stream(
             }
         }
     }
+}
+
+#[cfg(feature = "bybit")]
+fn bybit_public_stream_topic_capacity(subscription: &PublicSubscription) -> usize {
+    let mut per_instrument = subscription.kline_intervals.len();
+    if subscription.ticker
+        || subscription.mark_price
+        || subscription.funding_rate
+        || subscription.open_interest
+    {
+        per_instrument += 1;
+    }
+    if subscription.trades {
+        per_instrument += 1;
+    }
+    if subscription.book_top {
+        per_instrument += 1;
+    }
+    if subscription.order_book {
+        per_instrument += 1;
+    }
+    if subscription.liquidations {
+        per_instrument += 1;
+    }
+    subscription.instrument_ids.len() * per_instrument
 }
 
 #[cfg(feature = "bybit")]
@@ -7406,26 +7456,60 @@ mod tests {
     use rust_decimal::Decimal;
     use tokio::time::{Duration, timeout};
 
-    const BINANCE_COMMAND_BATCH_CREATE_OK: &str = include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../fixtures/binance/command_batch_create_ok.json"
-    ));
-    const BYBIT_PUBLIC_ORDERBOOK: &str = include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../fixtures/bybit/public_orderbook.json"
-    ));
-    const BYBIT_PUBLIC_ORDERBOOK_GAP: &str = include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../fixtures/bybit/public_orderbook_gap.json"
-    ));
-    const BYBIT_PRIVATE_POSITION: &str = include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../fixtures/bybit/private_position.json"
-    ));
-    const BYBIT_PRIVATE_EXECUTION: &str = include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../fixtures/bybit/private_execution.json"
-    ));
+    macro_rules! fixture {
+        ($venue:literal, $file:literal) => {
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../fixtures/",
+                $venue,
+                "/",
+                $file
+            ))
+        };
+    }
+
+    const BINANCE_COMMAND_BATCH_CREATE_OK: &str =
+        fixture!("binance", "command_batch_create_ok.json");
+    const BYBIT_PUBLIC_ORDERBOOK: &str = fixture!("bybit", "public_orderbook.json");
+    const BYBIT_PUBLIC_ORDERBOOK_GAP: &str = fixture!("bybit", "public_orderbook_gap.json");
+    const BYBIT_PRIVATE_POSITION: &str = fixture!("bybit", "private_position.json");
+    const BYBIT_PRIVATE_EXECUTION: &str = fixture!("bybit", "private_execution.json");
+
+    fn topic_capacity_subscription() -> PublicSubscription {
+        PublicSubscription {
+            instrument_ids: vec![
+                InstrumentId::from("BTC/USDT:USDT"),
+                InstrumentId::from("ETH/USDT:USDT"),
+            ],
+            ticker: true,
+            trades: true,
+            book_top: true,
+            order_book: true,
+            mark_price: true,
+            funding_rate: true,
+            open_interest: true,
+            liquidations: true,
+            kline_intervals: vec!["1m".into(), "5m".into()],
+        }
+    }
+
+    #[cfg(feature = "binance")]
+    #[test]
+    fn binance_public_stream_topic_capacity_matches_split_topics() {
+        assert_eq!(
+            super::binance_public_stream_topic_capacity(&topic_capacity_subscription()),
+            16
+        );
+    }
+
+    #[cfg(feature = "bybit")]
+    #[test]
+    fn bybit_public_stream_topic_capacity_matches_combined_ticker_topic() {
+        assert_eq!(
+            super::bybit_public_stream_topic_capacity(&topic_capacity_subscription()),
+            14
+        );
+    }
 
     #[cfg(feature = "binance")]
     #[test]

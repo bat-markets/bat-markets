@@ -26,6 +26,36 @@ pub struct LaneSet {
     pub command: LanePolicy,
 }
 
+impl LaneSet {
+    /// Standard lane policies shared by current linear futures adapters.
+    #[must_use]
+    pub const fn linear_futures_defaults() -> Self {
+        Self {
+            public: LanePolicy {
+                lossless: false,
+                coalescing_allowed: true,
+                buffer_capacity: 4_096,
+                reconnect_required: true,
+                idempotent: false,
+            },
+            private: LanePolicy {
+                lossless: true,
+                coalescing_allowed: false,
+                buffer_capacity: 8_192,
+                reconnect_required: true,
+                idempotent: true,
+            },
+            command: LanePolicy {
+                lossless: true,
+                coalescing_allowed: false,
+                buffer_capacity: 1_024,
+                reconnect_required: true,
+                idempotent: true,
+            },
+        }
+    }
+}
+
 /// Public market-data lane output.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PublicLaneEvent {
@@ -64,4 +94,24 @@ pub enum PrivateLaneEvent {
 pub enum CommandLaneEvent {
     Receipt(CommandReceipt),
     Lifecycle(CommandLifecycleEvent),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn linear_futures_lane_defaults_keep_public_lossy_and_commands_lossless() {
+        let lanes = LaneSet::linear_futures_defaults();
+
+        assert!(!lanes.public.lossless);
+        assert!(lanes.public.coalescing_allowed);
+        assert_eq!(lanes.public.buffer_capacity, 4_096);
+        assert!(lanes.private.lossless);
+        assert!(!lanes.private.coalescing_allowed);
+        assert_eq!(lanes.private.buffer_capacity, 8_192);
+        assert!(lanes.command.lossless);
+        assert!(lanes.command.idempotent);
+        assert_eq!(lanes.command.buffer_capacity, 1_024);
+    }
 }

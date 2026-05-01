@@ -27,6 +27,18 @@ use rust_decimal::Decimal;
 use serde_json::{Value, json};
 use tokio_tungstenite::tungstenite::{Message, accept};
 
+macro_rules! fixture {
+    ($venue:literal, $file:literal) => {
+        include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../fixtures/",
+            $venue,
+            "/",
+            $file
+        ))
+    };
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LiveTestEndpointMode {
     Sandbox,
@@ -35,142 +47,44 @@ pub enum LiveTestEndpointMode {
 
 /// Binance fixture payloads.
 pub mod binance {
-    pub const PUBLIC_TICKER: &str = include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../fixtures/binance/public_ticker.json"
-    ));
-    pub const PUBLIC_TRADE: &str = include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../fixtures/binance/public_trade.json"
-    ));
-    pub const PUBLIC_BOOK_TICKER: &str = include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../fixtures/binance/public_book_ticker.json"
-    ));
-    pub const PUBLIC_MARK_PRICE: &str = include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../fixtures/binance/public_mark_price.json"
-    ));
-    pub const PUBLIC_LIQUIDATION: &str = include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../fixtures/binance/public_liquidation.json"
-    ));
-    pub const PUBLIC_KLINE: &str = include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../fixtures/binance/public_kline.json"
-    ));
-    pub const OPEN_INTEREST: &str = include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../fixtures/binance/open_interest.json"
-    ));
-    pub const PRIVATE_ACCOUNT: &str = include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../fixtures/binance/private_account_update.json"
-    ));
-    pub const PRIVATE_ORDER: &str = include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../fixtures/binance/private_order_trade_update.json"
-    ));
-    pub const COMMAND_CREATE_OK: &str = include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../fixtures/binance/command_create_ok.json"
-    ));
-    pub const COMMAND_AMEND_OK: &str = include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../fixtures/binance/command_amend_ok.json"
-    ));
-    pub const COMMAND_BATCH_CREATE_OK: &str = include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../fixtures/binance/command_batch_create_ok.json"
-    ));
-    pub const COMMAND_BATCH_AMEND_OK: &str = include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../fixtures/binance/command_batch_amend_ok.json"
-    ));
-    pub const COMMAND_BATCH_CANCEL_OK: &str = include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../fixtures/binance/command_batch_cancel_ok.json"
-    ));
-    pub const COMMAND_REJECT: &str = include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../fixtures/binance/command_reject.json"
-    ));
+    pub const PUBLIC_TICKER: &str = fixture!("binance", "public_ticker.json");
+    pub const PUBLIC_TRADE: &str = fixture!("binance", "public_trade.json");
+    pub const PUBLIC_BOOK_TICKER: &str = fixture!("binance", "public_book_ticker.json");
+    pub const PUBLIC_MARK_PRICE: &str = fixture!("binance", "public_mark_price.json");
+    pub const PUBLIC_LIQUIDATION: &str = fixture!("binance", "public_liquidation.json");
+    pub const PUBLIC_KLINE: &str = fixture!("binance", "public_kline.json");
+    pub const OPEN_INTEREST: &str = fixture!("binance", "open_interest.json");
+    pub const PRIVATE_ACCOUNT: &str = fixture!("binance", "private_account_update.json");
+    pub const PRIVATE_ORDER: &str = fixture!("binance", "private_order_trade_update.json");
+    pub const COMMAND_CREATE_OK: &str = fixture!("binance", "command_create_ok.json");
+    pub const COMMAND_AMEND_OK: &str = fixture!("binance", "command_amend_ok.json");
+    pub const COMMAND_BATCH_CREATE_OK: &str = fixture!("binance", "command_batch_create_ok.json");
+    pub const COMMAND_BATCH_AMEND_OK: &str = fixture!("binance", "command_batch_amend_ok.json");
+    pub const COMMAND_BATCH_CANCEL_OK: &str = fixture!("binance", "command_batch_cancel_ok.json");
+    pub const COMMAND_REJECT: &str = fixture!("binance", "command_reject.json");
 }
 
 /// Bybit fixture payloads.
 pub mod bybit {
-    pub const PUBLIC_TICKER: &str = include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../fixtures/bybit/public_ticker.json"
-    ));
-    pub const PUBLIC_TRADE: &str = include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../fixtures/bybit/public_trade.json"
-    ));
-    pub const PUBLIC_ORDERBOOK: &str = include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../fixtures/bybit/public_orderbook.json"
-    ));
-    pub const PUBLIC_LIQUIDATION: &str = include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../fixtures/bybit/public_liquidation.json"
-    ));
-    pub const PUBLIC_KLINE: &str = include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../fixtures/bybit/public_kline.json"
-    ));
-    pub const PRIVATE_WALLET: &str = include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../fixtures/bybit/private_wallet.json"
-    ));
-    pub const PRIVATE_POSITION: &str = include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../fixtures/bybit/private_position.json"
-    ));
-    pub const PRIVATE_ORDER: &str = include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../fixtures/bybit/private_order.json"
-    ));
-    pub const PRIVATE_ORDER_CANCELED: &str = include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../fixtures/bybit/private_order_canceled.json"
-    ));
-    pub const PRIVATE_EXECUTION: &str = include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../fixtures/bybit/private_execution.json"
-    ));
-    pub const PRIVATE_EXECUTION_LATE_AFTER_CANCEL: &str = include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../fixtures/bybit/private_execution_late_after_cancel.json"
-    ));
-    pub const PUBLIC_ORDERBOOK_GAP: &str = include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../fixtures/bybit/public_orderbook_gap.json"
-    ));
-    pub const COMMAND_CREATE_OK: &str = include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../fixtures/bybit/command_create_ok.json"
-    ));
-    pub const COMMAND_AMEND_OK: &str = include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../fixtures/bybit/command_amend_ok.json"
-    ));
-    pub const COMMAND_BATCH_CREATE_OK: &str = include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../fixtures/bybit/command_batch_create_ok.json"
-    ));
-    pub const COMMAND_BATCH_AMEND_OK: &str = include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../fixtures/bybit/command_batch_amend_ok.json"
-    ));
-    pub const COMMAND_BATCH_CANCEL_OK: &str = include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../fixtures/bybit/command_batch_cancel_ok.json"
-    ));
-    pub const COMMAND_REJECT: &str = include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../fixtures/bybit/command_reject.json"
-    ));
+    pub const PUBLIC_TICKER: &str = fixture!("bybit", "public_ticker.json");
+    pub const PUBLIC_TRADE: &str = fixture!("bybit", "public_trade.json");
+    pub const PUBLIC_ORDERBOOK: &str = fixture!("bybit", "public_orderbook.json");
+    pub const PUBLIC_LIQUIDATION: &str = fixture!("bybit", "public_liquidation.json");
+    pub const PUBLIC_KLINE: &str = fixture!("bybit", "public_kline.json");
+    pub const PRIVATE_WALLET: &str = fixture!("bybit", "private_wallet.json");
+    pub const PRIVATE_POSITION: &str = fixture!("bybit", "private_position.json");
+    pub const PRIVATE_ORDER: &str = fixture!("bybit", "private_order.json");
+    pub const PRIVATE_ORDER_CANCELED: &str = fixture!("bybit", "private_order_canceled.json");
+    pub const PRIVATE_EXECUTION: &str = fixture!("bybit", "private_execution.json");
+    pub const PRIVATE_EXECUTION_LATE_AFTER_CANCEL: &str =
+        fixture!("bybit", "private_execution_late_after_cancel.json");
+    pub const PUBLIC_ORDERBOOK_GAP: &str = fixture!("bybit", "public_orderbook_gap.json");
+    pub const COMMAND_CREATE_OK: &str = fixture!("bybit", "command_create_ok.json");
+    pub const COMMAND_AMEND_OK: &str = fixture!("bybit", "command_amend_ok.json");
+    pub const COMMAND_BATCH_CREATE_OK: &str = fixture!("bybit", "command_batch_create_ok.json");
+    pub const COMMAND_BATCH_AMEND_OK: &str = fixture!("bybit", "command_batch_amend_ok.json");
+    pub const COMMAND_BATCH_CANCEL_OK: &str = fixture!("bybit", "command_batch_cancel_ok.json");
+    pub const COMMAND_REJECT: &str = fixture!("bybit", "command_reject.json");
 }
 
 pub use live_trade_cycle::{

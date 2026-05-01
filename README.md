@@ -15,14 +15,14 @@ Headless Rust exchange engine for Binance USD-M and Bybit USDT linear futures.
 
 ```toml
 [dependencies]
-bat-markets = "0.3"
+bat-markets = "0.3.3"
 ```
 
 Single-venue build:
 
 ```toml
 [dependencies]
-bat-markets = { version = "0.3", default-features = false, features = ["binance"] }
+bat-markets = { version = "0.3.3", default-features = false, features = ["binance"] }
 ```
 
 Feature flags:

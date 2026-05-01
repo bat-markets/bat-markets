@@ -11,15 +11,14 @@ use parking_lot::RwLock;
 use rust_decimal::Decimal;
 
 use bat_markets_core::{
-    AccountCapabilities, AccountSnapshot, AggressorSide, AssetCapabilities, AssetCode, Balance,
-    BatMarketsConfig, CapabilitySet, CommandOperation, CommandReceipt, CommandStatus, ErrorKind,
-    Execution, FastBookTop, FastKline, FastMarkPrice, FastOrderBookDelta, FastTicker, FastTrade,
-    FetchOhlcvRequest, FetchTradesRequest, FundingRate, InstrumentCatalog, InstrumentId,
-    InstrumentSpec, InstrumentStatus, InstrumentSupport, Kline, KlineInterval, Leverage, Liquidity,
-    MarginMode, MarketCapabilities, MarketError, MarketType, NativeCapabilities, Notional,
-    OpenInterest, Order, OrderId, OrderStatus, OrderType, Position, PositionCapabilities,
-    PositionDirection, PositionId, PositionMode, Price, PrivateLaneEvent, Product, PublicLaneEvent,
-    Quantity, Rate, RequestId, Result, Side, Ticker, TimeInForce, TimestampMs, TradeCapabilities,
+    AccountSnapshot, AggressorSide, AssetCode, Balance, BatMarketsConfig, CapabilitySet,
+    CommandOperation, CommandReceipt, CommandStatus, ErrorKind, Execution, FastBookTop, FastKline,
+    FastMarkPrice, FastOrderBookDelta, FastTicker, FastTrade, FetchOhlcvRequest,
+    FetchTradesRequest, FundingRate, InstrumentCatalog, InstrumentId, InstrumentSpec,
+    InstrumentStatus, InstrumentSupport, Kline, KlineInterval, Leverage, Liquidity, MarginMode,
+    MarketError, MarketType, Notional, OpenInterest, Order, OrderId, OrderStatus, OrderType,
+    Position, PositionDirection, PositionId, PositionMode, Price, PrivateLaneEvent, Product,
+    PublicLaneEvent, Quantity, Rate, RequestId, Result, Side, Ticker, TimeInForce, TimestampMs,
     TradeId, Venue, VenueAdapter,
 };
 
@@ -48,74 +47,8 @@ impl BinanceLinearFuturesAdapter {
     pub fn with_config(config: BatMarketsConfig) -> Self {
         Self {
             config,
-            capabilities: CapabilitySet {
-                market: MarketCapabilities {
-                    ticker: true,
-                    recent_trades: true,
-                    book_top: true,
-                    order_book: true,
-                    klines: true,
-                    mark_price: true,
-                    funding_rate: true,
-                    open_interest: true,
-                    liquidations: false,
-                    public_streams: true,
-                    multi_symbol_streams: true,
-                },
-                trade: TradeCapabilities {
-                    create: true,
-                    batch_create: true,
-                    amend: true,
-                    cancel: true,
-                    batch_cancel: true,
-                    cancel_all: true,
-                    get: true,
-                    list_open: true,
-                    history: true,
-                    validate: true,
-                },
-                position: PositionCapabilities {
-                    read: true,
-                    leverage_set: true,
-                    margin_mode_set: true,
-                    position_mode_set: true,
-                    hedge_mode: true,
-                },
-                account: AccountCapabilities {
-                    read_balances: true,
-                    read_summary: true,
-                    private_streams: true,
-                },
-                asset: AssetCapabilities::default(),
-                native: NativeCapabilities {
-                    fast_stream: true,
-                    special_orders: true,
-                    ws_order_entry: true,
-                },
-            },
-            lane_set: bat_markets_core::LaneSet {
-                public: bat_markets_core::LanePolicy {
-                    lossless: false,
-                    coalescing_allowed: true,
-                    buffer_capacity: 4_096,
-                    reconnect_required: true,
-                    idempotent: false,
-                },
-                private: bat_markets_core::LanePolicy {
-                    lossless: true,
-                    coalescing_allowed: false,
-                    buffer_capacity: 8_192,
-                    reconnect_required: true,
-                    idempotent: true,
-                },
-                command: bat_markets_core::LanePolicy {
-                    lossless: true,
-                    coalescing_allowed: false,
-                    buffer_capacity: 1_024,
-                    reconnect_required: true,
-                    idempotent: true,
-                },
-            },
+            capabilities: CapabilitySet::linear_futures_defaults(),
+            lane_set: bat_markets_core::LaneSet::linear_futures_defaults(),
             instruments: Arc::new(RwLock::new(InstrumentCatalog::new([
                 btc_spec(),
                 eth_spec(),
