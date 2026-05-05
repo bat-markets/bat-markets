@@ -1,6 +1,6 @@
 # bat-markets
 
-Headless Rust exchange engine for Binance USD-M and Bybit USDT linear futures.
+Headless Rust exchange engine for Binance USD-M, Bybit USDT, and MEXC USDT-M linear futures.
 
 `bat-markets` gives applications a typed root client for:
 
@@ -15,14 +15,14 @@ Headless Rust exchange engine for Binance USD-M and Bybit USDT linear futures.
 
 ```toml
 [dependencies]
-bat-markets = "0.3.3"
+bat-markets = "0.3.4"
 ```
 
 Single-venue build:
 
 ```toml
 [dependencies]
-bat-markets = { version = "0.3.3", default-features = false, features = ["binance"] }
+bat-markets = { version = "0.3.4", default-features = false, features = ["binance"] }
 ```
 
 Feature flags:
@@ -31,13 +31,14 @@ Feature flags:
 | --- | --- |
 | `binance` | Binance USD-M linear futures adapter |
 | `bybit` | Bybit USDT linear futures adapter |
+| `mexc` | MEXC USDT-M linear futures adapter |
 | `private-trading` | Authenticated private reads and commands |
 | `metrics` | Reserved for metrics integrations |
 | `serde` | Reserved for serde-facing API expansion |
 
-At least one venue feature must be enabled. The default build enables both
+At least one venue feature must be enabled. The default build enables all
 venues; use `default-features = false` with `features = ["binance"]` or
-`features = ["bybit"]` for a single-venue build.
+`features = ["bybit"]` or `features = ["mexc"]` for a single-venue build.
 
 ## Quick Start
 
@@ -94,7 +95,7 @@ async fn main() -> bat_markets::errors::Result<()> {
 | `build()` | Offline constructor. No network I/O. Useful for fixtures, metadata, and local ingestion. |
 | `build_live().await` | Live constructor. Builds transport, resolves auth, syncs time, refreshes metadata. |
 | Public reads | Do not require credentials. |
-| Private reads, private watches, commands | Use explicit config or `BINANCE_API_KEY`, `BINANCE_API_SECRET`, `BYBIT_API_KEY`, `BYBIT_API_SECRET`. |
+| Private reads, private watches, commands | Use explicit config or `BINANCE_API_KEY`, `BINANCE_API_SECRET`, `BYBIT_API_KEY`, `BYBIT_API_SECRET`, `MEXC_API_KEY`, `MEXC_API_SECRET`. |
 | Watch handles | Use `recv().await` for the next typed event. Use `shutdown().await` or drop the handle to release the shared lease. |
 | Command handles | Immediate `ack()` is available. `receipt().await`, `next_lifecycle().await`, and `resolved().await` observe command outcome. |
 | Uncertain writes | Timeouts/disconnects can return `UnknownExecution`; reconciliation resolves what local evidence can prove. |
@@ -265,6 +266,7 @@ venue-specific access. Normal application code should prefer root methods.
 | `native` | none | `NativeClient` | Venue-specific adapter access. |
 | `native().binance()` | Binance client | `Result<&BinanceLinearFuturesAdapter>` | Binance adapter access. |
 | `native().bybit()` | Bybit client | `Result<&BybitLinearFuturesAdapter>` | Bybit adapter access. |
+| `native().mexc()` | MEXC client | `Result<&MexcLinearFuturesAdapter>` | MEXC adapter access. |
 
 ## Runtime Architecture
 
@@ -275,13 +277,13 @@ Application
      -> shared hubs: one public stream plan, one private stream lease set
      -> SharedState: EngineState, event buses, health, diagnostics
         -> bat-markets-core domain contracts
-     -> venue adapter: Binance or Bybit native decoding/classification
+     -> venue adapter: Binance, Bybit, or MEXC native decoding/classification
 ```
 
 Core rules:
 
 - `bat-markets-core` owns domain types, state, errors, capabilities, and adapter traits.
-- `bat-markets-binance` and `bat-markets-bybit` own native payload decoding and venue behavior.
+- `bat-markets-binance`, `bat-markets-bybit`, and `bat-markets-mexc` own native payload decoding and venue behavior.
 - `bat-markets` owns the public facade and live transport runtime.
 - `bat-markets-testing` is unpublished and owns fixtures, smoke tests, and benches.
 

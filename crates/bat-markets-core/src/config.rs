@@ -115,9 +115,15 @@ impl BatMarketsConfig {
                 ws_handshake_ms: 10_000,
                 ws_idle_ms: 30_000,
             },
-            rate_limits: RateLimitPolicy {
-                command_burst: 8,
-                command_refill_per_second: 4,
+            rate_limits: match venue {
+                Venue::Mexc => RateLimitPolicy {
+                    command_burst: 20,
+                    command_refill_per_second: 10,
+                },
+                _ => RateLimitPolicy {
+                    command_burst: 8,
+                    command_refill_per_second: 4,
+                },
             },
             retry: RetryPolicy {
                 rest_retries: 2,
@@ -157,6 +163,13 @@ impl EndpointConfig {
                 command_ws_base: "wss://stream-testnet.bybit.com/v5/trade".into(),
                 sandbox: true,
             },
+            Venue::Mexc => Self {
+                rest_base: "https://contract.mexc.com".into(),
+                public_ws_base: "wss://contract.mexc.com/edge".into(),
+                private_ws_base: "wss://contract.mexc.com/edge".into(),
+                command_ws_base: "wss://contract.mexc.com/edge".into(),
+                sandbox: false,
+            },
         }
     }
 
@@ -175,6 +188,13 @@ impl EndpointConfig {
                 public_ws_base: "wss://stream.bybit.com/v5/public/linear".into(),
                 private_ws_base: "wss://stream.bybit.com/v5/private".into(),
                 command_ws_base: "wss://stream.bybit.com/v5/trade".into(),
+                sandbox: false,
+            },
+            Venue::Mexc => Self {
+                rest_base: "https://contract.mexc.com".into(),
+                public_ws_base: "wss://contract.mexc.com/edge".into(),
+                private_ws_base: "wss://contract.mexc.com/edge".into(),
+                command_ws_base: "wss://contract.mexc.com/edge".into(),
                 sandbox: false,
             },
         }

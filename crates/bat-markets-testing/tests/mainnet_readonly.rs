@@ -9,7 +9,8 @@ use bat_markets::{
 };
 use bat_markets_core::{ErrorKind, MarketError, VenueAdapter};
 use bat_markets_testing::{
-    LiveTestEndpointMode, has_binance_live_env, has_bybit_live_env, live_test_config,
+    LiveTestEndpointMode, has_binance_live_env, has_bybit_live_env, has_mexc_live_env,
+    live_test_config,
 };
 
 #[tokio::test]
@@ -126,6 +127,66 @@ async fn bybit_mainnet_read_flows_are_manual_and_read_only() -> Result<()> {
     let _ = await_live_update("order_book", order_book_watch.recv()).await?;
     ticker_watch.shutdown().await?;
     trades_watch.shutdown().await?;
+    order_book_watch.shutdown().await?;
+
+    assert_eq!(ticker.instrument_id, instrument);
+    assert!(!trades.is_empty());
+    assert_eq!(order_book.instrument_id, instrument);
+    assert!(
+        client
+            .advanced()
+            .cached_open_interest(&instrument)
+            .is_some()
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn mexc_mainnet_read_flows_are_manual_and_read_only() -> Result<()> {
+    if !has_mexc_live_env() || env::var_os("BAT_MARKETS_ENABLE_MAINNET_READS").is_none() {
+        return Ok(());
+    }
+
+    let config = live_test_config(Venue::Mexc, LiveTestEndpointMode::Mainnet);
+    let client = BatMarketsBuilder::default()
+        .config(config)
+        .build_live()
+        .await?;
+
+    assert!(
+        !client
+            .advanced()
+            .native()
+            .mexc()?
+            .config()
+            .endpoints
+            .sandbox
+    );
+    let instrument = preferred_mainnet_instrument(&client);
+    let public = client.watch_ticker(instrument.clone()).await?;
+    let private = client.watch_balance().await?;
+
+    sleep(Duration::from_secs(3)).await;
+
+    public.shutdown().await?;
+    private.shutdown().await?;
+
+    let ticker = client.fetch_ticker(&instrument).await?;
+    let trades = client.fetch_trades(&instrument, Some(10)).await?;
+    let order_book = client.fetch_order_book(&instrument, Some(5)).await?;
+    let _ = client.fetch_open_interest(&instrument).await?;
+    let _ = client.fetch_balance().await?;
+    let _ = client.fetch_positions().await?;
+    let _ = client.fetch_open_orders(None).await?;
+    let _ = client.fetch_my_trades(None).await?;
+    let _ = client.advanced().reconcile().await?;
+
+    let mut order_book_watch = client
+        .watch_order_book(instrument.clone(), Some(50))
+        .await?;
+    // MEXC ticker pushes are documented as once per second only when trades occur;
+    // depth is the deterministic public-stream smoke path because it pushes every 200ms.
+    let _ = await_live_update("order_book", order_book_watch.recv()).await?;
     order_book_watch.shutdown().await?;
 
     assert_eq!(ticker.instrument_id, instrument);

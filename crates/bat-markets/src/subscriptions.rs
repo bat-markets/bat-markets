@@ -362,7 +362,7 @@ fn route_public_subscriptions<'a>(
 
     match venue {
         Venue::Binance => split_binance_public_subscription(subscription),
-        Venue::Bybit => BTreeMap::from([(PublicStreamRoute::Default, subscription)]),
+        Venue::Bybit | Venue::Mexc => BTreeMap::from([(PublicStreamRoute::Default, subscription)]),
     }
 }
 

@@ -1,0 +1,11 @@
+{
+  "channel": "push.depth",
+  "symbol": "BTC_USDT",
+  "data": {
+    "asks": [[65432.2, 2, 1]],
+    "bids": [[65432.0, 3, 1]],
+    "version": 28111438870,
+    "timestamp": 1761879567135
+  },
+  "ts": 1761879567135
+}

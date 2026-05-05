@@ -1,0 +1,20 @@
+{
+  "channel": "push.personal.order",
+  "data": {
+    "orderId": 123456789,
+    "symbol": "BTC_USDT",
+    "price": 65432.1,
+    "vol": 1,
+    "side": 1,
+    "category": 1,
+    "orderType": 1,
+    "dealAvgPrice": 0,
+    "dealVol": 0,
+    "state": 2,
+    "externalOid": "mexc-test-1",
+    "createTime": 1761879567000,
+    "updateTime": 1761879567135,
+    "reduceOnly": false
+  },
+  "ts": 1761879567135
+}

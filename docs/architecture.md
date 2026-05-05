@@ -13,25 +13,26 @@ Technical map for `bat-markets` v0.3.x.
 
 ## Current Measurements
 
-Measured on 2026-04-25 from commit `fcc2597` tagged `v0.3.0`.
+Measured on 2026-05-05 from the local `v0.3.4` release gate.
 
 | Area | Value |
 | --- | ---: |
-| Workspace crates | 5 |
-| Published crates | 4 |
-| Rust source files in `crates/` | 51 |
-| Fixture JSON files | 39 |
-| Test and doctest entries | 105 |
+| Workspace crates | 6 |
+| Published crates | 5 |
+| Rust source files in `crates/` | 53 |
+| Fixture JSON files | 44 |
+| Test and doctest entries | 130 |
 | Documentation Markdown files | 9 regular files plus `docs/blueprint.md` symlink |
 
 Package footprint from the release gate:
 
 | Package | Files | Uncompressed | Compressed |
 | --- | ---: | ---: | ---: |
-| `bat-markets-core` | 26 | 130.3 KiB | 27.8 KiB |
-| `bat-markets-binance` | 7 | 111.6 KiB | 20.8 KiB |
-| `bat-markets-bybit` | 7 | 101.1 KiB | 20.1 KiB |
-| `bat-markets` | 21 | 546.2 KiB | 80.1 KiB |
+| `bat-markets-core` | 26 | 142.6 KiB | 30.1 KiB |
+| `bat-markets-binance` | 7 | 116.2 KiB | 21.9 KiB |
+| `bat-markets-bybit` | 7 | 105.8 KiB | 21.2 KiB |
+| `bat-markets-mexc` | 7 | 89.3 KiB | 19.4 KiB |
+| `bat-markets` | 21 | 635.6 KiB | 92.2 KiB |
 
 Short local benchmark baseline:
 
@@ -61,18 +62,22 @@ flowchart TB
     Core["bat-markets-core<br/>domain + state + traits"]
     Binance["bat-markets-binance<br/>Binance adapter"]
     Bybit["bat-markets-bybit<br/>Bybit adapter"]
+    Mexc["bat-markets-mexc<br/>MEXC adapter"]
     Testing["bat-markets-testing<br/>fixtures + smoke + benches"]
 
     App --> Facade
     Facade --> Core
     Facade --> Binance
     Facade --> Bybit
+    Facade --> Mexc
     Binance --> Core
     Bybit --> Core
+    Mexc --> Core
     Testing --> Facade
     Testing --> Core
     Testing --> Binance
     Testing --> Bybit
+    Testing --> Mexc
 ```
 
 | Crate | Published | Owns |
@@ -81,6 +86,7 @@ flowchart TB
 | `bat-markets-core` | yes | Domain types, errors, config, capabilities, state engine, adapter trait |
 | `bat-markets-binance` | yes | Binance native payloads, symbol rules, decoders, command classification |
 | `bat-markets-bybit` | yes | Bybit native payloads, symbol rules, decoders, command classification |
+| `bat-markets-mexc` | yes | MEXC native payloads, symbol rules, decoders, command classification |
 | `bat-markets-testing` | no | Fixtures, live smoke helpers, stress tests, Criterion benches |
 
 Dependency rule: core imports no venue or facade crate. Venue crates depend on
@@ -104,6 +110,7 @@ everything.
 | `docs/` | Architecture, release process, and ADRs |
 | `fixtures/binance/` | Binance deterministic protocol fixtures |
 | `fixtures/bybit/` | Bybit deterministic protocol fixtures |
+| `fixtures/mexc/` | MEXC deterministic protocol fixtures |
 
 ## Facade Modules
 
@@ -270,10 +277,11 @@ evidence to resolve what it can.
 5. workspace docs
 6. single-venue clippy for Binance
 7. single-venue clippy for Bybit
-8. `cargo audit`
-9. package verification for published crates
-10. benchmark compilation
+8. single-venue clippy for MEXC
+9. `cargo audit`
+10. package verification for published crates
+11. benchmark compilation
 
-Publish order is fixed: core, Binance adapter, Bybit adapter, facade. The
-publish script waits for each crate version to become visible on crates.io
-before publishing dependents.
+Publish order is fixed: core, Binance adapter, Bybit adapter, MEXC adapter,
+facade. The publish script waits for each crate version to become visible on
+crates.io before publishing dependents.

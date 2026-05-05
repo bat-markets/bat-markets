@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 pub enum Venue {
     Binance,
     Bybit,
+    Mexc,
 }
 
 impl fmt::Display for Venue {
@@ -15,6 +16,7 @@ impl fmt::Display for Venue {
         match self {
             Self::Binance => write!(f, "binance"),
             Self::Bybit => write!(f, "bybit"),
+            Self::Mexc => write!(f, "mexc"),
         }
     }
 }

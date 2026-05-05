@@ -1,3 +1,8 @@
+#![cfg_attr(
+    all(feature = "mexc", not(any(feature = "binance", feature = "bybit"))),
+    allow(dead_code)
+)]
+
 use std::{
     collections::BTreeMap,
     sync::{
@@ -260,6 +265,11 @@ async fn run_command_ws_session(
                             .await
                             .map_err(|error| command_ws_error(venue, "command_ws.ping", error.to_string()))?;
                     }
+                    Venue::Mexc => {
+                        ws.send(Message::Text(r#"{"method":"ping"}"#.into()))
+                            .await
+                            .map_err(|error| command_ws_error(venue, "command_ws.ping", error.to_string()))?;
+                    }
                 }
             }
             message = ws.next() => {
@@ -417,6 +427,10 @@ fn extract_response_id(venue: Venue, payload: &str) -> Option<String> {
         Venue::Bybit => value
             .get("reqId")
             .or_else(|| value.get("req_id"))
+            .and_then(value_to_id),
+        Venue::Mexc => value
+            .get("id")
+            .or_else(|| value.get("reqId"))
             .and_then(value_to_id),
     }
 }

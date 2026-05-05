@@ -1,10 +1,15 @@
+#![cfg_attr(
+    all(feature = "mexc", not(any(feature = "binance", feature = "bybit"))),
+    allow(dead_code, unused_imports, unused_mut, unused_variables)
+)]
+
 use std::{
     collections::BTreeMap,
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-#[cfg(feature = "binance")]
+#[cfg(any(feature = "binance", feature = "mexc"))]
 use futures_util::future::try_join_all;
 use futures_util::{SinkExt, StreamExt};
 #[cfg(feature = "binance")]
@@ -12,7 +17,9 @@ use reqwest::Method;
 use reqwest::StatusCode;
 #[cfg(feature = "bybit")]
 use rust_decimal::Decimal;
-use serde_json::{Value, json};
+#[cfg(any(feature = "binance", feature = "bybit", feature = "mexc"))]
+use serde_json::Value;
+use serde_json::json;
 use tokio::{
     sync::{Mutex, oneshot},
     time::{Instant, interval, sleep},
@@ -20,7 +27,7 @@ use tokio::{
 use tokio_tungstenite::tungstenite::Message;
 use url::form_urlencoded::Serializer;
 
-#[cfg(feature = "binance")]
+#[cfg(any(feature = "binance", feature = "mexc"))]
 use bat_markets_core::OrderType;
 use bat_markets_core::{
     AccountSnapshot, AmendOrderRequest, AmendOrdersRequest, CancelAllOrdersRequest,
@@ -29,13 +36,14 @@ use bat_markets_core::{
     CommandTransport, CreateOrderRequest, CreateOrdersRequest, DegradedReason, ErrorKind,
     Execution, FetchOhlcvRequest, FetchOrderBookRequest, FetchTickersRequest, FetchTradesRequest,
     GetOrderRequest, HealthReport, InstrumentId, InstrumentSpec, Kline, KlineInterval, Liquidation,
-    ListExecutionsRequest, ListOpenOrdersRequest, MarginMode, MarkPrice, MarketError, OpenInterest,
-    Order, OrderBookLevel, OrderBookSnapshot, OrderId, OrderTarget, Position, Price,
-    PrivateLaneEvent, Product, PublicLaneEvent, Quantity, ReconcileOutcome, ReconcileReport,
-    ReconcileTrigger, RequestId, Result, SequenceNumber, SetLeverageRequest, SetMarginModeRequest,
-    SetPositionModeRequest, Ticker, TimestampMs, TradeTick, ValidateOrderRequest, Venue,
-    VenueAdapter,
+    ListExecutionsRequest, ListOpenOrdersRequest, MarkPrice, MarketError, OpenInterest, Order,
+    OrderBookSnapshot, OrderId, OrderTarget, Position, Price, PrivateLaneEvent, Product,
+    PublicLaneEvent, Quantity, ReconcileOutcome, ReconcileReport, ReconcileTrigger, RequestId,
+    Result, SetLeverageRequest, SetMarginModeRequest, SetPositionModeRequest, Ticker, TimestampMs,
+    TradeTick, ValidateOrderRequest, Venue, VenueAdapter,
 };
+#[cfg(any(feature = "binance", feature = "bybit", feature = "mexc"))]
+use bat_markets_core::{MarginMode, OrderBookLevel, SequenceNumber};
 
 #[cfg(feature = "binance")]
 use bat_markets_binance::BinanceLinearFuturesAdapter;
@@ -46,11 +54,12 @@ use bat_markets_bybit::BybitLinearFuturesAdapter;
 #[cfg(feature = "bybit")]
 use bat_markets_bybit::native as bybit_native;
 
+#[cfg(any(feature = "binance", feature = "bybit"))]
+use crate::transport::CommandWsRequestError;
 use crate::{
     client::{AdapterHandle, LiveContext},
     diagnostics::{RuntimeDiagnosticsState, RuntimeOperation},
     stream::{LiveStreamHandle, PublicStreamRoute, PublicSubscription},
-    transport::CommandWsRequestError,
 };
 
 #[derive(Debug)]
@@ -270,6 +279,24 @@ fn unsupported_ws_command(context: &LiveContext, operation: &str) -> MarketError
     .with_venue(context.config.venue, context.config.product)
 }
 
+#[cfg(feature = "mexc")]
+fn unsupported_mexc_command(context: &LiveContext, operation: &str, reason: &str) -> MarketError {
+    MarketError::new(
+        ErrorKind::Unsupported,
+        format!("mexc {operation} is unsupported: {reason}"),
+    )
+    .with_venue(context.config.venue, context.config.product)
+}
+
+#[cfg(feature = "mexc")]
+fn mexc_unsupported_command_result<T>(
+    context: &LiveContext,
+    operation: &str,
+    reason: &str,
+) -> Result<T> {
+    Err(unsupported_mexc_command(context, operation, reason))
+}
+
 pub(crate) async fn bootstrap_live(context: &LiveContext) -> Result<()> {
     sync_server_time(context).await?;
     refresh_metadata(context).await?;
@@ -307,6 +334,13 @@ pub(crate) async fn refresh_metadata(context: &LiveContext) -> Result<Vec<Instru
                     "bybit.metadata",
                 )
                 .await?;
+                adapter.parse_metadata_snapshot(&payload)?
+            }
+            #[cfg(feature = "mexc")]
+            AdapterHandle::Mexc(adapter) => {
+                let payload =
+                    public_get_with_retry(context, "/api/v1/contract/detail", &[], "mexc.metadata")
+                        .await?;
                 adapter.parse_metadata_snapshot(&payload)?
             }
         };
@@ -366,6 +400,23 @@ pub(crate) async fn fetch_balance(context: &LiveContext) -> Result<AccountSnapsh
                 });
                 account
             }
+            #[cfg(feature = "mexc")]
+            AdapterHandle::Mexc(adapter) => {
+                let payload = mexc_signed_get_text(
+                    context,
+                    "/api/v1/private/account/assets",
+                    &[],
+                    "mexc.account.assets",
+                )
+                .await?;
+                let observed_at = timestamp_now_ms();
+                let account = adapter.parse_account_snapshot(&payload, observed_at)?;
+                context.shared.write(|state| {
+                    state.replace_account_snapshot(account.clone());
+                    state.mark_rest_success(None);
+                });
+                account
+            }
         };
 
         Ok(snapshot)
@@ -414,6 +465,23 @@ pub(crate) async fn refresh_positions(
                     "/v5/position/list",
                     &[("category", "linear"), ("settleCoin", "USDT")],
                     "bybit.positions",
+                )
+                .await?;
+                let positions = adapter.parse_positions_snapshot(&payload, timestamp_now_ms())?;
+                let positions_for_state = positions.clone();
+                context.shared.write(|state| {
+                    state.replace_positions(positions_for_state);
+                    state.mark_rest_success(None);
+                });
+                positions
+            }
+            #[cfg(feature = "mexc")]
+            AdapterHandle::Mexc(adapter) => {
+                let payload = mexc_signed_get_text(
+                    context,
+                    "/api/v1/private/position/open_positions",
+                    &[],
+                    "mexc.positions",
                 )
                 .await?;
                 let positions = adapter.parse_positions_snapshot(&payload, timestamp_now_ms())?;
@@ -496,6 +564,17 @@ pub(crate) async fn refresh_open_orders(
                 .await?;
                 adapter.parse_open_orders_snapshot(&payload, timestamp_now_ms())?
             }
+            #[cfg(feature = "mexc")]
+            AdapterHandle::Mexc(adapter) => {
+                let mut path = "/api/v1/private/order/list/open_orders".to_owned();
+                if let Some(request) = request.and_then(|request| request.instrument_id.as_ref()) {
+                    let spec = require_spec(context, request)?;
+                    path.push('/');
+                    path.push_str(spec.native_symbol.as_ref());
+                }
+                let payload = mexc_signed_get_text(context, &path, &[], "mexc.open_orders").await?;
+                adapter.parse_open_orders_snapshot(&payload, timestamp_now_ms())?
+            }
         };
 
         let orders_for_state = orders.clone();
@@ -570,6 +649,37 @@ pub(crate) async fn refresh_executions(
                 .await?;
                 adapter.parse_executions_snapshot(&payload)?
             }
+            #[cfg(feature = "mexc")]
+            AdapterHandle::Mexc(adapter) => {
+                let mut query = Vec::<(String, String)>::new();
+                if let Some(request) = request {
+                    if let Some(instrument_id) = &request.instrument_id {
+                        let spec = require_spec(context, instrument_id)?;
+                        query.push(("symbol".to_owned(), spec.native_symbol.to_string()));
+                    }
+                    if let Some(limit) = request.limit {
+                        query.push(("page_size".to_owned(), limit.min(100).to_string()));
+                    }
+                }
+                if !query.iter().any(|(key, _)| key == "page_num") {
+                    query.push(("page_num".to_owned(), "1".to_owned()));
+                }
+                if !query.iter().any(|(key, _)| key == "page_size") {
+                    query.push(("page_size".to_owned(), "100".to_owned()));
+                }
+                let pairs = query
+                    .iter()
+                    .map(|(key, value)| (key.as_str(), value.as_str()))
+                    .collect::<Vec<_>>();
+                let payload = mexc_signed_get_text(
+                    context,
+                    "/api/v1/private/order/list/order_deals",
+                    &pairs,
+                    "mexc.executions",
+                )
+                .await?;
+                adapter.parse_executions_snapshot(&payload)?
+            }
         };
 
         let executions_for_state = executions.clone();
@@ -588,6 +698,8 @@ pub(crate) async fn get_order(context: &LiveContext, request: &GetOrderRequest) 
     let started_at = Instant::now();
     let result = async {
         let spec = require_spec(context, &request.instrument_id)?;
+        #[cfg(all(feature = "mexc", not(any(feature = "binance", feature = "bybit"))))]
+        let _ = &spec;
         let order = match &context.adapter {
             #[cfg(feature = "binance")]
             AdapterHandle::Binance(adapter) => {
@@ -638,7 +750,20 @@ pub(crate) async fn get_order(context: &LiveContext, request: &GetOrderRequest) 
                     .collect::<Vec<_>>();
                 let payload =
                     bybit_signed_get_text(context, "/v5/order/realtime", &pairs, "bybit.get_order")
-                        .await?;
+                .await?;
+                adapter.parse_order_snapshot(&payload, timestamp_now_ms())?
+            }
+            #[cfg(feature = "mexc")]
+            AdapterHandle::Mexc(adapter) => {
+                let order_id = request.order_id.as_ref().ok_or_else(|| {
+                    MarketError::new(
+                        ErrorKind::ConfigError,
+                        "mexc get_order requires order_id; externalOid query is not stable enough for unified lookup",
+                    )
+                    .with_venue(context.config.venue, context.config.product)
+                })?;
+                let path = format!("/api/v1/private/order/get/{order_id}");
+                let payload = mexc_signed_get_text(context, &path, &[], "mexc.get_order").await?;
                 adapter.parse_order_snapshot(&payload, timestamp_now_ms())?
             }
         };
@@ -953,6 +1078,43 @@ pub(crate) async fn create_order(
                 }
             }
         }
+        #[cfg(feature = "mexc")]
+        AdapterHandle::Mexc(adapter) => {
+            if context.command_transport_mode.is_websocket_only() {
+                return Err(unsupported_ws_command(context, "mexc.create_order_ws"));
+            }
+            // MEXC official futures docs currently label order submit as "under maintenance".
+            // The REST contract and signing rules are still documented, so we keep the real
+            // endpoint wired and let venue responses decide acceptance/rejection at runtime.
+            let body_value = build_mexc_create_order_object(context, request)?;
+            let body = mexc_serialize_body(&body_value, "create order")?;
+            match mexc_signed_post_text(
+                context,
+                "/api/v1/private/order/submit",
+                &body,
+                "mexc.create_order",
+            )
+            .await
+            {
+                Ok(payload) => (
+                    adapter.classify_command(
+                        CommandOperation::CreateOrder,
+                        Some(&payload),
+                        request.request_id.clone(),
+                    )?,
+                    CommandTransport::Rest,
+                ),
+                Err(error) if is_uncertain_command_error(&error) => (
+                    adapter.classify_command(
+                        CommandOperation::CreateOrder,
+                        None,
+                        request.request_id.clone(),
+                    )?,
+                    CommandTransport::Rest,
+                ),
+                Err(error) => return Err(error),
+            }
+        }
     };
 
     let receipt = hydrate_create_receipt(receipt, request);
@@ -989,6 +1151,10 @@ pub(crate) async fn create_orders(
             return Ok(vec![create_order(context, &single).await?]);
         }
 
+        #[cfg_attr(
+            all(feature = "mexc", not(any(feature = "binance", feature = "bybit"))),
+            allow(unused_mut)
+        )]
         let mut acks = vec![None; request.orders.len()];
         match &context.adapter {
             #[cfg(feature = "binance")]
@@ -1277,6 +1443,89 @@ pub(crate) async fn create_orders(
                         &chunk_receipts,
                         &chunk_requests,
                         transport,
+                    )
+                    .await;
+                    for ((index, _), ack) in chunk.iter().zip(chunk_acks) {
+                        acks[*index] = Some(ack);
+                    }
+                }
+            }
+            #[cfg(feature = "mexc")]
+            AdapterHandle::Mexc(adapter) => {
+                if context.command_transport_mode.is_websocket_only() {
+                    return Err(unsupported_ws_command(context, "mexc.create_orders_ws"));
+                }
+                for chunk in request
+                    .orders
+                    .iter()
+                    .enumerate()
+                    .collect::<Vec<_>>()
+                    .chunks(20)
+                {
+                    context.command_limiter.acquire().await;
+                    let chunk_requests = chunk
+                        .iter()
+                        .map(|(_, order)| {
+                            hydrate_create_request_with_batch_id(
+                                (*order).clone(),
+                                request.request_id.clone(),
+                            )
+                        })
+                        .collect::<Vec<_>>();
+                    let orders = chunk_requests
+                        .iter()
+                        .map(|order| build_mexc_batch_create_order_object(context, order))
+                        .collect::<Result<Vec<_>>>()?;
+                    // MEXC documents batch submit but currently flags it as maintenance.
+                    // Keep the real endpoint wired and classify the venue payload per item.
+                    let body = mexc_serialize_body(&json!({ "orders": orders }), "batch create")?;
+                    let chunk_receipts = match mexc_signed_post_text(
+                        context,
+                        "/api/v1/private/order/submit_batch",
+                        &body,
+                        "mexc.create_orders",
+                    )
+                    .await
+                    {
+                        Ok(payload) => classify_mexc_batch_payload(
+                            adapter,
+                            CommandOperation::CreateOrder,
+                            &payload,
+                            &chunk_requests
+                                .iter()
+                                .map(|order| order.request_id.clone())
+                                .collect::<Vec<_>>(),
+                        )?,
+                        Err(error) if is_uncertain_command_error(&error) => chunk_requests
+                            .iter()
+                            .map(|order| {
+                                unknown_command_receipt(
+                                    context,
+                                    CommandOperation::CreateOrder,
+                                    Some(order.instrument_id.clone()),
+                                    None,
+                                    order.client_order_id.clone(),
+                                    order.request_id.clone(),
+                                )
+                            })
+                            .collect(),
+                        Err(error) => return Err(error),
+                    };
+                    if chunk_receipts.len() != chunk.len() {
+                        return Err(MarketError::new(
+                            ErrorKind::DecodeError,
+                            format!(
+                                "mexc batch create returned {} receipts for {} requests",
+                                chunk_receipts.len(),
+                                chunk.len()
+                            ),
+                        ));
+                    }
+                    let chunk_acks = cache_and_emit_create_receipts(
+                        context,
+                        &chunk_receipts,
+                        &chunk_requests,
+                        CommandTransport::Rest,
                     )
                     .await;
                     for ((index, _), ack) in chunk.iter().zip(chunk_acks) {
@@ -1628,6 +1877,12 @@ pub(crate) async fn amend_order(
                     }
                 }
             }
+            #[cfg(feature = "mexc")]
+            AdapterHandle::Mexc(_) => mexc_unsupported_command_result(
+                context,
+                "amend_order",
+                "official MEXC futures docs do not expose a regular order amend endpoint",
+            )?,
         };
 
         let receipt = hydrate_amend_receipt(receipt, request);
@@ -1664,6 +1919,10 @@ pub(crate) async fn amend_orders(
             return Ok(vec![amend_order(context, &single).await?]);
         }
 
+        #[cfg_attr(
+            all(feature = "mexc", not(any(feature = "binance", feature = "bybit"))),
+            allow(unused_mut)
+        )]
         let mut acks = vec![None; request.orders.len()];
         match &context.adapter {
             #[cfg(feature = "binance")]
@@ -1948,6 +2207,12 @@ pub(crate) async fn amend_orders(
                     }
                 }
             }
+            #[cfg(feature = "mexc")]
+            AdapterHandle::Mexc(_) => mexc_unsupported_command_result(
+                context,
+                "amend_orders",
+                "official MEXC futures docs do not expose a regular order amend endpoint",
+            )?,
         }
 
         collect_batch_acks(acks, "amend_orders")
@@ -1964,6 +2229,8 @@ pub(crate) async fn cancel_order(
     let started_at = Instant::now();
     let result = async {
         let spec = require_spec(context, &request.instrument_id)?;
+        #[cfg(all(feature = "mexc", not(any(feature = "binance", feature = "bybit"))))]
+        let _ = &spec;
         context.command_limiter.acquire().await;
         let (receipt, transport) = match &context.adapter {
             #[cfg(feature = "binance")]
@@ -2226,6 +2493,49 @@ pub(crate) async fn cancel_order(
                     }
                 }
             }
+            #[cfg(feature = "mexc")]
+            AdapterHandle::Mexc(adapter) => {
+                if context.command_transport_mode.is_websocket_only() {
+                    return Err(unsupported_ws_command(context, "mexc.cancel_order_ws"));
+                }
+                let (path, body_value) = if let Some(order_id) = &request.order_id {
+                    (
+                        "/api/v1/private/order/cancel",
+                        json!({ "orderIds": [mexc_order_id_value(order_id)] }),
+                    )
+                } else if let Some(client_order_id) = &request.client_order_id {
+                    (
+                        "/api/v1/private/order/batch_cancel_with_external",
+                        json!([{ "symbol": spec.native_symbol, "externalOid": client_order_id.to_string() }]),
+                    )
+                } else {
+                    return Err(MarketError::new(
+                        ErrorKind::ConfigError,
+                        "mexc cancel_order requires order_id or client_order_id",
+                    )
+                    .with_venue(context.config.venue, context.config.product));
+                };
+                let body = mexc_serialize_body(&body_value, "cancel order")?;
+                match mexc_signed_post_text(context, path, &body, "mexc.cancel_order").await {
+                    Ok(payload) => (
+                        adapter.classify_command(
+                            CommandOperation::CancelOrder,
+                            Some(&payload),
+                            request.request_id.clone(),
+                        )?,
+                        CommandTransport::Rest,
+                    ),
+                    Err(error) if is_uncertain_command_error(&error) => (
+                        adapter.classify_command(
+                            CommandOperation::CancelOrder,
+                            None,
+                            request.request_id.clone(),
+                        )?,
+                        CommandTransport::Rest,
+                    ),
+                    Err(error) => return Err(error),
+                }
+            }
         };
 
         let receipt = hydrate_cancel_receipt(receipt, request);
@@ -2270,6 +2580,10 @@ pub(crate) async fn cancel_orders(
             .await?]);
         }
 
+        #[cfg_attr(
+            all(feature = "mexc", not(any(feature = "binance", feature = "bybit"))),
+            allow(unused_mut)
+        )]
         let mut acks = vec![None; request.orders.len()];
         match &context.adapter {
             #[cfg(feature = "binance")]
@@ -2592,6 +2906,124 @@ pub(crate) async fn cancel_orders(
                     }
                 }
             }
+            #[cfg(feature = "mexc")]
+            AdapterHandle::Mexc(adapter) => {
+                if context.command_transport_mode.is_websocket_only() {
+                    return Err(unsupported_ws_command(context, "mexc.cancel_orders_ws"));
+                }
+                let indexed = request.orders.iter().enumerate().collect::<Vec<_>>();
+                let all_order_ids = indexed.iter().all(|(_, target)| target.order_id.is_some());
+                let all_external_ids = indexed
+                    .iter()
+                    .all(|(_, target)| target.order_id.is_none() && target.client_order_id.is_some());
+                if !all_order_ids && !all_external_ids {
+                    let chunk_requests = indexed
+                        .iter()
+                        .map(|(_, target)| CancelOrderRequest {
+                            request_id: request.request_id.clone(),
+                            instrument_id: target.instrument_id.clone(),
+                            order_id: target.order_id.clone(),
+                            client_order_id: target.client_order_id.clone(),
+                        })
+                        .collect::<Vec<_>>();
+                    let chunk_acks =
+                        try_join_all(chunk_requests.iter().map(|order| cancel_order(context, order)))
+                            .await?;
+                    for ((index, _), ack) in indexed.iter().zip(chunk_acks) {
+                        acks[*index] = Some(ack);
+                    }
+                } else {
+                    for chunk in indexed.chunks(50) {
+                        context.command_limiter.acquire().await;
+                        let (path, body_value) = if all_order_ids {
+                            (
+                                "/api/v1/private/order/cancel",
+                                json!({
+                                    "orderIds": chunk
+                                        .iter()
+                                        .filter_map(|(_, target)| target.order_id.as_ref())
+                                        .map(mexc_order_id_value)
+                                        .collect::<Vec<_>>()
+                                }),
+                            )
+                        } else {
+                            (
+                                "/api/v1/private/order/batch_cancel_with_external",
+                                Value::Array(
+                                    chunk
+                                        .iter()
+                                        .map(|(_, target)| {
+                                            let spec = require_spec(context, &target.instrument_id)?;
+                                            Ok(json!({
+                                                "symbol": spec.native_symbol,
+                                                "externalOid": target
+                                                    .client_order_id
+                                                    .as_ref()
+                                                    .map(ToString::to_string)
+                                                    .unwrap_or_default(),
+                                            }))
+                                        })
+                                        .collect::<Result<Vec<_>>>()?,
+                                ),
+                            )
+                        };
+                        let body = mexc_serialize_body(&body_value, "batch cancel")?;
+                        let chunk_receipts = match mexc_signed_post_text(
+                            context,
+                            path,
+                            &body,
+                            "mexc.cancel_orders",
+                        )
+                        .await
+                        {
+                            Ok(payload) => classify_mexc_batch_payload(
+                                adapter,
+                                CommandOperation::CancelOrder,
+                                &payload,
+                                &vec![request.request_id.clone(); chunk.len()],
+                            )?,
+                            Err(error) if is_uncertain_command_error(&error) => chunk
+                                .iter()
+                                .map(|(_, target)| {
+                                    unknown_command_receipt(
+                                        context,
+                                        CommandOperation::CancelOrder,
+                                        Some(target.instrument_id.clone()),
+                                        target.order_id.clone(),
+                                        target.client_order_id.clone(),
+                                        request.request_id.clone(),
+                                    )
+                                })
+                                .collect(),
+                            Err(error) => return Err(error),
+                        };
+                        if chunk_receipts.len() != chunk.len() {
+                            return Err(MarketError::new(
+                                ErrorKind::DecodeError,
+                                format!(
+                                    "mexc batch cancel returned {} receipts for {} requests",
+                                    chunk_receipts.len(),
+                                    chunk.len()
+                                ),
+                            ));
+                        }
+                        let chunk_targets = chunk
+                            .iter()
+                            .map(|(_, target)| (*target).clone())
+                            .collect::<Vec<_>>();
+                        let chunk_acks = cache_and_emit_cancel_receipts(
+                            context,
+                            &chunk_receipts,
+                            &chunk_targets,
+                            CommandTransport::Rest,
+                        )
+                        .await;
+                        for ((index, _), ack) in chunk.iter().zip(chunk_acks) {
+                            acks[*index] = Some(ack);
+                        }
+                    }
+                }
+            }
         }
 
         collect_batch_acks(acks, "cancel_orders")
@@ -2611,7 +3043,7 @@ pub(crate) async fn cancel_all_orders(
             return Err(unsupported_ws_command(context, "cancel_all_orders_ws"));
         }
         context.command_limiter.acquire().await;
-        let receipt = match (&context.adapter, &request.instrument_id) {
+        let receipt: CommandReceipt = match (&context.adapter, &request.instrument_id) {
             #[cfg(feature = "binance")]
             (AdapterHandle::Binance(adapter), Some(instrument_id)) => {
                 let spec = require_spec(context, instrument_id)?;
@@ -2732,6 +3164,28 @@ pub(crate) async fn cancel_all_orders(
                     request.request_id.clone(),
                 )?
             }
+            #[cfg(feature = "mexc")]
+            (AdapterHandle::Mexc(adapter), instrument_id) => {
+                let body_value = if let Some(instrument_id) = instrument_id {
+                    let spec = require_spec(context, instrument_id)?;
+                    json!({ "symbol": spec.native_symbol })
+                } else {
+                    json!({})
+                };
+                let body = mexc_serialize_body(&body_value, "cancel all orders")?;
+                let payload = mexc_signed_post_text(
+                    context,
+                    "/api/v1/private/order/cancel_all",
+                    &body,
+                    "mexc.cancel_all_orders",
+                )
+                .await?;
+                adapter.classify_command(
+                    CommandOperation::CancelAllOrders,
+                    Some(&payload),
+                    request.request_id.clone(),
+                )?
+            }
         };
 
         apply_command_receipt(context, receipt.clone(), CommandTransport::Rest).await;
@@ -2794,7 +3248,7 @@ pub(crate) async fn close_position(
 
         validate_create_order(context, &derived_request)?;
         context.command_limiter.acquire().await;
-        let (receipt, transport) = match &context.adapter {
+        let (receipt, transport): (CommandReceipt, CommandTransport) = match &context.adapter {
             #[cfg(feature = "binance")]
             AdapterHandle::Binance(adapter) => {
                 let spec = require_spec(context, &derived_request.instrument_id)?;
@@ -3022,6 +3476,40 @@ pub(crate) async fn close_position(
                     }
                 }
             }
+            #[cfg(feature = "mexc")]
+            AdapterHandle::Mexc(adapter) => {
+                if context.command_transport_mode.is_websocket_only() {
+                    return Err(unsupported_ws_command(context, "mexc.close_position_ws"));
+                }
+                let body_value = build_mexc_create_order_object(context, &derived_request)?;
+                let body = mexc_serialize_body(&body_value, "close position")?;
+                match mexc_signed_post_text(
+                    context,
+                    "/api/v1/private/order/submit",
+                    &body,
+                    "mexc.close_position",
+                )
+                .await
+                {
+                    Ok(payload) => (
+                        adapter.classify_command(
+                            CommandOperation::ClosePosition,
+                            Some(&payload),
+                            derived_request.request_id.clone(),
+                        )?,
+                        CommandTransport::Rest,
+                    ),
+                    Err(error) if is_uncertain_command_error(&error) => (
+                        adapter.classify_command(
+                            CommandOperation::ClosePosition,
+                            None,
+                            derived_request.request_id.clone(),
+                        )?,
+                        CommandTransport::Rest,
+                    ),
+                    Err(error) => return Err(error),
+                }
+            }
         };
 
         if receipt.status == CommandStatus::UnknownExecution {
@@ -3096,7 +3584,7 @@ pub(crate) async fn set_leverage(
         let spec = require_spec(context, &request.instrument_id)?;
         context.command_limiter.acquire().await;
         let leverage = request.leverage.value().normalize().to_string();
-        let receipt = match &context.adapter {
+        let receipt: CommandReceipt = match &context.adapter {
             #[cfg(feature = "binance")]
             AdapterHandle::Binance(adapter) => {
                 let pairs = [
@@ -3160,6 +3648,46 @@ pub(crate) async fn set_leverage(
                     Err(error) => return Err(error),
                 }
             }
+            #[cfg(feature = "mexc")]
+            AdapterHandle::Mexc(adapter) => {
+                // MEXC documents leverage changes through change_leverage. The same docs have
+                // recently marked parts of the trading surface as maintenance, so this path keeps
+                // the real endpoint enabled but preserves venue rejection/uncertainty explicitly.
+                let bodies =
+                    mexc_change_leverage_bodies(context, &request.instrument_id, &leverage, None)?;
+                let mut receipts = Vec::with_capacity(bodies.len());
+                for body_value in bodies {
+                    let body = mexc_serialize_body(&body_value, "set leverage")?;
+                    let receipt = match mexc_signed_post_text(
+                        context,
+                        "/api/v1/private/position/change_leverage",
+                        &body,
+                        "mexc.set_leverage",
+                    )
+                    .await
+                    {
+                        Ok(payload) => adapter.classify_command(
+                            CommandOperation::SetLeverage,
+                            Some(&payload),
+                            request.request_id.clone(),
+                        )?,
+                        Err(error) if is_uncertain_command_error(&error) => adapter
+                            .classify_command(
+                                CommandOperation::SetLeverage,
+                                None,
+                                request.request_id.clone(),
+                            )?,
+                        Err(error) => return Err(error),
+                    };
+                    receipts.push(receipt);
+                }
+                mexc_merge_command_receipts(
+                    context,
+                    CommandOperation::SetLeverage,
+                    request.request_id.clone(),
+                    receipts,
+                )
+            }
         };
         apply_command_receipt(context, receipt.clone(), CommandTransport::Rest).await;
         Ok(receipt)
@@ -3176,7 +3704,7 @@ pub(crate) async fn set_margin_mode(
     let started_at = Instant::now();
     let result = async {
         context.command_limiter.acquire().await;
-        let receipt = match &context.adapter {
+        let receipt: CommandReceipt = match &context.adapter {
             #[cfg(feature = "binance")]
             AdapterHandle::Binance(adapter) => {
                 let spec = require_spec(context, &request.instrument_id)?;
@@ -3246,6 +3774,48 @@ pub(crate) async fn set_margin_mode(
                     Err(error) => return Err(error),
                 }
             }
+            #[cfg(feature = "mexc")]
+            AdapterHandle::Mexc(adapter) => {
+                let leverage = mexc_fetch_current_leverage(context, &request.instrument_id).await?;
+                let bodies = mexc_change_leverage_bodies(
+                    context,
+                    &request.instrument_id,
+                    &leverage,
+                    Some(request.margin_mode),
+                )?;
+                let mut receipts = Vec::with_capacity(bodies.len());
+                for body_value in bodies {
+                    let body = mexc_serialize_body(&body_value, "set margin mode")?;
+                    let receipt = match mexc_signed_post_text(
+                        context,
+                        "/api/v1/private/position/change_leverage",
+                        &body,
+                        "mexc.set_margin_mode",
+                    )
+                    .await
+                    {
+                        Ok(payload) => adapter.classify_command(
+                            CommandOperation::SetMarginMode,
+                            Some(&payload),
+                            request.request_id.clone(),
+                        )?,
+                        Err(error) if is_uncertain_command_error(&error) => adapter
+                            .classify_command(
+                                CommandOperation::SetMarginMode,
+                                None,
+                                request.request_id.clone(),
+                            )?,
+                        Err(error) => return Err(error),
+                    };
+                    receipts.push(receipt);
+                }
+                mexc_merge_command_receipts(
+                    context,
+                    CommandOperation::SetMarginMode,
+                    request.request_id.clone(),
+                    receipts,
+                )
+            }
         };
 
         #[cfg(feature = "bybit")]
@@ -3272,6 +3842,8 @@ pub(crate) async fn validate_order(
     validate_create_order(context, &request.order)?;
     context.command_limiter.acquire().await;
     let spec = require_spec(context, &request.order.instrument_id)?;
+    #[cfg(all(feature = "mexc", not(any(feature = "binance", feature = "bybit"))))]
+    let _ = &spec;
 
     match &context.adapter {
         #[cfg(feature = "binance")]
@@ -3357,6 +3929,12 @@ pub(crate) async fn validate_order(
             )
             .await?;
         }
+        #[cfg(feature = "mexc")]
+        AdapterHandle::Mexc(_) => mexc_unsupported_command_result(
+            context,
+            "validate_order",
+            "official MEXC futures docs do not expose a dry-run or precheck endpoint for regular orders",
+        )?,
     }
 
     let receipt = CommandReceipt {
@@ -3390,7 +3968,7 @@ pub(crate) async fn set_position_mode(
     let started_at = Instant::now();
     let result = async {
         context.command_limiter.acquire().await;
-        let receipt = match &context.adapter {
+        let receipt: CommandReceipt = match &context.adapter {
             #[cfg(feature = "binance")]
             AdapterHandle::Binance(adapter) => {
                 let dual_side_position = match request.position_mode {
@@ -3438,6 +4016,29 @@ pub(crate) async fn set_position_mode(
                     "/v5/position/switch-mode",
                     &body,
                     "bybit.set_position_mode",
+                )
+                .await?;
+                adapter.classify_command(
+                    CommandOperation::SetPositionMode,
+                    Some(&payload),
+                    request.request_id.clone(),
+                )?
+            }
+            #[cfg(feature = "mexc")]
+            AdapterHandle::Mexc(adapter) => {
+                // MEXC documents position-mode changes while the surrounding trading docs
+                // carry maintenance notes; preserve the actual endpoint and classify its reply.
+                let body = mexc_serialize_body(
+                    &json!({
+                        "positionMode": mexc_position_mode(request.position_mode),
+                    }),
+                    "set position mode",
+                )?;
+                let payload = mexc_signed_post_text(
+                    context,
+                    "/api/v1/private/position/change_position_mode",
+                    &body,
+                    "mexc.set_position_mode",
                 )
                 .await?;
                 adapter.classify_command(
@@ -3526,6 +4127,17 @@ pub(crate) async fn refresh_open_interest(
                     event_time: timestamp_now_ms(),
                 }
             }
+            #[cfg(feature = "mexc")]
+            AdapterHandle::Mexc(adapter) => {
+                let payload = public_get_with_retry(
+                    context,
+                    "/api/v1/contract/ticker",
+                    &[("symbol", spec.native_symbol.as_ref())],
+                    "mexc.open_interest",
+                )
+                .await?;
+                adapter.parse_open_interest_snapshot(&payload, &spec)?
+            }
         };
 
         context
@@ -3598,6 +4210,17 @@ pub(crate) async fn fetch_ticker(
                 )
                 .await?;
                 adapter.parse_ticker_snapshot(&payload, instrument_id)?
+            }
+            #[cfg(feature = "mexc")]
+            AdapterHandle::Mexc(adapter) => {
+                let payload = public_get_with_retry(
+                    context,
+                    "/api/v1/contract/ticker",
+                    &[("symbol", spec.native_symbol.as_ref())],
+                    "mexc.fetch_ticker",
+                )
+                .await?;
+                adapter.parse_ticker_snapshot(&payload, &spec)?
             }
         };
 
@@ -3735,6 +4358,23 @@ pub(crate) async fn fetch_mark_price(
                         Venue::Bybit,
                     )?)),
                     event_time: timestamp_now_ms(),
+                }
+            }
+            #[cfg(feature = "mexc")]
+            AdapterHandle::Mexc(adapter) => {
+                let payload = public_get_with_retry(
+                    context,
+                    "/api/v1/contract/ticker",
+                    &[("symbol", spec.native_symbol.as_ref())],
+                    "mexc.fetch_mark_price",
+                )
+                .await?;
+                let ticker = adapter.parse_ticker_snapshot(&payload, &spec)?;
+                MarkPrice {
+                    instrument_id: ticker.instrument_id,
+                    price: ticker.mark_price.unwrap_or(ticker.last_price),
+                    funding_rate: None,
+                    event_time: ticker.event_time,
                 }
             }
         };
@@ -3875,6 +4515,17 @@ pub(crate) async fn fetch_funding_rate(
                     event_time: timestamp_now_ms(),
                 }
             }
+            #[cfg(feature = "mexc")]
+            AdapterHandle::Mexc(adapter) => {
+                let payload = public_get_with_retry(
+                    context,
+                    "/api/v1/contract/funding_rate",
+                    &[("symbol", spec.native_symbol.as_ref())],
+                    "mexc.fetch_funding_rate",
+                )
+                .await?;
+                adapter.parse_funding_rate_snapshot(&payload, &spec)?
+            }
         };
 
         context
@@ -3931,6 +4582,17 @@ pub(crate) async fn fetch_trades(
                 )
                 .await?;
                 adapter.parse_trades_snapshot(&payload, request)?
+            }
+            #[cfg(feature = "mexc")]
+            AdapterHandle::Mexc(adapter) => {
+                let mut query = Vec::new();
+                if let Some(limit) = &limit_string {
+                    query.push(("limit", limit.as_str()));
+                }
+                let path = format!("/api/v1/contract/deals/{}", spec.native_symbol);
+                let payload =
+                    public_get_with_retry(context, &path, &query, "mexc.fetch_trades").await?;
+                adapter.parse_trades_snapshot(&payload, &spec)?
             }
         };
 
@@ -4155,6 +4817,17 @@ pub(crate) async fn fetch_order_book(
                     ),
                 }
             }
+            #[cfg(feature = "mexc")]
+            AdapterHandle::Mexc(adapter) => {
+                let mut query = Vec::new();
+                if let Some(limit) = &limit_string {
+                    query.push(("limit", limit.as_str()));
+                }
+                let path = format!("/api/v1/contract/depth/{}", spec.native_symbol);
+                let payload =
+                    public_get_with_retry(context, &path, &query, "mexc.fetch_order_book").await?;
+                adapter.parse_order_book_snapshot(&payload, &spec)?
+            }
         };
         Ok(snapshot)
     }
@@ -4208,6 +4881,8 @@ async fn fetch_ohlcv_single(
         let limit_string = request.limit.map(|limit| limit.to_string());
         let start_string = request.start_time.map(|value| value.value().to_string());
         let end_string = request.end_time.map(|value| value.value().to_string());
+        #[cfg(all(feature = "mexc", not(any(feature = "binance", feature = "bybit"))))]
+        let _ = (&start_string, &end_string);
 
         let mut query = vec![
             ("symbol", spec.native_symbol.as_ref()),
@@ -4248,6 +4923,27 @@ async fn fetch_ohlcv_single(
                 let payload =
                     public_get_with_retry(context, "/v5/market/kline", &query, "bybit.fetch_ohlcv")
                         .await?;
+                adapter.parse_ohlcv_snapshot(&payload, request)?
+            }
+            #[cfg(feature = "mexc")]
+            AdapterHandle::Mexc(adapter) => {
+                let mut owned = vec![(
+                    "interval".to_owned(),
+                    mexc_interval_str(interval)?.to_owned(),
+                )];
+                if let Some(start) = request.start_time {
+                    owned.push(("start".to_owned(), (start.value() / 1_000).to_string()));
+                }
+                if let Some(end) = request.end_time {
+                    owned.push(("end".to_owned(), (end.value() / 1_000).to_string()));
+                }
+                let query = owned
+                    .iter()
+                    .map(|(key, value)| (key.as_str(), value.as_str()))
+                    .collect::<Vec<_>>();
+                let path = format!("/api/v1/contract/kline/{}", spec.native_symbol);
+                let payload =
+                    public_get_with_retry(context, &path, &query, "mexc.fetch_ohlcv").await?;
                 adapter.parse_ohlcv_snapshot(&payload, request)?
             }
         };
@@ -4494,6 +5190,13 @@ async fn sync_server_time(context: &LiveContext) -> Result<()> {
                 public_get_with_retry(context, "/v5/market/time", &[], "bybit.server_time").await?;
             adapter.parse_server_time(&payload)?
         }
+        #[cfg(feature = "mexc")]
+        AdapterHandle::Mexc(adapter) => {
+            let payload =
+                public_get_with_retry(context, "/api/v1/contract/ping", &[], "mexc.server_time")
+                    .await?;
+            adapter.parse_server_time(&payload)?
+        }
     };
 
     let local_time = timestamp_now_ms();
@@ -4510,6 +5213,8 @@ async fn run_public_stream(
     subscription: PublicSubscription,
     mut shutdown: oneshot::Receiver<()>,
 ) -> Result<()> {
+    #[cfg(all(feature = "mexc", not(any(feature = "binance", feature = "bybit"))))]
+    let _ = route;
     let mut reconnect_attempt = 0_u32;
     loop {
         let loop_result = match &context.adapter {
@@ -4521,6 +5226,10 @@ async fn run_public_stream(
             AdapterHandle::Bybit(_) => {
                 debug_assert_eq!(route, PublicStreamRoute::Default);
                 run_bybit_public_stream(&context, &subscription, &mut shutdown).await
+            }
+            #[cfg(feature = "mexc")]
+            AdapterHandle::Mexc(_) => {
+                run_mexc_public_stream(&context, &subscription, &mut shutdown).await
             }
         };
 
@@ -4553,6 +5262,8 @@ async fn run_private_stream(
             AdapterHandle::Binance(_) => run_binance_private_stream(&context, &mut shutdown).await,
             #[cfg(feature = "bybit")]
             AdapterHandle::Bybit(_) => run_bybit_private_stream(&context, &mut shutdown).await,
+            #[cfg(feature = "mexc")]
+            AdapterHandle::Mexc(_) => run_mexc_private_stream(&context, &mut shutdown).await,
         };
 
         match loop_result {
@@ -5009,6 +5720,210 @@ async fn run_bybit_public_stream(
     }
 }
 
+#[cfg(feature = "mexc")]
+async fn run_mexc_public_stream(
+    context: &LiveContext,
+    subscription: &PublicSubscription,
+    shutdown: &mut oneshot::Receiver<()>,
+) -> Result<()> {
+    let (mut ws, _) =
+        tokio_tungstenite::connect_async(context.config.endpoints.public_ws_base.as_ref())
+            .await
+            .map_err(|error| {
+                transport_error(context.config.venue, "mexc.public_ws.connect", error)
+            })?;
+    for frame in mexc_public_subscribe_frames(context, subscription)? {
+        ws.send(Message::Text(frame.into()))
+            .await
+            .map_err(|error| {
+                transport_error(context.config.venue, "mexc.public_ws.subscribe", error)
+            })?;
+    }
+    let mut ping = interval(Duration::from_secs(15));
+    let mut maintenance = interval(Duration::from_millis(
+        context.config.health.health_check_interval_ms.max(1),
+    ));
+    let mut last_frame_at = Instant::now();
+    let mut oi_poll = interval(Duration::from_secs(10));
+
+    loop {
+        tokio::select! {
+            _ = &mut *shutdown => {
+                let _ = ws.close(None).await;
+                return Ok(());
+            }
+            _ = ping.tick() => {
+                ws.send(Message::Text(r#"{"method":"ping"}"#.into())).await.map_err(|error| transport_error(context.config.venue, "mexc.public_ws.ping", error))?;
+            }
+            _ = oi_poll.tick(), if subscription.open_interest => {
+                for instrument_id in &subscription.instrument_ids {
+                    let _ = refresh_open_interest(context, instrument_id).await;
+                }
+            }
+            _ = maintenance.tick() => {
+                if last_frame_at.elapsed() >= Duration::from_millis(context.config.timeouts.ws_idle_ms.max(1)) {
+                    context.shared.apply_public_event(PublicLaneEvent::Divergence(
+                        bat_markets_core::DivergenceEvent::SequenceGap { at: None },
+                    ))?;
+                    return Err(sequence_gap_error(context.config.venue, "mexc.public_ws.idle", None));
+                }
+            }
+            message = ws.next() => {
+                let Some(message) = message else {
+                    return Err(MarketError::new(ErrorKind::TransportError, "mexc public stream closed"));
+                };
+                let message = message.map_err(|error| transport_error(context.config.venue, "mexc.public_ws.read", error))?;
+                match message {
+                    Message::Text(payload) => {
+                        let mut events = context.adapter.as_adapter().parse_public(&payload)?;
+                        retain_public_events_for_subscription(&mut events, subscription);
+                        context.shared.apply_public_events(&events)?;
+                        last_frame_at = Instant::now();
+                    }
+                    Message::Ping(_) | Message::Pong(_) | Message::Binary(_) => {
+                        last_frame_at = Instant::now();
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+}
+
+#[cfg(feature = "mexc")]
+fn mexc_public_subscribe_frames(
+    context: &LiveContext,
+    subscription: &PublicSubscription,
+) -> Result<Vec<String>> {
+    let mut frames = Vec::new();
+    for instrument_id in &subscription.instrument_ids {
+        let spec = require_spec(context, instrument_id)?;
+        if subscription.ticker || subscription.mark_price || subscription.funding_rate {
+            frames.push(json!({"method":"sub.ticker","param":{"symbol": spec.native_symbol}}));
+        }
+        if subscription.trades {
+            frames.push(json!({"method":"sub.deal","param":{"symbol": spec.native_symbol}}));
+        }
+        if subscription.book_top || subscription.order_book {
+            frames.push(json!({"method":"sub.depth","param":{"symbol": spec.native_symbol}}));
+        }
+        for interval_value in &subscription.kline_intervals {
+            let interval = parse_kline_interval(
+                interval_value.as_ref(),
+                context.config.venue,
+                "mexc.public_ws.kline_interval",
+            )?;
+            frames.push(json!({
+                "method":"sub.kline",
+                "param":{"symbol": spec.native_symbol, "interval": mexc_interval_str(interval)?}
+            }));
+        }
+    }
+    frames
+        .into_iter()
+        .map(|frame| {
+            serde_json::to_string(&frame).map_err(|error| {
+                MarketError::new(
+                    ErrorKind::ConfigError,
+                    format!("failed to serialize mexc subscribe frame: {error}"),
+                )
+            })
+        })
+        .collect()
+}
+
+#[cfg(feature = "mexc")]
+async fn run_mexc_private_stream(
+    context: &LiveContext,
+    shutdown: &mut oneshot::Receiver<()>,
+) -> Result<()> {
+    let (api_key, signer) = require_credentials(context)?;
+    let req_time = timestamp_now_ms().value().to_string();
+    let signature = signer.sign_hex(format!("{}{}", api_key.as_ref(), req_time).as_bytes())?;
+    let (mut ws, _) =
+        tokio_tungstenite::connect_async(context.config.endpoints.private_ws_base.as_ref())
+            .await
+            .map_err(|error| {
+                transport_error(context.config.venue, "mexc.private_ws.connect", error)
+            })?;
+    let login = serde_json::to_string(&json!({
+        "method": "login",
+        "subscribe": false,
+        "param": {
+            "apiKey": api_key.as_ref(),
+            "reqTime": req_time,
+            "signature": signature,
+        }
+    }))
+    .map_err(|error| {
+        MarketError::new(
+            ErrorKind::ConfigError,
+            format!("failed to serialize mexc private login frame: {error}"),
+        )
+    })?;
+    ws.send(Message::Text(login.into()))
+        .await
+        .map_err(|error| transport_error(context.config.venue, "mexc.private_ws.login", error))?;
+    ws.send(Message::Text(r#"{"method":"personal.filter"}"#.into()))
+        .await
+        .map_err(|error| {
+            transport_error(context.config.venue, "mexc.private_ws.subscribe", error)
+        })?;
+    let mut ping = interval(Duration::from_secs(15));
+    let mut maintenance = interval(Duration::from_millis(
+        context.config.health.health_check_interval_ms.max(1),
+    ));
+    let mut last_frame_at = Instant::now();
+    let mut last_periodic_reconcile = Instant::now();
+
+    loop {
+        tokio::select! {
+            _ = &mut *shutdown => {
+                let _ = ws.close(None).await;
+                return Ok(());
+            }
+            _ = ping.tick() => {
+                ws.send(Message::Text(r#"{"method":"ping"}"#.into())).await.map_err(|error| transport_error(context.config.venue, "mexc.private_ws.ping", error))?;
+            }
+            _ = maintenance.tick() => {
+                if last_frame_at.elapsed() >= Duration::from_millis(context.config.timeouts.ws_idle_ms.max(1)) {
+                    context.shared.apply_private_event(PrivateLaneEvent::Divergence(
+                        bat_markets_core::DivergenceEvent::SequenceGap { at: None },
+                    ));
+                    return Err(sequence_gap_error(context.config.venue, "mexc.private_ws.idle", None));
+                }
+                let age_ms = last_frame_at.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+                context.shared.write(|state| {
+                    state.mark_snapshot_age(age_ms, context.config.health.snapshot_stale_after_ms);
+                });
+                if let Some(reconcile_ms) = context.config.health.periodic_private_reconcile_ms
+                    && last_periodic_reconcile.elapsed() >= Duration::from_millis(reconcile_ms.max(1))
+                {
+                    let _ = reconcile_private(context, ReconcileTrigger::Periodic).await;
+                    last_periodic_reconcile = Instant::now();
+                }
+            }
+            message = ws.next() => {
+                let Some(message) = message else {
+                    return Err(MarketError::new(ErrorKind::TransportError, "mexc private stream closed"));
+                };
+                let message = message.map_err(|error| transport_error(context.config.venue, "mexc.private_ws.read", error))?;
+                match message {
+                    Message::Text(payload) => {
+                        let events = context.adapter.as_adapter().parse_private(&payload)?;
+                        context.shared.apply_private_events(&events);
+                        last_frame_at = Instant::now();
+                    }
+                    Message::Ping(_) | Message::Pong(_) | Message::Binary(_) => {
+                        last_frame_at = Instant::now();
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+}
+
 #[cfg(feature = "bybit")]
 fn bybit_public_stream_topic_capacity(subscription: &PublicSubscription) -> usize {
     let mut per_instrument = subscription.kline_intervals.len();
@@ -5329,6 +6244,30 @@ fn parse_kline_interval(raw: &str, venue: Venue, operation: &str) -> Result<Klin
     })
 }
 
+#[cfg(feature = "mexc")]
+fn mexc_interval_str(interval: KlineInterval) -> Result<&'static str> {
+    match interval {
+        KlineInterval::Minute1 => Ok("Min1"),
+        KlineInterval::Minute5 => Ok("Min5"),
+        KlineInterval::Minute15 => Ok("Min15"),
+        KlineInterval::Minute30 => Ok("Min30"),
+        KlineInterval::Hour1 => Ok("Min60"),
+        KlineInterval::Hour4 => Ok("Hour4"),
+        KlineInterval::Day1 => Ok("Day1"),
+        KlineInterval::Week1 => Ok("Week1"),
+        KlineInterval::Month1 => Ok("Month1"),
+        KlineInterval::Minute3
+        | KlineInterval::Hour2
+        | KlineInterval::Hour6
+        | KlineInterval::Hour12
+        | KlineInterval::Day3 => Err(MarketError::new(
+            ErrorKind::Unsupported,
+            format!("mexc does not support kline interval '{interval:?}'"),
+        )
+        .with_venue(Venue::Mexc, Product::LinearUsdt)),
+    }
+}
+
 async fn public_get_text(
     context: &LiveContext,
     path: &str,
@@ -5445,6 +6384,77 @@ async fn bybit_signed_post_text(
         .header("X-BAPI-SIGN", signature)
         .header("X-BAPI-TIMESTAMP", timestamp)
         .header("X-BAPI-RECV-WINDOW", "5000")
+        .body(body.to_owned())
+        .send()
+        .await
+        .map_err(|error| classify_reqwest_error(context.config.venue, operation, error))?;
+    response_text(context.config.venue, response, operation).await
+}
+
+#[cfg(feature = "mexc")]
+async fn mexc_signed_get_text(
+    context: &LiveContext,
+    path: &str,
+    query: &[(&str, &str)],
+    operation: &str,
+) -> Result<String> {
+    let (api_key, signer) = require_credentials(context)?;
+    let req_time = timestamp_now_ms().value().to_string();
+    let request_param = {
+        let mut sorted = BTreeMap::new();
+        for (key, value) in query {
+            sorted.insert(*key, *value);
+        }
+        let mut serializer = Serializer::new(String::new());
+        for (key, value) in sorted {
+            serializer.append_pair(key, value);
+        }
+        serializer.finish()
+    };
+    let payload = format!("{}{}{}", api_key.as_ref(), req_time, request_param);
+    let signature = signer.sign_hex(payload.as_bytes())?;
+    let url = if request_param.is_empty() {
+        format!("{}{}", context.config.endpoints.rest_base, path)
+    } else {
+        format!(
+            "{}{}?{}",
+            context.config.endpoints.rest_base, path, request_param
+        )
+    };
+    let response = context
+        .http
+        .get(url)
+        .header("ApiKey", api_key.as_ref())
+        .header("Request-Time", req_time)
+        .header("Signature", signature)
+        .header("Content-Type", "application/json")
+        .header("Recv-Window", "5000")
+        .send()
+        .await
+        .map_err(|error| classify_reqwest_error(context.config.venue, operation, error))?;
+    response_text(context.config.venue, response, operation).await
+}
+
+#[cfg(feature = "mexc")]
+async fn mexc_signed_post_text(
+    context: &LiveContext,
+    path: &str,
+    body: &str,
+    operation: &str,
+) -> Result<String> {
+    let (api_key, signer) = require_credentials(context)?;
+    let req_time = timestamp_now_ms().value().to_string();
+    let payload = format!("{}{}{}", api_key.as_ref(), req_time, body);
+    let signature = signer.sign_hex(payload.as_bytes())?;
+    let url = format!("{}{}", context.config.endpoints.rest_base, path);
+    let response = context
+        .http
+        .post(url)
+        .header("ApiKey", api_key.as_ref())
+        .header("Request-Time", req_time)
+        .header("Signature", signature)
+        .header("Content-Type", "application/json")
+        .header("Recv-Window", "5000")
         .body(body.to_owned())
         .send()
         .await
@@ -6046,6 +7056,392 @@ fn build_bybit_batch_cancel_object(context: &LiveContext, request: &OrderTarget)
     Ok(Value::Object(order))
 }
 
+#[cfg(feature = "mexc")]
+fn build_mexc_create_order_object(
+    context: &LiveContext,
+    request: &CreateOrderRequest,
+) -> Result<Value> {
+    let spec = require_spec(context, &request.instrument_id)?;
+    if request.trigger_price.is_some()
+        || matches!(
+            request.order_type,
+            OrderType::StopMarket
+                | OrderType::StopLimit
+                | OrderType::TakeProfitMarket
+                | OrderType::TakeProfitLimit
+        )
+    {
+        return Err(MarketError::new(
+            ErrorKind::Unsupported,
+            "mexc regular order submit does not cover unified trigger orders; official plan-order endpoints are separate and marked under maintenance",
+        )
+        .with_venue(context.config.venue, context.config.product));
+    }
+
+    let mut body = serde_json::Map::new();
+    body.insert(
+        "symbol".to_owned(),
+        Value::String(spec.native_symbol.to_string()),
+    );
+    if let Some(price) = request.price {
+        body.insert("price".to_owned(), Value::String(format_price(price)));
+    } else if request.order_type != OrderType::Market {
+        return Err(
+            MarketError::new(ErrorKind::ConfigError, "mexc limit orders require price")
+                .with_venue(context.config.venue, context.config.product),
+        );
+    }
+    body.insert(
+        "vol".to_owned(),
+        Value::String(format_quantity(request.quantity)),
+    );
+    body.insert(
+        "side".to_owned(),
+        Value::from(mexc_order_side(request.side, request.reduce_only)),
+    );
+    body.insert(
+        "type".to_owned(),
+        Value::from(mexc_order_type(
+            request.order_type,
+            request.time_in_force,
+            request.post_only,
+        )?),
+    );
+    body.insert(
+        "openType".to_owned(),
+        Value::from(mexc_open_type_for_order(context, &request.instrument_id)),
+    );
+    if let Some(client_order_id) = &request.client_order_id {
+        body.insert(
+            "externalOid".to_owned(),
+            Value::String(client_order_id.to_string()),
+        );
+    }
+    if request.reduce_only {
+        body.insert("reduceOnly".to_owned(), Value::Bool(true));
+    }
+    if let Some(position_mode) = mexc_cached_position_mode(context, &request.instrument_id) {
+        body.insert(
+            "positionMode".to_owned(),
+            Value::from(mexc_position_mode(position_mode)),
+        );
+    }
+    Ok(Value::Object(body))
+}
+
+#[cfg(feature = "mexc")]
+fn build_mexc_batch_create_order_object(
+    context: &LiveContext,
+    request: &CreateOrderRequest,
+) -> Result<Value> {
+    let mut body = build_mexc_create_order_object(context, request)?;
+    if let Value::Object(fields) = &mut body {
+        fields.insert("stpMode".to_owned(), Value::from(0));
+    }
+    Ok(body)
+}
+
+#[cfg(feature = "mexc")]
+fn mexc_order_side(side: bat_markets_core::Side, reduce_only: bool) -> i64 {
+    match (side, reduce_only) {
+        (bat_markets_core::Side::Buy, false) => 1,
+        (bat_markets_core::Side::Buy, true) => 2,
+        (bat_markets_core::Side::Sell, false) => 3,
+        (bat_markets_core::Side::Sell, true) => 4,
+    }
+}
+
+#[cfg(feature = "mexc")]
+fn mexc_order_type(
+    order_type: OrderType,
+    time_in_force: Option<bat_markets_core::TimeInForce>,
+    post_only: bool,
+) -> Result<i64> {
+    if post_only || matches!(time_in_force, Some(bat_markets_core::TimeInForce::PostOnly)) {
+        return Ok(2);
+    }
+    match (order_type, time_in_force) {
+        (OrderType::Market, _) => Ok(5),
+        (OrderType::Limit, Some(bat_markets_core::TimeInForce::Ioc)) => Ok(3),
+        (OrderType::Limit, Some(bat_markets_core::TimeInForce::Fok)) => Ok(4),
+        (OrderType::Limit, _) => Ok(1),
+        _ => Err(MarketError::new(
+            ErrorKind::Unsupported,
+            "mexc regular order submit supports only market and limit orders",
+        )),
+    }
+}
+
+#[cfg(feature = "mexc")]
+fn mexc_open_type_for_order(context: &LiveContext, instrument_id: &InstrumentId) -> i64 {
+    context
+        .shared
+        .read(|state| {
+            state
+                .positions()
+                .into_iter()
+                .find(|position| &position.instrument_id == instrument_id)
+                .map(|position| match position.margin_mode {
+                    MarginMode::Isolated => 1,
+                    MarginMode::Cross => 2,
+                })
+        })
+        .unwrap_or(2)
+}
+
+#[cfg(feature = "mexc")]
+fn mexc_cached_position_mode(
+    context: &LiveContext,
+    instrument_id: &InstrumentId,
+) -> Option<bat_markets_core::PositionMode> {
+    context.shared.read(|state| {
+        state
+            .positions()
+            .into_iter()
+            .find(|position| &position.instrument_id == instrument_id)
+            .map(|position| position.position_mode)
+    })
+}
+
+#[cfg(feature = "mexc")]
+fn mexc_position_mode(position_mode: bat_markets_core::PositionMode) -> i64 {
+    match position_mode {
+        bat_markets_core::PositionMode::Hedge => 1,
+        bat_markets_core::PositionMode::OneWay => 2,
+    }
+}
+
+#[cfg(feature = "mexc")]
+fn mexc_order_id_value(order_id: &OrderId) -> Value {
+    order_id
+        .as_ref()
+        .parse::<i64>()
+        .map(Value::from)
+        .unwrap_or_else(|_| Value::String(order_id.to_string()))
+}
+
+#[cfg(feature = "mexc")]
+fn mexc_serialize_body(value: &Value, operation: &str) -> Result<String> {
+    serde_json::to_string(value).map_err(|error| {
+        MarketError::new(
+            ErrorKind::ConfigError,
+            format!("failed to serialize mexc {operation} body: {error}"),
+        )
+    })
+}
+
+#[cfg(feature = "mexc")]
+fn classify_mexc_batch_payload(
+    adapter: &bat_markets_mexc::MexcLinearFuturesAdapter,
+    operation: CommandOperation,
+    payload: &str,
+    request_ids: &[Option<RequestId>],
+) -> Result<Vec<CommandReceipt>> {
+    let value = serde_json::from_str::<Value>(payload).map_err(|error| {
+        MarketError::new(
+            ErrorKind::DecodeError,
+            format!("failed to parse mexc batch payload: {error}"),
+        )
+    })?;
+    let success = value
+        .get("success")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let code = value.get("code").and_then(value_as_i64).unwrap_or_default();
+    let data = value.get("data").and_then(Value::as_array).ok_or_else(|| {
+        MarketError::new(
+            ErrorKind::DecodeError,
+            "mexc batch command response missing data array",
+        )
+    })?;
+    if data.len() != request_ids.len() {
+        return Err(MarketError::new(
+            ErrorKind::DecodeError,
+            format!(
+                "mexc batch payload item count {} does not match request count {}",
+                data.len(),
+                request_ids.len()
+            ),
+        ));
+    }
+    data.iter()
+        .zip(request_ids.iter().cloned())
+        .map(|(item, request_id)| {
+            let item_code = item
+                .get("errorCode")
+                .or_else(|| item.get("error_code"))
+                .and_then(value_as_i64)
+                .unwrap_or(code);
+            let item_success = success && code == 0 && item_code == 0;
+            let item_payload = json!({
+                "success": item_success,
+                "code": if item_code == 0 { code } else { item_code },
+                "message": item.get("errorMsg").or_else(|| item.get("error_msg")).and_then(Value::as_str),
+                "data": item,
+            });
+            let item_payload = serde_json::to_string(&item_payload).map_err(|error| {
+                MarketError::new(
+                    ErrorKind::DecodeError,
+                    format!("failed to reserialize mexc batch item: {error}"),
+                )
+            })?;
+            adapter.classify_command(operation, Some(&item_payload), request_id)
+        })
+        .collect()
+}
+
+#[cfg(feature = "mexc")]
+fn mexc_change_leverage_bodies(
+    context: &LiveContext,
+    instrument_id: &InstrumentId,
+    leverage: &str,
+    margin_mode: Option<MarginMode>,
+) -> Result<Vec<Value>> {
+    let spec = require_spec(context, instrument_id)?;
+    let leverage = mexc_leverage_json_value(leverage)?;
+    let open_type = margin_mode
+        .map(mexc_margin_mode_open_type)
+        .unwrap_or_else(|| mexc_open_type_for_order(context, instrument_id));
+    let cached_positions = context.shared.read(|state| {
+        state
+            .positions()
+            .into_iter()
+            .filter(|position| &position.instrument_id == instrument_id)
+            .filter(|position| position.position_id.as_ref() != "0")
+            .collect::<Vec<_>>()
+    });
+    if !cached_positions.is_empty() {
+        return cached_positions
+            .into_iter()
+            .map(|position| {
+                Ok(json!({
+                    "positionId": mexc_position_id_value(&position.position_id),
+                    "leverage": leverage.clone(),
+                    "openType": open_type,
+                }))
+            })
+            .collect();
+    }
+    Ok(vec![
+        json!({
+            "openType": open_type,
+            "leverage": leverage.clone(),
+            "symbol": spec.native_symbol,
+            "positionType": 1,
+        }),
+        json!({
+            "openType": open_type,
+            "leverage": leverage,
+            "symbol": spec.native_symbol,
+            "positionType": 2,
+        }),
+    ])
+}
+
+#[cfg(feature = "mexc")]
+fn mexc_margin_mode_open_type(margin_mode: MarginMode) -> i64 {
+    match margin_mode {
+        MarginMode::Isolated => 1,
+        MarginMode::Cross => 2,
+    }
+}
+
+#[cfg(feature = "mexc")]
+fn mexc_leverage_json_value(leverage: &str) -> Result<Value> {
+    leverage.parse::<i64>().map(Value::from).map_err(|error| {
+        MarketError::new(
+            ErrorKind::ConfigError,
+            format!("mexc leverage must be an integer: {error}"),
+        )
+    })
+}
+
+#[cfg(feature = "mexc")]
+fn mexc_position_id_value(position_id: &bat_markets_core::PositionId) -> Value {
+    position_id
+        .as_ref()
+        .parse::<i64>()
+        .map(Value::from)
+        .unwrap_or_else(|_| Value::String(position_id.to_string()))
+}
+
+#[cfg(feature = "mexc")]
+fn mexc_merge_command_receipts(
+    context: &LiveContext,
+    operation: CommandOperation,
+    request_id: Option<RequestId>,
+    mut receipts: Vec<CommandReceipt>,
+) -> CommandReceipt {
+    receipts
+        .iter()
+        .find(|receipt| receipt.status == CommandStatus::Rejected)
+        .cloned()
+        .or_else(|| {
+            receipts
+                .iter()
+                .find(|receipt| receipt.status == CommandStatus::UnknownExecution)
+                .cloned()
+        })
+        .or_else(|| receipts.pop())
+        .unwrap_or_else(|| CommandReceipt {
+            operation,
+            status: CommandStatus::Accepted,
+            venue: context.config.venue,
+            product: context.config.product,
+            instrument_id: None,
+            order_id: None,
+            client_order_id: None,
+            request_id,
+            message: Some("accepted".into()),
+            native_code: None,
+            retriable: false,
+        })
+}
+
+#[cfg(feature = "mexc")]
+async fn mexc_fetch_current_leverage(
+    context: &LiveContext,
+    instrument_id: &InstrumentId,
+) -> Result<String> {
+    if let Some(leverage) = context.shared.read(|state| {
+        state
+            .positions()
+            .into_iter()
+            .find(|position| &position.instrument_id == instrument_id)
+            .and_then(|position| position.leverage)
+    }) {
+        return Ok(leverage.value().normalize().to_string());
+    }
+    let spec = require_spec(context, instrument_id)?;
+    let payload = mexc_signed_get_text(
+        context,
+        "/api/v1/private/position/leverage",
+        &[("symbol", spec.native_symbol.as_ref())],
+        "mexc.position.leverage",
+    )
+    .await?;
+    let value = serde_json::from_str::<Value>(&payload).map_err(|error| {
+        MarketError::new(
+            ErrorKind::DecodeError,
+            format!("failed to parse mexc leverage response: {error}"),
+        )
+    })?;
+    value
+        .get("data")
+        .and_then(Value::as_array)
+        .and_then(|items| items.first())
+        .and_then(|item| item.get("leverage"))
+        .map(value_to_string)
+        .filter(|value| !value.is_empty() && value != "null")
+        .ok_or_else(|| {
+            MarketError::new(
+                ErrorKind::DecodeError,
+                "mexc leverage response missing leverage",
+            )
+            .with_venue(context.config.venue, context.config.product)
+        })
+}
+
 #[cfg(feature = "binance")]
 fn resolve_cached_order_for_amend(
     context: &LiveContext,
@@ -6218,12 +7614,23 @@ fn classify_bybit_batch_payload(
     Ok(receipts)
 }
 
-#[cfg(feature = "bybit")]
+#[cfg(any(feature = "bybit", feature = "mexc"))]
 fn value_as_i64(value: &Value) -> Option<i64> {
     match value {
         Value::Number(number) => number.as_i64(),
         Value::String(raw) => raw.parse::<i64>().ok(),
         _ => None,
+    }
+}
+
+#[cfg(feature = "mexc")]
+fn value_to_string(value: &Value) -> String {
+    match value {
+        Value::String(value) => value.clone(),
+        Value::Number(value) => value.to_string(),
+        Value::Bool(value) => value.to_string(),
+        Value::Null => String::new(),
+        value => value.to_string(),
     }
 }
 
@@ -6539,6 +7946,30 @@ async fn refresh_recent_order_history(
                     .await?;
             adapter.parse_order_history_snapshot(&payload, timestamp_now_ms())
         }
+        #[cfg(feature = "mexc")]
+        AdapterHandle::Mexc(adapter) => {
+            let mut query = vec![
+                ("symbol".to_owned(), spec.native_symbol.to_string()),
+                ("page_num".to_owned(), "1".to_owned()),
+                ("page_size".to_owned(), "50".to_owned()),
+            ];
+            if let Some((start_time, end_time)) = history_window {
+                query.push(("start_time".to_owned(), start_time.to_string()));
+                query.push(("end_time".to_owned(), end_time.to_string()));
+            }
+            let pairs = query
+                .iter()
+                .map(|(key, value)| (key.as_str(), value.as_str()))
+                .collect::<Vec<_>>();
+            let payload = mexc_signed_get_text(
+                context,
+                "/api/v1/private/order/list/history_orders",
+                &pairs,
+                "mexc.order_history",
+            )
+            .await?;
+            adapter.parse_open_orders_snapshot(&payload, timestamp_now_ms())
+        }
     }
 }
 
@@ -6595,6 +8026,31 @@ async fn refresh_recent_execution_history(
                 "/v5/execution/list",
                 &pairs,
                 "bybit.execution_history",
+            )
+            .await?;
+            adapter.parse_executions_snapshot(&payload)
+        }
+        #[cfg(feature = "mexc")]
+        AdapterHandle::Mexc(adapter) => {
+            let spec = require_spec(context, instrument_id)?;
+            let mut query = vec![
+                ("symbol".to_owned(), spec.native_symbol.to_string()),
+                ("page_num".to_owned(), "1".to_owned()),
+                ("page_size".to_owned(), "100".to_owned()),
+            ];
+            if let Some((start_time, end_time)) = history_window {
+                query.push(("start_time".to_owned(), start_time.to_string()));
+                query.push(("end_time".to_owned(), end_time.to_string()));
+            }
+            let pairs = query
+                .iter()
+                .map(|(key, value)| (key.as_str(), value.as_str()))
+                .collect::<Vec<_>>();
+            let payload = mexc_signed_get_text(
+                context,
+                "/api/v1/private/order/list/order_deals",
+                &pairs,
+                "mexc.execution_history",
             )
             .await?;
             adapter.parse_executions_snapshot(&payload)
@@ -6713,6 +8169,8 @@ fn binance_adapter(context: &LiveContext) -> Option<&BinanceLinearFuturesAdapter
     match &context.adapter {
         AdapterHandle::Binance(adapter) => Some(adapter),
         AdapterHandle::Bybit(_) => None,
+        #[cfg(feature = "mexc")]
+        AdapterHandle::Mexc(_) => None,
     }
 }
 
@@ -6727,6 +8185,8 @@ fn bybit_adapter(context: &LiveContext) -> Option<&BybitLinearFuturesAdapter> {
     match &context.adapter {
         AdapterHandle::Bybit(adapter) => Some(adapter),
         AdapterHandle::Binance(_) => None,
+        #[cfg(feature = "mexc")]
+        AdapterHandle::Mexc(_) => None,
     }
 }
 
@@ -7437,20 +8897,19 @@ fn parse_decimal(raw: &str, venue: Venue) -> Result<Decimal> {
 mod tests {
     use super::{
         BatchIdentity, CommandTransport, ExecutionRepairScope, PendingUnknownCommand,
-        SequenceTracker, bybit_private_sequence_observations, bybit_public_sequence_observations,
-        classify_binance_batch_payload, classify_bybit_batch_payload, execution_repair_scope,
-        needs_recent_history_repair, pending_by_instrument, repair_window_start_ms,
-        retain_public_events_for_subscription, unresolved_pending_after_executions,
-        unresolved_pending_after_orders, unresolved_pending_after_state, validate_create_orders,
+        SequenceTracker, execution_repair_scope, needs_recent_history_repair,
+        pending_by_instrument, repair_window_start_ms, retain_public_events_for_subscription,
+        unresolved_pending_after_executions, unresolved_pending_after_orders,
+        unresolved_pending_after_state, validate_create_orders,
     };
     use crate::client::{AdapterHandle, BatMarketsBuilder};
     use crate::stream::{PublicStreamRoute, PublicSubscription};
     use bat_markets_core::{
         ClientOrderId, ClosePositionRequest, CommandLifecycleEvent, CommandOperation,
         CommandReceipt, CommandStatus, CreateOrderRequest, CreateOrdersRequest, DegradedReason,
-        Execution, HealthReport, InstrumentId, MarginMode, Order, OrderId, Position,
+        ErrorKind, Execution, HealthReport, InstrumentId, MarginMode, Order, OrderId, Position,
         PositionDirection, PositionId, PositionMode, Price, Product, Quantity, ReconcileTrigger,
-        RequestId, Side, TimestampMs, Venue,
+        RequestId, Side, TimeInForce, TimestampMs, Venue,
     };
     use bat_markets_core::{OrderStatus, OrderType, PublicLaneEvent};
     use rust_decimal::Decimal;
@@ -7511,6 +8970,104 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "mexc")]
+    #[test]
+    fn mexc_create_order_payload_uses_documented_contract_fields() {
+        let client = BatMarketsBuilder::default()
+            .venue(Venue::Mexc)
+            .product(Product::LinearUsdt)
+            .build()
+            .expect("fixture mexc client should build");
+        let context = client.live_context();
+        let request = CreateOrderRequest {
+            request_id: Some(RequestId::from("req-mexc-create")),
+            instrument_id: InstrumentId::from("BTC/USDT:USDT"),
+            client_order_id: Some(ClientOrderId::from("cid-mexc-1")),
+            side: Side::Sell,
+            order_type: OrderType::Limit,
+            time_in_force: Some(TimeInForce::PostOnly),
+            quantity: Quantity::new(Decimal::new(3, 0)),
+            price: Some(Price::new(Decimal::new(65000, 0))),
+            trigger_price: None,
+            trigger_type: None,
+            reduce_only: true,
+            post_only: true,
+        };
+
+        let body = super::build_mexc_create_order_object(&context, &request)
+            .expect("mexc payload should build");
+
+        assert_eq!(body["symbol"], "BTC_USDT");
+        assert_eq!(body["price"], "65000");
+        assert_eq!(body["vol"], "3");
+        assert_eq!(body["side"], 4);
+        assert_eq!(body["type"], 2);
+        assert_eq!(body["openType"], 2);
+        assert_eq!(body["externalOid"], "cid-mexc-1");
+        assert_eq!(body["reduceOnly"], true);
+        assert!(body.get("stpMode").is_none());
+    }
+
+    #[cfg(feature = "mexc")]
+    #[test]
+    fn mexc_batch_create_order_payload_includes_required_stp_mode() {
+        let client = BatMarketsBuilder::default()
+            .venue(Venue::Mexc)
+            .product(Product::LinearUsdt)
+            .build()
+            .expect("fixture mexc client should build");
+        let context = client.live_context();
+        let request = CreateOrderRequest {
+            request_id: Some(RequestId::from("req-mexc-batch-create")),
+            instrument_id: InstrumentId::from("BTC/USDT:USDT"),
+            client_order_id: Some(ClientOrderId::from("cid-mexc-batch-1")),
+            side: Side::Buy,
+            order_type: OrderType::Limit,
+            time_in_force: Some(TimeInForce::Gtc),
+            quantity: Quantity::new(Decimal::new(1, 0)),
+            price: Some(Price::new(Decimal::new(60000, 0))),
+            trigger_price: None,
+            trigger_type: None,
+            reduce_only: false,
+            post_only: false,
+        };
+
+        let body = super::build_mexc_batch_create_order_object(&context, &request)
+            .expect("mexc batch payload should build");
+
+        assert_eq!(body["symbol"], "BTC_USDT");
+        assert_eq!(body["stpMode"], 0);
+    }
+
+    #[cfg(feature = "mexc")]
+    #[test]
+    fn mexc_trigger_order_payload_is_not_silently_mapped_to_regular_submit() {
+        let client = BatMarketsBuilder::default()
+            .venue(Venue::Mexc)
+            .product(Product::LinearUsdt)
+            .build()
+            .expect("fixture mexc client should build");
+        let context = client.live_context();
+        let request = CreateOrderRequest {
+            request_id: None,
+            instrument_id: InstrumentId::from("BTC/USDT:USDT"),
+            client_order_id: None,
+            side: Side::Buy,
+            order_type: OrderType::StopMarket,
+            time_in_force: None,
+            quantity: Quantity::new(Decimal::new(1, 0)),
+            price: None,
+            trigger_price: Some(Price::new(Decimal::new(64000, 0))),
+            trigger_type: None,
+            reduce_only: false,
+            post_only: false,
+        };
+
+        let error = super::build_mexc_create_order_object(&context, &request)
+            .expect_err("mexc trigger order should not use regular submit");
+        assert_eq!(error.kind, ErrorKind::Unsupported);
+    }
+
     #[cfg(feature = "binance")]
     #[test]
     fn binance_public_ws_base_routes_default_endpoints() {
@@ -7562,15 +9119,16 @@ mod tests {
         let context = client.live_context();
         let mut tracker = SequenceTracker::default();
 
-        for observation in bybit_public_sequence_observations(&context, BYBIT_PUBLIC_ORDERBOOK)
-            .expect("snapshot observation should parse")
+        for observation in
+            super::bybit_public_sequence_observations(&context, BYBIT_PUBLIC_ORDERBOOK)
+                .expect("snapshot observation should parse")
         {
             tracker
                 .observe(observation)
                 .expect("snapshot watermark should initialize");
         }
         let mut observations =
-            bybit_public_sequence_observations(&context, BYBIT_PUBLIC_ORDERBOOK_GAP)
+            super::bybit_public_sequence_observations(&context, BYBIT_PUBLIC_ORDERBOOK_GAP)
                 .expect("gap observation should parse");
         let gap = tracker
             .observe(
@@ -7592,10 +9150,11 @@ mod tests {
             .expect("fixture bybit client should build");
         let context = client.live_context();
 
-        let position = bybit_private_sequence_observations(&context, BYBIT_PRIVATE_POSITION)
+        let position = super::bybit_private_sequence_observations(&context, BYBIT_PRIVATE_POSITION)
             .expect("position observations should parse");
-        let execution = bybit_private_sequence_observations(&context, BYBIT_PRIVATE_EXECUTION)
-            .expect("execution observations should parse");
+        let execution =
+            super::bybit_private_sequence_observations(&context, BYBIT_PRIVATE_EXECUTION)
+                .expect("execution observations should parse");
 
         assert_eq!(position.len(), 1);
         assert_eq!(position[0].value, 300);
@@ -7773,7 +9332,7 @@ mod tests {
             panic!("binance adapter should be selected");
         };
 
-        let receipts = classify_binance_batch_payload(
+        let receipts = super::classify_binance_batch_payload(
             adapter,
             CommandOperation::CreateOrder,
             BINANCE_COMMAND_BATCH_CREATE_OK,
@@ -7833,7 +9392,7 @@ mod tests {
             }
         }"#;
 
-        let receipts = classify_bybit_batch_payload(
+        let receipts = super::classify_bybit_batch_payload(
             &context,
             CommandOperation::CreateOrder,
             payload,
@@ -7873,6 +9432,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "bybit")]
     #[test]
     fn local_state_resolution_prefers_existing_orders_and_executions() {
         let instrument_id = InstrumentId::from("BTC/USDT:USDT");
@@ -8051,6 +9611,7 @@ mod tests {
         ));
     }
 
+    #[cfg(feature = "bybit")]
     #[test]
     fn bybit_order_identity_uses_order_link_id_for_client_order_id() {
         let mut query = Vec::new();

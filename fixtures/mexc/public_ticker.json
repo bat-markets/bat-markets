@@ -1,0 +1,17 @@
+{
+  "channel": "push.ticker",
+  "symbol": "BTC_USDT",
+  "data": {
+    "symbol": "BTC_USDT",
+    "lastPrice": 65432.1,
+    "fairPrice": 65430.9,
+    "indexPrice": 65431.2,
+    "volume24": 1200,
+    "amount24": 78518400,
+    "holdVol": 4321,
+    "maxBidPrice": 65432.0,
+    "minAskPrice": 65432.2,
+    "timestamp": 1761879567135
+  },
+  "ts": 1761879567135
+}

@@ -4,12 +4,13 @@ members = [
     "crates/bat-markets-binance",
     "crates/bat-markets-bybit",
     "crates/bat-markets-core",
+    "crates/bat-markets-mexc",
     "crates/bat-markets-testing",
 ]
 resolver = "3"
 
 [workspace.package]
-version = "0.3.3"
+version = "0.3.4"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 authors = ["bat-markets maintainers"]

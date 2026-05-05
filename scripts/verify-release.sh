@@ -8,6 +8,7 @@ runtime_crates=(
   bat-markets-core
   bat-markets-binance
   bat-markets-bybit
+  bat-markets-mexc
   bat-markets
 )
 
@@ -39,6 +40,7 @@ manifest_for_crate() {
     bat-markets-binance) echo "crates/bat-markets-binance/Cargo.toml" ;;
     bat-markets-bybit) echo "crates/bat-markets-bybit/Cargo.toml" ;;
     bat-markets-core) echo "crates/bat-markets-core/Cargo.toml" ;;
+    bat-markets-mexc) echo "crates/bat-markets-mexc/Cargo.toml" ;;
     bat-markets-testing) echo "crates/bat-markets-testing/Cargo.toml" ;;
     *) fail "unknown crate '$1'" ;;
   esac

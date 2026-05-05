@@ -1,3 +1,8 @@
+#![cfg_attr(
+    all(feature = "mexc", not(any(feature = "binance", feature = "bybit"))),
+    allow(dead_code)
+)]
+
 use std::{
     env,
     sync::Arc,
@@ -17,6 +22,8 @@ use bat_markets_core::{
 use bat_markets_binance::BinanceLinearFuturesAdapter;
 #[cfg(feature = "bybit")]
 use bat_markets_bybit::BybitLinearFuturesAdapter;
+#[cfg(feature = "mexc")]
+use bat_markets_mexc::MexcLinearFuturesAdapter;
 
 use crate::{
     diagnostics::SharedStateDiagnostics, runtime, subscriptions::SubscriptionHubs,
@@ -29,6 +36,8 @@ pub(crate) enum AdapterHandle {
     Binance(BinanceLinearFuturesAdapter),
     #[cfg(feature = "bybit")]
     Bybit(BybitLinearFuturesAdapter),
+    #[cfg(feature = "mexc")]
+    Mexc(MexcLinearFuturesAdapter),
 }
 
 impl AdapterHandle {
@@ -38,6 +47,8 @@ impl AdapterHandle {
             Self::Binance(adapter) => adapter,
             #[cfg(feature = "bybit")]
             Self::Bybit(adapter) => adapter,
+            #[cfg(feature = "mexc")]
+            Self::Mexc(adapter) => adapter,
         }
     }
 
@@ -51,6 +62,8 @@ impl AdapterHandle {
             Self::Binance(adapter) => adapter.replace_instruments(instruments),
             #[cfg(feature = "bybit")]
             Self::Bybit(adapter) => adapter.replace_instruments(instruments),
+            #[cfg(feature = "mexc")]
+            Self::Mexc(adapter) => adapter.replace_instruments(instruments),
         }
     }
 
@@ -519,6 +532,21 @@ fn build_adapter_handle(config: BatMarketsConfig) -> Result<AdapterHandle> {
                 ))
             }
         }
+        (Venue::Mexc, Product::LinearUsdt) => {
+            #[cfg(feature = "mexc")]
+            {
+                Ok(AdapterHandle::Mexc(MexcLinearFuturesAdapter::with_config(
+                    config,
+                )))
+            }
+            #[cfg(not(feature = "mexc"))]
+            {
+                Err(MarketError::new(
+                    ErrorKind::Unsupported,
+                    "mexc feature is not enabled",
+                ))
+            }
+        }
     }
 }
 
@@ -531,6 +559,10 @@ fn default_env_auth(venue: Venue) -> AuthConfig {
         Venue::Bybit => AuthConfig::Env {
             api_key_var: "BYBIT_API_KEY".into(),
             api_secret_var: "BYBIT_API_SECRET".into(),
+        },
+        Venue::Mexc => AuthConfig::Env {
+            api_key_var: "MEXC_API_KEY".into(),
+            api_secret_var: "MEXC_API_SECRET".into(),
         },
     }
 }

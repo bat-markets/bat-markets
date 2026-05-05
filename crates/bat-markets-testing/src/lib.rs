@@ -124,6 +124,11 @@ pub fn has_bybit_live_env() -> bool {
 }
 
 #[must_use]
+pub fn has_mexc_live_env() -> bool {
+    std::env::var_os("MEXC_API_KEY").is_some() && std::env::var_os("MEXC_API_SECRET").is_some()
+}
+
+#[must_use]
 pub fn live_test_config(venue: Venue, default_mode: LiveTestEndpointMode) -> BatMarketsConfig {
     let mut config = BatMarketsConfig::new(venue, Product::LinearUsdt);
     config.auth = live_test_auth_config(venue);
@@ -329,6 +334,10 @@ fn live_test_auth_config(venue: Venue) -> AuthConfig {
             api_key_var: "BYBIT_API_KEY".into(),
             api_secret_var: "BYBIT_API_SECRET".into(),
         },
+        Venue::Mexc => AuthConfig::Env {
+            api_key_var: "MEXC_API_KEY".into(),
+            api_secret_var: "MEXC_API_SECRET".into(),
+        },
     }
 }
 
@@ -336,6 +345,7 @@ fn live_test_rest_base_var(venue: Venue) -> &'static str {
     match venue {
         Venue::Binance => "BINANCE_BASE_URL",
         Venue::Bybit => "BYBIT_BASE_URL",
+        Venue::Mexc => "MEXC_BASE_URL",
     }
 }
 
@@ -350,6 +360,11 @@ fn live_test_public_ws_vars(venue: Venue) -> &'static [&'static str] {
             "BYBIT_PUBLIC_WS_BASE_URL",
             "BYBIT_PUBLIC_WS_URL",
             "BYBIT_WS_PUBLIC_URL",
+        ],
+        Venue::Mexc => &[
+            "MEXC_PUBLIC_WS_BASE_URL",
+            "MEXC_PUBLIC_WS_URL",
+            "MEXC_WS_PUBLIC_URL",
         ],
     }
 }
@@ -366,6 +381,11 @@ fn live_test_private_ws_vars(venue: Venue) -> &'static [&'static str] {
             "BYBIT_PRIVATE_WS_URL",
             "BYBIT_WS_PRIVATE_URL",
         ],
+        Venue::Mexc => &[
+            "MEXC_PRIVATE_WS_BASE_URL",
+            "MEXC_PRIVATE_WS_URL",
+            "MEXC_WS_PRIVATE_URL",
+        ],
     }
 }
 
@@ -380,6 +400,11 @@ fn live_test_command_ws_vars(venue: Venue) -> &'static [&'static str] {
             "BYBIT_COMMAND_WS_BASE_URL",
             "BYBIT_COMMAND_WS_URL",
             "BYBIT_WS_COMMAND_URL",
+        ],
+        Venue::Mexc => &[
+            "MEXC_COMMAND_WS_BASE_URL",
+            "MEXC_COMMAND_WS_URL",
+            "MEXC_WS_COMMAND_URL",
         ],
     }
 }
@@ -481,6 +506,7 @@ fn runtime_stub_identity(venue: Venue) -> (InstrumentId, &'static str) {
     match venue {
         Venue::Binance => (InstrumentId::from("BTC/USDT:USDT"), "stub-binance"),
         Venue::Bybit => (InstrumentId::from("BTC/USDT:USDT"), "stub-bybit"),
+        Venue::Mexc => (InstrumentId::from("BTC/USDT:USDT"), "stub-mexc"),
     }
 }
 
@@ -655,6 +681,7 @@ fn runtime_command_ws_response(venue: Venue, payload: &str) -> Option<String> {
     match venue {
         Venue::Binance => runtime_command_ws_response_binance(&value),
         Venue::Bybit => runtime_command_ws_response_bybit(&value),
+        Venue::Mexc => None,
     }
 }
 

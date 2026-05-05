@@ -586,7 +586,7 @@ async fn fetch_ohlcv_window(
         }
 
         match client.venue() {
-            Venue::Binance => {
+            Venue::Binance | Venue::Mexc => {
                 let Some(max_close_time) = interval.close_time_ms(max_open_time) else {
                     return Err(MarketError::new(
                         ErrorKind::DecodeError,

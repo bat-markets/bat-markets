@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 0.3.4 - 2026-05-05
+
+- add the `bat-markets-mexc` USDT-M futures adapter and `Venue::Mexc`
+- wire MEXC REST metadata, public reads, public/private streams, private read snapshots, auth, and rate-limit buckets into the runtime
+- wire MEXC order submit, batch submit, cancel, cancel-all, leverage, margin-mode, and position-mode commands to documented REST endpoints while preserving code notes for endpoints the official docs mark as maintenance
+- add fixture-backed MEXC parser coverage and live harness routing for MEXC credentials
+
 ## 0.3.3 - 2026-05-01
 
 - align Binance public websocket routing with the split market/public mainnet endpoints

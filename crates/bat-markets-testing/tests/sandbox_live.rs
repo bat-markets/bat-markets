@@ -665,6 +665,7 @@ fn sandbox_batch_request(
     let prefix = match venue {
         Venue::Binance => "codex-binance-batch",
         Venue::Bybit => "codex-bybit-batch",
+        Venue::Mexc => "codex-mexc-batch",
     };
 
     CreateOrdersRequest {

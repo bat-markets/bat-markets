@@ -77,11 +77,12 @@ checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 
 [[package]]
 name = "bat-markets"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "bat-markets-binance",
  "bat-markets-bybit",
  "bat-markets-core",
+ "bat-markets-mexc",
  "futures-util",
  "parking_lot",
  "reqwest",
@@ -94,7 +95,7 @@ dependencies = [
 
 [[package]]
 name = "bat-markets-binance"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "bat-markets-core",
  "parking_lot",
@@ -106,7 +107,7 @@ dependencies = [
 
 [[package]]
 name = "bat-markets-bybit"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "bat-markets-core",
  "parking_lot",
@@ -118,7 +119,7 @@ dependencies = [
 
 [[package]]
 name = "bat-markets-core"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "hex",
  "hmac",
@@ -132,8 +133,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "bat-markets-mexc"
+version = "0.3.4"
+dependencies = [
+ "bat-markets-core",
+ "parking_lot",
+ "rust_decimal",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "bat-markets-testing"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "bat-markets",
  "bat-markets-binance",

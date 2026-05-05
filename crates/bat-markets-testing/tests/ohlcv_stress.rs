@@ -288,6 +288,19 @@ async fn exercise_fetch_ohlcv_frontend_window(venue: Venue) -> Result<()> {
                 elapsed.as_millis(),
             );
         }
+        Venue::Mexc => {
+            assert!(
+                total_requests <= 20,
+                "mexc kline requests {total_requests} exceed the documented 20 requests / 2 seconds endpoint budget"
+            );
+            println!(
+                "venue={venue:?} symbols={} candles_per_symbol={} requests={} elapsed_ms={}",
+                plan.symbol_target,
+                plan.expected_candles(),
+                total_requests,
+                elapsed.as_millis(),
+            );
+        }
     }
 
     Ok(())
@@ -486,6 +499,10 @@ async fn build_mainnet_client(venue: Venue) -> Result<BatMarkets> {
         Venue::Bybit => AuthConfig::Env {
             api_key_var: "BYBIT_API_KEY".into(),
             api_secret_var: "BYBIT_API_SECRET".into(),
+        },
+        Venue::Mexc => AuthConfig::Env {
+            api_key_var: "MEXC_API_KEY".into(),
+            api_secret_var: "MEXC_API_SECRET".into(),
         },
     };
 

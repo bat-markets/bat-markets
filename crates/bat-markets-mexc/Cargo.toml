@@ -1,5 +1,5 @@
 [package]
-name = "bat-markets-bybit"
+name = "bat-markets-mexc"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
@@ -7,10 +7,10 @@ license.workspace = true
 homepage.workspace = true
 repository.workspace = true
 rust-version.workspace = true
-description = "Bybit linear USDT futures adapter for bat-markets"
-documentation = "https://docs.rs/bat-markets-bybit"
+description = "MEXC USDT-M linear futures adapter for bat-markets"
+documentation = "https://docs.rs/bat-markets-mexc"
 readme = "../../README.md"
-keywords = ["exchange", "futures", "bybit", "trading"]
+keywords = ["exchange", "futures", "mexc", "trading"]
 categories = ["api-bindings", "finance", "asynchronous"]
 
 [dependencies]

@@ -9,6 +9,7 @@ Published crates:
 - `bat-markets-core`
 - `bat-markets-binance`
 - `bat-markets-bybit`
+- `bat-markets-mexc`
 - `bat-markets`
 
 Workspace-only crate:
@@ -29,7 +30,8 @@ Dependency order:
 1. `bat-markets-core`
 2. `bat-markets-binance`
 3. `bat-markets-bybit`
-4. `bat-markets`
+4. `bat-markets-mexc`
+5. `bat-markets`
 
 ## Local Release Gate
 

@@ -7,24 +7,26 @@ license.workspace = true
 homepage.workspace = true
 repository.workspace = true
 rust-version.workspace = true
-description = "Futures-first headless Rust exchange engine with honest Binance/Bybit linear futures support"
+description = "Futures-first headless Rust exchange engine with honest Binance/Bybit/MEXC linear futures support"
 documentation = "https://docs.rs/bat-markets"
 readme = "../../README.md"
 keywords = ["exchange", "futures", "binance", "bybit", "trading"]
 categories = ["api-bindings", "finance", "asynchronous"]
 
 [features]
-default = ["binance", "bybit", "private-trading"]
+default = ["binance", "bybit", "mexc", "private-trading"]
 binance = ["dep:bat-markets-binance"]
 bybit = ["dep:bat-markets-bybit"]
+mexc = ["dep:bat-markets-mexc"]
 private-trading = []
 metrics = []
 serde = []
 
 [dependencies]
-bat-markets-binance = { path = "../bat-markets-binance", version = "0.3.3", optional = true }
-bat-markets-bybit = { path = "../bat-markets-bybit", version = "0.3.3", optional = true }
-bat-markets-core = { path = "../bat-markets-core", version = "0.3.3" }
+bat-markets-binance = { path = "../bat-markets-binance", version = "0.3.4", optional = true }
+bat-markets-bybit = { path = "../bat-markets-bybit", version = "0.3.4", optional = true }
+bat-markets-core = { path = "../bat-markets-core", version = "0.3.4" }
+bat-markets-mexc = { path = "../bat-markets-mexc", version = "0.3.4", optional = true }
 futures-util.workspace = true
 parking_lot.workspace = true
 reqwest.workspace = true

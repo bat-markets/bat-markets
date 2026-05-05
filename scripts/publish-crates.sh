@@ -74,6 +74,7 @@ publish_order=(
   bat-markets-core
   bat-markets-binance
   bat-markets-bybit
+  bat-markets-mexc
   bat-markets
 )
 
