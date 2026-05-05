@@ -96,7 +96,8 @@ impl MexcLinearFuturesAdapter {
         let response = serde_json::from_str::<native::RestResponse<Value>>(payload)
             .map_err(|error| decode_message(format!("failed to parse mexc ticker: {error}")))?;
         ensure_success(response.success, response.code, response.message.as_deref())?;
-        let data = find_symbol_object(response.data, spec.native_symbol.as_ref())?;
+        let wire_symbol = mexc_wire_symbol(spec);
+        let data = find_symbol_object(response.data, &wire_symbol)?;
         let ticker = serde_json::from_value::<native::TickerData>(data).map_err(|error| {
             decode_message(format!("failed to decode mexc ticker data: {error}"))
         })?;
@@ -122,9 +123,10 @@ impl MexcLinearFuturesAdapter {
             .into_iter()
             .filter_map(|item| {
                 let ticker = serde_json::from_value::<native::TickerData>(item).ok()?;
+                let symbol = mexc_canonical_native_symbol(&ticker.symbol);
                 let spec = specs
                     .iter()
-                    .find(|spec| spec.native_symbol.as_ref() == ticker.symbol.as_str())?;
+                    .find(|spec| spec.native_symbol.as_ref() == symbol.as_str())?;
                 Some(ticker_to_unified(ticker, spec))
             })
             .collect()
@@ -259,7 +261,8 @@ impl MexcLinearFuturesAdapter {
                 ))
             })?;
         ensure_success(response.success, response.code, response.message.as_deref())?;
-        let data = find_symbol_object(response.data, spec.native_symbol.as_ref())?;
+        let wire_symbol = mexc_wire_symbol(spec);
+        let data = find_symbol_object(response.data, &wire_symbol)?;
         let ticker = serde_json::from_value::<native::TickerData>(data).map_err(|error| {
             decode_message(format!(
                 "failed to decode mexc open interest ticker data: {error}"
@@ -522,7 +525,14 @@ impl VenueAdapter for MexcLinearFuturesAdapter {
     }
 
     fn resolve_native_symbol(&self, native_symbol: &str) -> Option<InstrumentSpec> {
-        self.instruments.read().by_native_symbol(native_symbol)
+        self.instruments
+            .read()
+            .by_native_symbol(native_symbol)
+            .or_else(|| {
+                self.instruments
+                    .read()
+                    .by_native_symbol(&mexc_canonical_native_symbol(native_symbol))
+            })
     }
 
     fn parse_public(&self, payload: &str) -> Result<Vec<PublicLaneEvent>> {
@@ -780,7 +790,7 @@ fn contract_to_spec(contract: native::ContractInfo) -> Result<InstrumentSpec> {
             &contract.settle_coin,
         )
         .into(),
-        native_symbol: contract.symbol.into(),
+        native_symbol: mexc_canonical_native_symbol(&contract.symbol).into(),
         base: AssetCode::from(contract.base_coin),
         quote: AssetCode::from(contract.quote_coin),
         settle: AssetCode::from(contract.settle_coin),
@@ -1013,6 +1023,19 @@ fn find_symbol_object(data: Value, native_symbol: &str) -> Result<Value> {
             });
     }
     Ok(data)
+}
+
+fn mexc_canonical_native_symbol(symbol: &str) -> String {
+    symbol
+        .trim()
+        .chars()
+        .filter(|value| *value != '_' && *value != '-')
+        .collect::<String>()
+        .to_ascii_uppercase()
+}
+
+fn mexc_wire_symbol(spec: &InstrumentSpec) -> String {
+    format!("{}_{}", spec.base.as_ref(), spec.quote.as_ref())
 }
 
 fn parse_kline_interval(raw: &str) -> Result<KlineInterval> {
@@ -1259,14 +1282,13 @@ fn fixture_spec(
     step: &str,
     leverage: i64,
 ) -> InstrumentSpec {
-    let native = format!("{base}_USDT");
     InstrumentSpec {
         venue: Venue::Mexc,
         product: Product::LinearUsdt,
         market_type: MarketType::LinearPerpetual,
         instrument_id: InstrumentId::from(canonical_symbol(base, "USDT", "USDT")),
         canonical_symbol: canonical_symbol(base, "USDT", "USDT").into(),
-        native_symbol: native.into(),
+        native_symbol: format!("{base}USDT").into(),
         base: AssetCode::from(base),
         quote: AssetCode::from("USDT"),
         settle: AssetCode::from("USDT"),
@@ -1328,10 +1350,12 @@ mod tests {
         let specs = adapter
             .parse_metadata_snapshot(CONTRACT_DETAIL)
             .unwrap_or_else(|error| panic!("mexc metadata should parse: {error}"));
-        assert_eq!(specs[0].native_symbol.as_ref(), "BTC_USDT");
+        assert_eq!(specs[0].native_symbol.as_ref(), "BTCUSDT");
         assert_eq!(specs[0].instrument_id.as_ref(), "BTC/USDT:USDT");
         assert_eq!(specs[0].tick_size.to_string(), "0.1");
         assert!(!specs[0].support.private_trading);
+        assert!(adapter.resolve_native_symbol("BTCUSDT").is_some());
+        assert!(adapter.resolve_native_symbol("BTC_USDT").is_some());
     }
 
     #[test]

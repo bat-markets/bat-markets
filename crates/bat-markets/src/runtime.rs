@@ -4129,10 +4129,11 @@ pub(crate) async fn refresh_open_interest(
             }
             #[cfg(feature = "mexc")]
             AdapterHandle::Mexc(adapter) => {
+                let symbol = mexc_wire_symbol(&spec);
                 let payload = public_get_with_retry(
                     context,
                     "/api/v1/contract/ticker",
-                    &[("symbol", spec.native_symbol.as_ref())],
+                    &[("symbol", symbol.as_str())],
                     "mexc.open_interest",
                 )
                 .await?;
@@ -4213,10 +4214,11 @@ pub(crate) async fn fetch_ticker(
             }
             #[cfg(feature = "mexc")]
             AdapterHandle::Mexc(adapter) => {
+                let symbol = mexc_wire_symbol(&spec);
                 let payload = public_get_with_retry(
                     context,
                     "/api/v1/contract/ticker",
-                    &[("symbol", spec.native_symbol.as_ref())],
+                    &[("symbol", symbol.as_str())],
                     "mexc.fetch_ticker",
                 )
                 .await?;
@@ -4517,10 +4519,11 @@ pub(crate) async fn fetch_funding_rate(
             }
             #[cfg(feature = "mexc")]
             AdapterHandle::Mexc(adapter) => {
+                let symbol = mexc_wire_symbol(&spec);
                 let payload = public_get_with_retry(
                     context,
                     "/api/v1/contract/funding_rate",
-                    &[("symbol", spec.native_symbol.as_ref())],
+                    &[("symbol", symbol.as_str())],
                     "mexc.fetch_funding_rate",
                 )
                 .await?;
@@ -4589,7 +4592,7 @@ pub(crate) async fn fetch_trades(
                 if let Some(limit) = &limit_string {
                     query.push(("limit", limit.as_str()));
                 }
-                let path = format!("/api/v1/contract/deals/{}", spec.native_symbol);
+                let path = format!("/api/v1/contract/deals/{}", mexc_wire_symbol(&spec));
                 let payload =
                     public_get_with_retry(context, &path, &query, "mexc.fetch_trades").await?;
                 adapter.parse_trades_snapshot(&payload, &spec)?
@@ -4823,7 +4826,7 @@ pub(crate) async fn fetch_order_book(
                 if let Some(limit) = &limit_string {
                     query.push(("limit", limit.as_str()));
                 }
-                let path = format!("/api/v1/contract/depth/{}", spec.native_symbol);
+                let path = format!("/api/v1/contract/depth/{}", mexc_wire_symbol(&spec));
                 let payload =
                     public_get_with_retry(context, &path, &query, "mexc.fetch_order_book").await?;
                 adapter.parse_order_book_snapshot(&payload, &spec)?
@@ -4941,7 +4944,7 @@ async fn fetch_ohlcv_single(
                     .iter()
                     .map(|(key, value)| (key.as_str(), value.as_str()))
                     .collect::<Vec<_>>();
-                let path = format!("/api/v1/contract/kline/{}", spec.native_symbol);
+                let path = format!("/api/v1/contract/kline/{}", mexc_wire_symbol(&spec));
                 let payload =
                     public_get_with_retry(context, &path, &query, "mexc.fetch_ohlcv").await?;
                 adapter.parse_ohlcv_snapshot(&payload, request)?
@@ -5798,14 +5801,15 @@ fn mexc_public_subscribe_frames(
     let mut frames = Vec::new();
     for instrument_id in &subscription.instrument_ids {
         let spec = require_spec(context, instrument_id)?;
+        let symbol = mexc_wire_symbol(&spec);
         if subscription.ticker || subscription.mark_price || subscription.funding_rate {
-            frames.push(json!({"method":"sub.ticker","param":{"symbol": spec.native_symbol}}));
+            frames.push(json!({"method":"sub.ticker","param":{"symbol": symbol.as_str()}}));
         }
         if subscription.trades {
-            frames.push(json!({"method":"sub.deal","param":{"symbol": spec.native_symbol}}));
+            frames.push(json!({"method":"sub.deal","param":{"symbol": symbol.as_str()}}));
         }
         if subscription.book_top || subscription.order_book {
-            frames.push(json!({"method":"sub.depth","param":{"symbol": spec.native_symbol}}));
+            frames.push(json!({"method":"sub.depth","param":{"symbol": symbol.as_str()}}));
         }
         for interval_value in &subscription.kline_intervals {
             let interval = parse_kline_interval(
@@ -5815,7 +5819,7 @@ fn mexc_public_subscribe_frames(
             )?;
             frames.push(json!({
                 "method":"sub.kline",
-                "param":{"symbol": spec.native_symbol, "interval": mexc_interval_str(interval)?}
+                "param":{"symbol": symbol.as_str(), "interval": mexc_interval_str(interval)?}
             }));
         }
     }
@@ -6242,6 +6246,11 @@ fn parse_kline_interval(raw: &str, venue: Venue, operation: &str) -> Result<Klin
         .with_venue(venue, Product::LinearUsdt)
         .with_operation(operation)
     })
+}
+
+#[cfg(feature = "mexc")]
+fn mexc_wire_symbol(spec: &InstrumentSpec) -> String {
+    format!("{}_{}", spec.base.as_ref(), spec.quote.as_ref())
 }
 
 #[cfg(feature = "mexc")]
@@ -7079,10 +7088,7 @@ fn build_mexc_create_order_object(
     }
 
     let mut body = serde_json::Map::new();
-    body.insert(
-        "symbol".to_owned(),
-        Value::String(spec.native_symbol.to_string()),
-    );
+    body.insert("symbol".to_owned(), Value::String(mexc_wire_symbol(&spec)));
     if let Some(price) = request.price {
         body.insert("price".to_owned(), Value::String(format_price(price)));
     } else if request.order_type != OrderType::Market {
@@ -7326,13 +7332,13 @@ fn mexc_change_leverage_bodies(
         json!({
             "openType": open_type,
             "leverage": leverage.clone(),
-            "symbol": spec.native_symbol,
+            "symbol": mexc_wire_symbol(&spec),
             "positionType": 1,
         }),
         json!({
             "openType": open_type,
             "leverage": leverage,
-            "symbol": spec.native_symbol,
+            "symbol": mexc_wire_symbol(&spec),
             "positionType": 2,
         }),
     ])
