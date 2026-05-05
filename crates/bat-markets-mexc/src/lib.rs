@@ -549,15 +549,17 @@ impl VenueAdapter for MexcLinearFuturesAdapter {
                     .collect()
             }
             "push.deal" => {
-                let deal =
-                    serde_json::from_value::<native::DealData>(envelope.data).map_err(|error| {
-                        decode_message(format!("failed to decode mexc deal ws: {error}"))
-                    })?;
                 let symbol = envelope.symbol.as_deref().ok_or_else(|| {
                     decode_message("mexc deal websocket payload missing symbol".to_owned())
                 })?;
                 let spec = require_native_symbol(self, symbol)?;
-                Ok(vec![PublicLaneEvent::Trade(fast_trade(deal, &spec, 0)?)])
+                decode_mexc_ws_deals(envelope.data)?
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, deal)| {
+                        Ok(PublicLaneEvent::Trade(fast_trade(deal, &spec, index)?))
+                    })
+                    .collect()
             }
             "push.depth" | "push.depth.full" => {
                 let depth = serde_json::from_value::<native::DepthData>(envelope.data).map_err(
@@ -916,6 +918,18 @@ fn fast_trade(deal: native::DealData, spec: &InstrumentSpec, index: usize) -> Re
         aggressor_side: trade.aggressor_side,
         event_time: trade.event_time,
     })
+}
+
+fn decode_mexc_ws_deals(value: Value) -> Result<Vec<native::DealData>> {
+    if value.is_array() {
+        serde_json::from_value::<Vec<native::DealData>>(value).map_err(|error| {
+            decode_message(format!("failed to decode mexc deal ws array: {error}"))
+        })
+    } else {
+        serde_json::from_value::<native::DealData>(value)
+            .map(|deal| vec![deal])
+            .map_err(|error| decode_message(format!("failed to decode mexc deal ws: {error}")))
+    }
 }
 
 fn fast_kline(kline: native::KlineData, spec: &InstrumentSpec) -> Result<FastKline> {
@@ -1303,6 +1317,7 @@ mod tests {
 
     const CONTRACT_DETAIL: &str = include_str!("../../../fixtures/mexc/contract_detail.json");
     const PUBLIC_TICKER: &str = include_str!("../../../fixtures/mexc/public_ticker.json");
+    const PUBLIC_DEAL: &str = include_str!("../../../fixtures/mexc/public_deal.json");
     const PUBLIC_DEPTH: &str = include_str!("../../../fixtures/mexc/public_depth.json");
     const PUBLIC_KLINE: &str = include_str!("../../../fixtures/mexc/public_kline.json");
     const PRIVATE_ORDER: &str = include_str!("../../../fixtures/mexc/private_order.json");
@@ -1361,6 +1376,20 @@ mod tests {
             .parse_open_interest_snapshot(payload, &spec)
             .unwrap_or_else(|error| panic!("mexc open interest should parse: {error}"));
         assert_eq!(open_interest.value.value(), Decimal::new(4321, 0));
+    }
+
+    #[test]
+    fn parse_mexc_public_deal_ws_array() {
+        let adapter = MexcLinearFuturesAdapter::new();
+        let events = adapter
+            .parse_public(PUBLIC_DEAL)
+            .unwrap_or_else(|error| panic!("mexc deal should parse: {error}"));
+        let PublicLaneEvent::Trade(trade) = &events[0] else {
+            panic!("expected trade");
+        };
+        assert_eq!(trade.instrument_id.as_ref(), "BTC/USDT:USDT");
+        assert_eq!(trade.price.value(), 8104690);
+        assert_eq!(trade.quantity.value(), 2);
     }
 
     #[test]
