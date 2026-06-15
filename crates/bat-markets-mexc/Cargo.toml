@@ -14,7 +14,7 @@ keywords = ["exchange", "futures", "mexc", "trading"]
 categories = ["api-bindings", "finance", "asynchronous"]
 
 [dependencies]
-bat-markets-core = { path = "../bat-markets-core", version = "0.3.4" }
+bat-markets-core = { path = "../bat-markets-core", version = "0.3.5" }
 parking_lot.workspace = true
 rust_decimal.workspace = true
 serde.workspace = true

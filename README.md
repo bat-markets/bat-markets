@@ -15,14 +15,14 @@ Headless Rust exchange engine for Binance USD-M, Bybit USDT, and MEXC USDT-M lin
 
 ```toml
 [dependencies]
-bat-markets = "0.3.4"
+bat-markets = "0.3.5"
 ```
 
 Single-venue build:
 
 ```toml
 [dependencies]
-bat-markets = { version = "0.3.4", default-features = false, features = ["binance"] }
+bat-markets = { version = "0.3.5", default-features = false, features = ["binance"] }
 ```
 
 Feature flags:

@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 0.3.5 - 2026-06-15
+
+- accept MEXC public deal websocket payloads that send arrays of trades
+- canonicalize MEXC native symbols internally while preserving underscore-separated wire symbols for REST and websocket requests
+
 ## 0.3.4 - 2026-05-05
 
 - add the `bat-markets-mexc` USDT-M futures adapter and `Venue::Mexc`

@@ -23,10 +23,10 @@ metrics = []
 serde = []
 
 [dependencies]
-bat-markets-binance = { path = "../bat-markets-binance", version = "0.3.4", optional = true }
-bat-markets-bybit = { path = "../bat-markets-bybit", version = "0.3.4", optional = true }
-bat-markets-core = { path = "../bat-markets-core", version = "0.3.4" }
-bat-markets-mexc = { path = "../bat-markets-mexc", version = "0.3.4", optional = true }
+bat-markets-binance = { path = "../bat-markets-binance", version = "0.3.5", optional = true }
+bat-markets-bybit = { path = "../bat-markets-bybit", version = "0.3.5", optional = true }
+bat-markets-core = { path = "../bat-markets-core", version = "0.3.5" }
+bat-markets-mexc = { path = "../bat-markets-mexc", version = "0.3.5", optional = true }
 futures-util.workspace = true
 parking_lot.workspace = true
 reqwest.workspace = true
